@@ -21,6 +21,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifndef ESP_VFS_FLAG_STATIC
+#define ESP_VFS_FLAG_STATIC 0
+#endif
+
 #define LFSV_BLOCK     4096
 #define LFSV_CACHE     256
 #define LFSV_LOOKAHEAD 32
