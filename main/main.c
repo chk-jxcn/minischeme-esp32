@@ -1277,7 +1277,9 @@ static void heapmap_owners(HeapOwners *o) {
         snprintf(s_heapmap_labels[2 * i], sizeof(s_heapmap_labels[0]), "stack %s (%u left)", HEAPMAP_TASKS[i],
                  (unsigned)uxTaskGetStackHighWaterMark(t));
         snprintf(s_heapmap_labels[2 * i + 1], sizeof(s_heapmap_labels[0]), "tcb %s", HEAPMAP_TASKS[i]);
-        heapmap_owner(xTaskGetStackStart(t), s_heapmap_labels[2 * i], o);
+#if (defined(INCLUDE_pxTaskGetStackStart) && INCLUDE_pxTaskGetStackStart == 1) || (defined(configUSE_TRACE_FACILITY) && configUSE_TRACE_FACILITY == 1)
+        heapmap_owner(pxTaskGetStackStart(t), s_heapmap_labels[2 * i], o);
+#endif
         heapmap_owner(t, s_heapmap_labels[2 * i + 1], o);
     }
 }
