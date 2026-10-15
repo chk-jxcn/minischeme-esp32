@@ -1,0 +1,57 @@
+idf_component_register(
+    SRCS
+        "src/minischeme.c"
+        "src/minischeme_vm.c"
+        "src/minischeme_gc.c"
+        "src/minischeme_prim.c"
+        "src/minischeme_fasl.c"
+        "src/minischeme_math.c"
+        "src/minischeme_lib.c"
+        "src/minischeme_bigint.c"
+        "src/minischeme_cfasl.c"
+        "src/minischeme_gui.c"
+        "src/minischeme_fonts.c"
+        "src/minischeme_fontreg.c"
+        "src/minischeme_fontrom.c"
+        "src/minischeme_mirror.c"
+        "src/minischeme_ili9488.c"
+        "src/minischeme_help.c"
+        "src/minischeme_device.c"
+        "src/minischeme_jsonfeed.c"
+        "src/minischeme_api.c"
+        "src/minischeme_market.c"
+        "src/minischeme_crypto.c"
+        "src/minischeme_channel.c"
+        "src/minischeme_image.c"
+    INCLUDE_DIRS
+        "include"
+        "."
+    REQUIRES
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_uart
+        esp_adc
+        driver
+        esp_timer
+        esp_rom
+        freertos
+        nvs_flash
+        esp_system
+        lfsvfs
+        esp_wifi
+        esp_http_server
+        esp_http_client
+        mbedtls
+        esp_lcd
+        app_update
+        bootloader_support
+        spi_flash
+        esp_partition
+        esp_netif
+        esp_event
+        lwip
+        soc
+)
+
+target_compile_options(${COMPONENT_LIB} PRIVATE -fno-tree-loop-distribute-patterns)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE MINISCHEME_NO_HELP)

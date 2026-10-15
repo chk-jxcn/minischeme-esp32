@@ -1,0 +1,31 @@
+name: MiniScheme ESP32 Firmware CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-esp32:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Build firmware with ESP-IDF Docker
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.3
+        target: esp32
+        path: '.'
+
+    - name: Upload Binary Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: minischeme-esp32-binaries
+        path: |
+          build/bootloader/bootloader.bin
+          build/partition_table/partition-table.bin
+          build/minischeme_esp32.bin

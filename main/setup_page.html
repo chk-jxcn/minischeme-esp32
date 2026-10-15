@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设备</title>
+<style>
+:root{--bg:#0b1118;--card:#121b26;--line:#2a3a4d;--text:#e6ecf3;--muted:#93a4b8;--accent:#62d0f0;--ok:#72d696;--warn:#f0bc55;--bad:#ee7c7c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:720px;margin:0 auto;padding:12px 16px 40px}
+h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:0 0 10px;color:var(--accent)}h3{font-size:14px;margin:14px 0 6px;color:var(--muted);font-weight:600}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}
+label{display:block;color:var(--muted);font-size:13px;margin:8px 0 3px}
+input,select,textarea{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:#0e151e;color:var(--text);font:inherit}
+input[type=checkbox]{width:auto;margin-right:6px;vertical-align:middle}
+textarea{font:13px/1.45 ui-monospace,Consolas,monospace;min-height:150px}
+button{padding:7px 13px;border-radius:6px;border:1px solid var(--accent);background:#173f52;color:var(--text);font:inherit;cursor:pointer;margin:8px 8px 0 0}
+button.plain{border-color:var(--line);background:transparent}
+.row{display:flex;gap:8px;align-items:flex-end}.row>*{flex:1}.row>button{flex:none}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:2px 10px;font-size:14px}.kv b{font-weight:normal;color:var(--muted)}
+.app{border-top:1px solid var(--line);padding:10px 0}.app:first-of-type{border-top:0}
+.app .name{font-weight:600}.desc{color:var(--muted);font-size:13px}
+.form{border-left:2px solid var(--line);padding:2px 0 6px 12px;margin-top:8px}
+.help{color:var(--muted);font-size:12px;margin-top:2px}
+.cfgrow{display:grid;grid-template-columns:minmax(7em,38%) 1fr;gap:8px;align-items:center;margin:4px 0}
+.cfgrow label{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfgrow[title]{cursor:help}.cfgrow[title] label{text-decoration:underline dotted;text-underline-offset:3px}
+.tag{display:inline-block;font-size:12px;padding:0 6px;border-radius:4px;border:1px solid var(--ok);color:var(--ok);margin-left:6px}
+.bar{height:6px;border-radius:3px;background:#2a3a4d;margin:3px 0 2px;overflow:hidden}.bar>i{display:block;height:100%;background:var(--accent)}
+#msg{position:sticky;top:52px;display:none;padding:8px 12px;border-radius:6px;margin:8px 0;background:#173f52;z-index:2}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.tag.warn{border-color:var(--warn)}.tag.bad{border-color:var(--bad)}.tag.muted{border-color:var(--line);color:var(--muted)}
+details summary{cursor:pointer;color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:13px}td{padding:2px 6px 2px 0;border-bottom:1px solid #1b2836}
+header{position:sticky;top:0;z-index:3;background:var(--bg);border-bottom:1px solid var(--line)}
+header .in{max-width:720px;margin:0 auto;padding:8px 16px 0;display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
+header .name{font-size:17px;font-weight:600;padding-bottom:8px}
+.tabs{display:flex;gap:4px}
+.tabs button{margin:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:8px 12px}
+.tabs button.on{color:var(--text);border-bottom-color:var(--accent)}
+#appframe{display:block;width:100%;max-width:752px;margin:0 auto;border:0;min-height:300px;background:var(--bg)}
+button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
+.pane{display:none}
+.app .name button{float:right}
+</style>
+</head>
+<body>
+<header><div class="in">
+<span class="name" id="devname"></span>
+<nav class="tabs">
+<button id="tab-app" style="display:none" onclick="showTab('app')"></button>
+<button id="tab-manage" onclick="showTab('manage')">应用管理</button>
+<button id="tab-config" onclick="showTab('config')">应用配置</button>
+<button id="tab-system" onclick="showTab('system')">系统配置</button>
+<button id="tab-info" onclick="showTab('info')">系统信息</button>
+</nav>
+</div></header>
+<iframe id="appframe" title="应用网页" style="display:none" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+<main>
+<div id="msg"></div>
+
+<div id="pane-manage" class="pane">
+<section>
+<div id="mmode" class="desc"></div>
+</section>
+<section>
+<h2>应用市场 <button class="plain small" onclick="market('refresh')">刷新</button></h2>
+<div id="mstate" class="desc">点“刷新”读取市场</div>
+<div id="mlist"></div>
+</section>
+<section>
+<h2>已安装的应用</h2>
+<div class="desc">市场安装的应用在 /spiffs/apps/&lt;id&gt;/，自己上传的在 /spiffs/user/&lt;id&gt;/：同名的应用可以各装一份。每个应用只能读写自己的目录。</div>
+<div id="installed">读取中...</div>
+</section>
+<section id="uploadbox" style="display:none">
+<h2>上传应用</h2>
+<div class="desc">选择编译好的 .msbc 应用镜像（tools/build_apps.py 或 WebREPL 生成），安装到 /spiffs/user/&lt;id&gt;/，不受应用市场管理。</div>
+<input type="file" id="upfile" accept=".msbc">
+<button onclick="uploadApp()">上传并安装</button>
+</section>
+</div>
+
+<div id="pane-config" class="pane">
+<section>
+<h2 id="runhead">正在运行的应用</h2>
+<div id="runcfg">读取中...</div>
+</section>
+<section>
+<h2>其他应用</h2>
+<div class="desc">点“配置”后才读取应用的配置项和配置文件。保存后，应用下次启动时生效。</div>
+<div id="othercfg"></div>
+</section>
+</div>
+
+<div id="pane-system" class="pane">
+<section>
+<h2>WiFi</h2>
+<div class="row">
+<div><label for="ssid">网络名称 (SSID)</label><input id="ssid" list="nets" autocomplete="off"><datalist id="nets"></datalist></div>
+<button class="plain" onclick="scan()">扫描</button>
+</div>
+<label for="pass">密码（留空则保持原密码）</label>
+<input id="pass" type="password" autocomplete="new-password">
+<button onclick="saveWifi()">保存并连接</button>
+<div id="scanout" class="desc"></div>
+</section>
+
+<section>
+<h2>常用设置</h2>
+<label for="device">设备名称（网页标题）</label>
+<input id="device" maxlength="23">
+<label for="boot">启动应用（重启后生效）</label>
+<select id="boot"></select>
+<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取）</label>
+<input id="proxy" placeholder="http://电脑IP:8087">
+<label><input type="checkbox" id="pvia"> 经协议转换服务器加密传输（应用的 https:// 数据也由它取）</label>
+<label for="hproxy">HTTPS 转换地址（不加密时，应用请求 https:// 经它的 /fetch 转成 http；留空用应用代理）</label>
+<input id="hproxy" placeholder="http://电脑IP:8087">
+<label for="murl">应用市场地址（留空：应用代理的 /market）</label>
+<input id="murl" placeholder="http://电脑IP:8087/market">
+<label><input type="checkbox" id="mvia"> 经协议转换服务器加密传输</label>
+<label for="chsrv">协议转换服务器（加密通道：AES-256-GCM，每台设备一个密钥；http://服务器:8087 或 tcp://服务器:8089；重启后生效）</label>
+<input id="chsrv" placeholder="http://服务器:8087">
+<div class="row">
+<div><label for="chid">设备 ID</label><input id="chid" maxlength="64" placeholder="desk-1"></div>
+<div><label for="chkey">设备密钥（64 位十六进制，留空则保持原密钥）</label><input id="chkey" type="password" autocomplete="new-password"></div>
+</div>
+<div class="desc" id="chstate"></div>
+<label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
+<label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
+<label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
+<div class="desc" style="margin-top:10px">按键时间（毫秒，留空用默认值，保存后立即生效）：短长按和中长按交给应用；长长按打开硬件信息页，在硬件信息页上中长按进入系统设置。<span id="btnnow"></span></div>
+<label for="blong">短长按（默认 800，300–3000）</label>
+<input id="blong" type="number" min="300" max="3000" step="100" placeholder="800">
+<label for="bmid">中长按（默认 3500，至少比短长按多 500，最多 15000）</label>
+<input id="bmid" type="number" min="800" max="15000" step="100" placeholder="3500">
+<label for="bhold">长长按（默认 8000，至少比中长按多 1000，最多 30000）</label>
+<input id="bhold" type="number" min="1800" max="30000" step="100" placeholder="8000">
+<button onclick="saveCommon()">保存</button>
+<button class="plain" onclick="saveCommon(true)">保存并重启</button>
+</section>
+
+<section>
+<h2>全部配置 <button class="plain small" onclick="loadAllConfig()">重新读取</button></h2>
+<div class="desc">config.ini 中的每一项，按分节列出；鼠标停在一项上显示它的说明（来自文件里的注释）。显示、内存等大部分设置在重启后生效。</div>
+<div id="allcfg">读取中...</div>
+</section>
+
+<section>
+<details><summary>编辑 config.ini 原文件</summary>
+<textarea id="cfg" spellcheck="false"></textarea>
+<button onclick="loadText('/spiffs/config.ini','cfg')" class="plain">重新读取</button>
+<button onclick="saveText('/spiffs/config.ini','cfg')">保存</button>
+</details>
+</section>
+
+<section>
+<h2>设备</h2>
+<button onclick="restart()">重启并运行启动应用</button>
+</section>
+</div>
+
+<div id="pane-info" class="pane">
+<section>
+<h2>状态</h2>
+<div class="kv" id="status">读取中...</div>
+</section>
+<section>
+<h2>硬件 <button class="plain small" onclick="loadHardware()">刷新</button></h2>
+<div id="hw">读取中...</div>
+</section>
+</div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let state = {}, apps = [], marketApps = [];
+
+function say(text, cls) {
+  const m = $('msg');
+  m.textContent = text;
+  m.className = cls || '';
+  m.style.display = 'block';
+  clearTimeout(say.t);
+  say.t = setTimeout(() => m.style.display = 'none', 5000);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  try { return JSON.parse(text); } catch (e) { return {success: r.ok, text}; }
+}
+
+function form(obj) {
+  return Object.entries(obj).map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+}
+
+async function post(fields) {
+  const r = await api('/api/settings', {method: 'POST', body: form(fields),
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'}});
+  if (!r.success) throw new Error(r.error || '保存失败');
+  return r;
+}
+
+async function apiPost(path, body) {
+  const r = await api(path, {method: 'POST', body: body == null ? '' : body});
+  if (r.success === false) throw new Error(r.error || '操作失败');
+  return r;
+}
+
+function rel(p) { return p && p.startsWith('/spiffs/') ? p.slice(8) : p; }
+function kb(n) { return n == null ? '-' : n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(1) + ' KB'; }
+function bar(used, total) { return total ? `<div class="bar"><i style="width:${Math.min(100, used * 100 / total).toFixed(1)}%"></i></div>` : ''; }
+function dur(s) { s = Math.floor(s); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + ' 天 ' : '') + h + ' 小时 ' + m + ' 分'; }
+const on = v => /^(1|true|yes|on)$/i.test(v || '');
+
+/* INI as the firmware reads it (mini_device_config_value): the value ends at
+ * the first ; or #. Sections: {name: [{key, value, comment}]} */
+function parseIni(text) {
+  const out = {};
+  let sec = '', last = null;
+  for (const raw of String(text || '').split('\n')) {
+    const t = raw.replace(/\r$/, '').trim();
+    if (!t) { last = null; continue; }
+    if (t[0] === ';' || t[0] === '#') {   /* a comment line under a key continues its help */
+      if (last && (/^\s+[;#]/.test(raw) || /^;\s{2,}/.test(t))) last.comment += ' ' + t.slice(1).trim();
+      continue;
+    }
+    const m = t.match(/^\[(.+)\]$/);
+    if (m) { sec = m[1].trim(); out[sec] = out[sec] || []; last = null; continue; }
+    const eq = t.indexOf('=');
+    if (eq < 0) continue;
+    const rest = t.slice(eq + 1), c = rest.search(/[;#]/);
+    last = {key: t.slice(0, eq).trim(), value: (c >= 0 ? rest.slice(0, c) : rest).trim(),
+            comment: c >= 0 ? rest.slice(c + 1).trim() : ''};
+    (out[sec] = out[sec] || []).push(last);
+  }
+  return out;
+}
+
+function iniValues(text) {
+  const v = {};
+  for (const items of Object.values(parseIni(text))) for (const it of items) if (!(it.key in v)) v[it.key] = it.value;
+  return v;
+}
+
+/* key = value in [section], the comment kept (at column 23, as the firmware
+ * writes it); a missing key is added to the end of its section */
+function iniSet(text, section, key, value) {
+  const lines = String(text || '').split('\n');
+  let sec = '', last = -1, found = false;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    const m = t.match(/^\[(.+)\]$/);
+    if (m) { sec = m[1].trim(); continue; }
+    if (sec === section && t) last = i;
+    if (!t || t[0] === ';' || t[0] === '#') continue;
+    const eq = lines[i].indexOf('=');
+    if (eq < 0 || lines[i].slice(0, eq).trim() !== key) continue;
+    const rest = lines[i].slice(eq + 1), c = rest.search(/[;#]/);
+    const head = key + ' = ' + value;
+    lines[i] = c < 0 ? head : (head.length < 23 ? head.padEnd(23) : head + ' ') + rest.slice(c).trim();
+    found = true;
+    break;
+  }
+  if (!found) {
+    if (last >= 0) lines.splice(last + 1, 0, key + ' = ' + value);
+    else lines.push('[' + section + ']', key + ' = ' + value);
+  }
+  return lines.join('\n');
+}
+
+/* The app's settings: [config] keys in order, shown as [fields] describes
+ * them ("type | label | help"; types text, number:min-max, bool,
+ * select:value=label,...) */
+function appFields(meta) {
+  const ini = parseIni(meta), desc = {};
+  for (const f of ini.fields || []) {
+    const [type, label, help] = (f.value + '||').split('|').map(x => x.trim());
+    desc[f.key] = {type: type || 'text', label, help};
+  }
+  return (ini.config || []).map(c => Object.assign({key: c.key, def: c.value, type: 'text', label: c.key, help: c.comment},
+                                                   desc[c.key] || {}));
+}
+
+function fieldHtml(p, f, value) {
+  const id = `${p}_${f.key}`;
+  if (f.type === 'bool') {
+    return `<label><input type="checkbox" id="${id}"${on(value) ? ' checked' : ''}>${esc(f.label)}</label>` +
+      (f.help ? `<div class="help">${esc(f.help)}</div>` : '');
+  }
+  let input;
+  if (f.type.startsWith('select:')) {
+    const opts = f.type.slice(7).split(',').map(o => o.split('='));
+    if (!opts.some(([v]) => v === value)) opts.unshift([value, value]);
+    input = `<select id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}"${v === value ? ' selected' : ''}>${esc(l || v)}</option>`).join('')}</select>`;
+  } else if (f.type.startsWith('number')) {
+    const [lo, hi] = (f.type.split(':')[1] || '').split('-');
+    input = `<input type="number" id="${id}" value="${esc(value)}"${lo ? ` min="${lo}"` : ''}${hi ? ` max="${hi}"` : ''}>`;
+  } else {
+    input = `<input id="${id}" value="${esc(value)}">`;
+  }
+  return `<label for="${id}">${esc(f.label)}</label>${input}` + (f.help ? `<div class="help">${esc(f.help)}</div>` : '');
+}
+
+function fieldValue(p, f) {
+  const el = $(`${p}_${f.key}`);
+  return f.type === 'bool' ? (el.checked ? '1' : '0') : el.value.trim();
+}
+
+/* ---- tabs: the running app's own page first (when it has one), then
+ * app management, app settings, system settings, system information ---- */
+const TABS = ['app', 'manage', 'config', 'system', 'info'];
+let tab = '';
+const loaded = {};
+
+function showTab(which) {
+  if (which === 'app' && !state.app_web) which = 'manage';
+  tab = which;
+  try { localStorage.setItem('tab', which); } catch (e) { /* private window */ }
+  for (const t of TABS) {
+    $('tab-' + t).classList.toggle('on', t === which);
+    if (t !== 'app') $('pane-' + t).style.display = t === which ? 'block' : 'none';
+  }
+  $('appframe').style.display = which === 'app' ? 'block' : 'none';
+  if (which === 'app' && !$('appframe').src) $('appframe').src = '/app';
+  if (!loaded[which]) {
+    loaded[which] = true;
+    if (which === 'manage') loadApps().then(() => market());
+    if (which === 'config') loadApps();
+    if (which === 'system') loadApps().then(loadAllConfig).then(() => loadText('/spiffs/config.ini', 'cfg'));
+    if (which === 'info') loadHardware();
+  }
+}
+
+/* the app's page tells its height */
+window.addEventListener('message', (e) => {
+  if (e.source === $('appframe').contentWindow && e.data && e.data.appHeight) {
+    $('appframe').style.height = Math.max(300, e.data.appHeight) + 'px';
+  }
+});
+
+async function refresh() {
+  state = await api('/api/settings');
+  $('devname').textContent = state.device_name || '';
+  document.title = state.device_name || '设备';
+  $('tab-app').style.display = state.app_web ? '' : 'none';
+  $('tab-app').textContent = state.app_name || '应用';
+  if (!tab) {
+    let saved = '';
+    try { saved = localStorage.getItem('tab') || ''; } catch (e) { /* private window */ }
+    showTab(state.app_web && (!saved || saved === 'app') ? 'app' : (TABS.includes(saved) && saved !== 'app' ? saved : 'manage'));
+  } else if (tab === 'app' && !state.app_web) {
+    showTab('manage');
+  }
+  const sta = state.sta_connected
+    ? `<span class="ok">已连接 ${esc(state.sta_ssid)}</span>，IP ${esc(state.sta_ip)}，${state.rssi} dBm`
+    : `<span class="warn">未连接</span>${state.wifi_ssid ? '（配置：' + esc(state.wifi_ssid) + '）' : ''}`;
+  $('status').innerHTML =
+    `<b>WiFi</b><span>${sta}</span>` +
+    (state.ap ? `<b>热点</b><span>${esc(state.ap_ssid)}，${esc(state.ap_ip)}，${state.clients} 台设备</span>` : '') +
+    `<b>运行中</b><span>${state.settings_mode ? '系统设置（' + (state.settings_from === 'market' ? '市场版本' : '内置') + '）' : esc(state.app_name || state.app)}</span>` +
+    `<b>启动应用</b><span>${esc(state.boot || '内置应用')}</span>` +
+    `<b>已保存</b><span>${state.saved} 次</span>`;
+  const keep = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v || ''; };
+  if (document.activeElement !== $('ssid') && !$('ssid').value) $('ssid').value = state.wifi_ssid || '';
+  keep('device', state.device_name);
+  keep('proxy', state.proxy);
+  keep('hproxy', state.https_proxy);
+  keep('murl', state.market_url);
+  keep('chsrv', state.channel_server);
+  keep('chid', state.channel_id);
+  if (document.activeElement !== $('pvia')) $('pvia').checked = on(state.proxy_via_channel);
+  if (document.activeElement !== $('mvia')) $('mvia').checked = on(state.market_via_channel);
+  $('chstate').innerHTML = !state.channel_server ? '没有设置协议转换服务器：应用代理和市场都直接连接。'
+    : (state.channel_key_set ? '设备密钥已设置' : '<span class="warn">还没有设备密钥</span>') +
+      (state.channel_ready ? '，加密通道已启用。' : '，加密通道未启用（填好地址、ID 和密钥后保存并重启）。') +
+      ' 密钥在服务器上生成：python tools/app_proxy.py --device-key 设备ID';
+  if (document.activeElement !== $('webapp')) $('webapp').checked = !/^(0|false|no|off)$/i.test(state.web_in_app || '');
+  if (document.activeElement !== $('mauto')) $('mauto').checked = on(state.market_auto_update);
+  if (document.activeElement !== $('frkey')) $('frkey').checked = !/^(0|false|no|off)$/i.test(state.factory_reset_key || '');
+  keep('blong', state.button_long_ms);
+  keep('bmid', state.button_mid_ms);
+  keep('bhold', state.button_hold_ms);
+  const ms = state.button_ms || [];
+  $('btnnow').textContent = ms.length === 3
+    ? ` 当前：短长按 ${ms[0] / 1000} 秒，中长按 ${ms[1] / 1000} 秒，长长按 ${ms[2] / 1000} 秒。` : '';
+  showMode();
+}
+
+/* While an app runs: the app list, its state and resetting configs; installs,
+ * uninstalls and uploads need the system settings (the app's VM leaves too
+ * little memory, and nothing runs that could be broken by them) */
+function showMode() {
+  const settings = !!state.settings_mode;
+  $('mmode').innerHTML = settings
+    ? `<span class="ok">设置模式：可以安装、更新、上传和卸载应用。</span> <button class="plain small" onclick="leaveSettings()">退出设置模式</button>`
+    : `运行应用时只能查看应用和重置配置。安装、更新、上传或卸载应用请 <button class="small" onclick="enterSettings()">进入设置模式</button>`;
+  $('uploadbox').style.display = settings ? '' : 'none';
+}
+
+async function enterSettings() {
+  say('设备正在重启进入设置模式...', 'ok');
+  try { await api('/api/reset?settings=1', {method: 'POST'}); } catch (e) {}
+  waitForMode(true);
+}
+
+async function leaveSettings() {
+  say('设备正在重启并运行应用...', 'ok');
+  try { await api('/api/reset', {method: 'POST'}); } catch (e) {}
+  waitForMode(false);
+}
+
+/* poll through the restart until the board answers in the wanted mode */
+async function waitForMode(settings, since = Date.now()) {
+  await new Promise(r => setTimeout(r, 2000));
+  let s = null;
+  try { s = await api('/api/settings'); } catch (e) {}
+  if (s && s.success !== false && !!s.settings_mode === settings) {
+    $('appframe').removeAttribute('src');
+    await refresh();
+    await loadApps();
+    say(settings ? '已进入设置模式' : '已回到应用', 'ok');
+    return market();   /* its state only: the market is read on 刷新 */
+  }
+  if (Date.now() - since > 120000) return say('设备没有回来：请查看屏幕', 'bad');
+  return waitForMode(settings, since);
+}
+
+/* ---- the app market (the board's engine: GET / POST /api/market) ---- */
+const MARKET_STATUS = {new: ['未安装', 'muted'], installed: ['已安装', 'ok'], update: ['有更新', 'warn'],
+                       incompatible: ['需新固件', 'bad']};
+let marketTimer = 0;
+function showMarket(m) {
+  marketApps = m.apps || [];
+  const busy = m.state === 'refreshing' || m.state === 'installing';
+  const can = m.install !== false;          /* installs only in the system settings */
+  const updates = marketApps.filter(a => a.status === 'update').length;
+  let line = m.state === 'refreshing' ? '正在读取市场…'
+    : m.state === 'installing' ? `正在安装 ${esc(m.current || '')}：${m.total ? Math.floor(m.received * 100 / m.total) + '%' : kb(m.received)}` +
+                                 (m.queued ? `，还有 ${m.queued} 个排队` : '')
+    : m.state === 'error' ? `<span class="bad">失败：${esc(m.message)}</span>`
+    : marketApps.length ? `${marketApps.length} 个应用，${updates} 个有更新` + (m.message ? `（${esc(m.message)}）` : '')
+    : '点“刷新”读取市场';
+  if (m.error) line += ` <span class="bad">${esc(m.error)}</span>`;
+  if (m.auto === 'update') line = '<span class="warn">自动更新中，完成后设备自动返回应用</span><br>' + line;
+  else if (m['return']) line = '<span class="ok">自动更新结束，设备正在返回应用…</span><br>' + line;
+  $('mstate').innerHTML = `${line}<br>市场：${esc(m.url || '未设置（填写应用代理或市场地址）')}` +
+    (updates && !busy && can ? ` <button class="plain small" onclick="market('install','updates')">全部更新</button>` : '') +
+    (busy ? ` <button class="plain small" onclick="market('cancel')">取消</button>` : '');
+  $('mlist').innerHTML = marketApps.map(a => {
+    const [label, cls] = MARKET_STATUS[a.status] || ['', ''];
+    const act = a.status === 'incompatible' || busy || !can ? ''
+      : `<button class="plain small" onclick="market('install','${esc(a.id)}')">${a.status === 'update' ? '更新' : a.status === 'installed' ? '重新安装' : '安装'}</button>`;
+    const prog = m.state === 'installing' && m.current === a.id ? bar(m.received, m.total) : '';
+    return `<div class="app"><div class="name">${esc(a.name)} <span class="tag ${cls}">${label}</span>${act}</div>
+      <div class="desc">${esc(a.description)}</div>
+      <div class="desc">v${esc(a.version)}${a.installed && a.installed !== a.version ? '（已装 v' + esc(a.installed) + '）' : ''} · ${kb(a.size)} · API ${esc(a.api)}</div>
+      ${prog}${a.queued && !(m.state === 'installing' && m.current === a.id) ? '<div class="desc">排队中</div>' : ''}</div>`;
+  }).join('');
+  clearTimeout(marketTimer);
+  if (busy) marketTimer = setTimeout(() => market(), 700);
+  else if (m.wasBusy) { loadApps(); say(m.state === 'error' ? '有应用未能安装' : '已完成：退出设置模式后运行新版本', m.state === 'error' ? 'bad' : 'ok'); }
+  showInstalled();
+}
+
+let marketBusy = false;
+async function market(action, id) {
+  try {
+    const m = action ? await api('/api/market?action=' + action + (id ? '&id=' + encodeURIComponent(id) : ''), {method: 'POST'})
+                     : await api('/api/market');
+    m.wasBusy = marketBusy && !(m.state === 'refreshing' || m.state === 'installing');
+    marketBusy = m.state === 'refreshing' || m.state === 'installing';
+    showMarket(m);
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* ---- installed apps (GET /api/apps: no metadata; it comes per app) ---- */
+const SOURCE = {market: ['市场', 'ok'], user: ['自装', 'warn'], builtin: ['内置', 'muted']};
+
+async function loadApps() {
+  const r = await api('/api/apps');
+  apps = r.apps || [];
+  $('boot').innerHTML = apps.map(a =>
+    `<option value="${esc(rel(a.path))}"${a.boot ? ' selected' : ''}>${esc(a.name)}（${SOURCE[a.source] ? SOURCE[a.source][0] : ''}，${esc(rel(a.path))}）</option>`).join('');
+  showInstalled();
+  showConfigLists();
+}
+
+function showInstalled() {
+  if (!$('installed')) return;
+  const settings = !!state.settings_mode;
+  $('installed').innerHTML = apps.map((a, i) => {
+    const [src, cls] = SOURCE[a.source] || ['', 'muted'];
+    const mk = a.source === 'market' ? marketApps.find(m => m.id === a.id) : null;
+    const upd = mk && mk.status === 'update';
+    return `<div class="app">
+      <div class="name">${esc(a.name)} <span class="tag ${cls}">${src}</span>${a.boot ? '<span class="tag">启动</span>' : ''}${a.running ? '<span class="tag">运行中</span>' : ''}${upd ? '<span class="tag warn">有更新 v' + esc(mk.version) + '</span>' : ''}${a.web ? '<span class="tag muted">网页</span>' : ''}</div>
+      <div class="desc">${esc(a.description)}</div>
+      <div class="desc">v${esc(a.version)} · ${kb(a.size)} · ${a.pages} 页 · ${esc(rel(a.dir))}</div>
+      ${a.boot ? '' : `<button class="plain small" onclick="setBoot(${i})">设为启动应用</button>` +
+                      `<button class="plain small" onclick="setBoot(${i}, true)">设为启动应用并重启</button>`}
+      <button class="plain small" onclick="resetConfig(${i})">重置配置</button>
+      ${settings && upd ? `<button class="small" onclick="market('install','${esc(a.id)}')">更新</button>` : ''}
+      ${settings && a.source !== 'builtin' ? `<button class="plain small" onclick="removeApp(${i})">卸载</button>` : ''}
+    </div>`;
+  }).join('') || '没有安装应用';
+}
+
+async function resetConfig(i) {
+  const a = apps[i];
+  if (!confirm(`把 ${a.name} 的配置恢复为默认值？`)) return;
+  try {
+    await apiPost('/api/apps/reset?key=' + encodeURIComponent(a.key));
+    say(`${a.name} 的配置已恢复默认${a.running ? '，重启应用后生效' : ''}`, 'ok');
+    if (cfgOpen[a.key]) { delete cfgOpen[a.key]; showConfigLists(); }
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* boot_app in config.ini; andRestart: the board restarts into it at once */
+async function setBoot(i, andRestart) {
+  const name = apps[i].name;
+  try {
+    await post({'system.boot_app': rel(apps[i].path)});
+    if (andRestart) {
+      say(`${name} 已设为启动应用，设备正在重启...`, 'ok');
+      try { await api('/api/reset', {method: 'POST'}); } catch (e) { /* the board restarts */ }
+      return waitForMode(false);
+    }
+    await refresh();
+    await loadApps();
+    say(`${name} 已设为启动应用，${state.settings_mode ? '退出设置模式' : '重启'}后运行`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function removeApp(i) {
+  const a = apps[i];
+  if (!confirm(`卸载 ${a.name}？它的目录 ${rel(a.dir)}（配置和数据）会一并删除。`)) return;
+  try {
+    await apiPost('/api/apps/remove?key=' + encodeURIComponent(a.key));
+    await loadApps();
+    await refresh();
+    say(`已卸载 ${a.name}`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function uploadApp() {
+  const f = $('upfile').files[0];
+  if (!f) return say('先选择 .msbc 文件', 'warn');
+  try {
+    const r = await apiPost('/api/apps/upload', await f.arrayBuffer());
+    $('upfile').value = '';
+    await loadApps();
+    say(`已安装 ${r.name || r.id} 到 ${rel(r.dir || '')}`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* ---- app settings: the running app open first; the others read their
+ * metadata and config file only when "配置" is clicked ---- */
+const cfgOpen = {};        /* key -> {meta, ini, exists} once read */
+
+function showConfigLists() {
+  if (!$('runcfg')) return;
+  const run = apps.find(a => a.running);
+  $('runhead').textContent = run ? `正在运行：${run.name}` : '正在运行的应用';
+  if (!run) {
+    $('runcfg').innerHTML = `<div class="desc">${state.settings_mode ? '设置模式下没有应用在运行。' : '没有找到正在运行的应用。'}</div>`;
+  } else {
+    $('runcfg').innerHTML = `<div id="cf-${cfgId(run.key)}"></div>`;
+    openConfig(run.key, true);
+  }
+  $('othercfg').innerHTML = apps.filter(a => !a.running).map(a => `
+    <div class="app"><div class="name">${esc(a.name)} <span class="tag ${(SOURCE[a.source] || ['', 'muted'])[1]}">${(SOURCE[a.source] || [''])[0]}</span>
+      <button class="plain small" onclick="toggleConfig('${esc(a.key)}')">配置</button></div>
+      <div class="desc">${esc(rel(a.dir))}</div>
+      <div id="cf-${cfgId(a.key)}"></div></div>`).join('') || '<div class="desc">没有其他应用</div>';
+  for (const k of Object.keys(cfgOpen)) if (!run || k !== run.key) renderConfig(k);
+}
+
+function cfgId(key) { return key.replace(/[^a-z0-9]/gi, '_'); }
+function appByKey(key) { return apps.find(a => a.key === key); }
+
+async function toggleConfig(key) {
+  if (cfgOpen[key]) { delete cfgOpen[key]; $('cf-' + cfgId(key)).innerHTML = ''; return; }
+  await openConfig(key);
+}
+
+async function openConfig(key, quiet) {
+  const box = $('cf-' + cfgId(key));
+  box.innerHTML = '<div class="desc">读取中...</div>';
+  try {
+    const r = await api('/api/apps/config?key=' + encodeURIComponent(key));
+    if (r.success === false) throw new Error(r.error || '读取失败');
+    cfgOpen[key] = {meta: r.meta || '', ini: r.ini, exists: !!r.exists, path: r.path};
+    renderConfig(key);
+  } catch (e) {
+    box.innerHTML = '';
+    if (!quiet) say(e.message, 'bad');
+  }
+}
+
+/* defaults: the ini the first start writes from the metadata */
+function defaultIni(meta) {
+  const at = String(meta || '').search(/^[ \t]*\[config\]/m);
+  return '; settings of this app\n' + (at >= 0 ? meta.slice(at) : '[config]\n');
+}
+
+function renderConfig(key) {
+  const c = cfgOpen[key], box = $('cf-' + cfgId(key)), a = appByKey(key);
+  if (!c || !box || !a) return;
+  const fields = appFields(c.meta), values = iniValues(c.exists ? c.ini : defaultIni(c.meta)), p = 'c' + cfgId(key);
+  box.innerHTML = `<div class="form">${fields.length ? fields.map(f => fieldHtml(p, f, f.key in values ? values[f.key] : f.def)).join('')
+                                                    : '<div class="desc">这个应用没有可配置的项。</div>'}
+    ${fields.length ? `<button onclick="saveConfig('${esc(key)}')">保存</button>` : ''}
+    <button class="plain" onclick="defaultConfig('${esc(key)}')">恢复默认配置</button>
+    <button class="plain" onclick="rawConfig('${esc(key)}')">编辑文件</button>
+    <div id="raw-${cfgId(key)}"></div>
+    <div class="help">${c.exists ? '保存到 ' : '还没有配置文件，显示的是默认值；保存后写入 '}${esc(rel(c.path))}${a.running ? '，重启应用后生效' : '，应用下次启动时生效'}</div></div>`;
+}
+
+async function writeConfig(key, text) {
+  await apiPost('/api/apps/config?key=' + encodeURIComponent(key), text);
+  cfgOpen[key].ini = text;
+  cfgOpen[key].exists = true;
+}
+
+function restartHint(a) {
+  return a.running ? `${a.name} 的配置已保存。<button class="small" onclick="restart()">重启应用</button>` : `${a.name} 的配置已保存`;
+}
+
+async function saveConfig(key) {
+  const c = cfgOpen[key], a = appByKey(key), p = 'c' + cfgId(key);
+  let text = c.exists ? c.ini : defaultIni(c.meta);
+  const values = iniValues(text);
+  for (const f of appFields(c.meta)) {
+    const v = fieldValue(p, f);
+    if (/[;#\n]/.test(v)) return say(`${f.label}：不能含有 ; 或 #`, 'warn');
+    if (values[f.key] !== v) text = iniSet(text, 'config', f.key, v);
+  }
+  try {
+    await writeConfig(key, text);
+    renderConfig(key);
+    say(a.running ? `${a.name} 的配置已保存，重启应用后生效` : `${a.name} 的配置已保存`, 'ok');
+    if (a.running) $('cf-' + cfgId(key)).insertAdjacentHTML('beforeend', `<div class="desc">${restartHint(a)}</div>`);
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function defaultConfig(key) {
+  const a = appByKey(key);
+  if (!confirm(`把 ${a.name} 的配置恢复为默认值？`)) return;
+  try {
+    await apiPost('/api/apps/reset?key=' + encodeURIComponent(key));
+    cfgOpen[key].exists = false;
+    renderConfig(key);
+    say(`${a.name} 的配置已恢复默认`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+function rawConfig(key) {
+  const c = cfgOpen[key], box = $('raw-' + cfgId(key));
+  if (box.innerHTML) { box.innerHTML = ''; return; }
+  box.innerHTML = `<label>${esc(rel(c.path))}</label><textarea id="rt-${cfgId(key)}" spellcheck="false"></textarea>
+    <button onclick="saveRaw('${esc(key)}')">保存文件</button>`;
+  $('rt-' + cfgId(key)).value = c.exists ? c.ini : defaultIni(c.meta);
+}
+
+async function saveRaw(key) {
+  try {
+    await writeConfig(key, $('rt-' + cfgId(key)).value);
+    renderConfig(key);
+    say('已保存', 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* ---- system settings ---- */
+async function scan() {
+  $('scanout').textContent = '扫描中...';
+  const r = await api('/api/wifi/scan');
+  const nets = r.networks || [];
+  $('nets').innerHTML = nets.map(n => `<option value="${esc(n.ssid)}">`).join('');
+  $('scanout').innerHTML = nets.length
+    ? nets.map(n => `${esc(n.ssid)} <span class="desc">${n.rssi} dBm${n.secure ? '' : ' 开放'}</span>`).join('<br>')
+    : esc(r.error || '没有找到网络');
+}
+
+async function saveWifi() {
+  const ssid = $('ssid').value.trim();
+  if (!ssid) return say('请填写网络名称', 'warn');
+  const f = {'wifi.wifi_ssid': ssid};
+  if ($('pass').value) f['wifi.wifi_password'] = $('pass').value;
+  try {
+    await post(f);
+    $('pass').value = '';
+    say('已保存，正在连接 ' + ssid + '...', 'ok');
+    let n = 0;
+    const t = setInterval(async () => {
+      await refresh();
+      if (state.sta_connected && state.sta_ssid === ssid) {
+        clearInterval(t);
+        say(`已连接 ${ssid}，局域网地址 http://${state.sta_ip}/`, 'ok');
+      } else if (++n > 15) {
+        clearInterval(t);
+        say('还没有连上，请检查密码', 'warn');
+      }
+    }, 2000);
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* A KEY 18 time from its field: "" (the default) or whole milliseconds */
+function buttonMs(id) {
+  const v = $(id).value.trim();
+  if (v && !/^\d+$/.test(v)) throw new Error('按键时间请填写整数毫秒，或留空');
+  return v;
+}
+
+/* The encrypted channel's fields: the key only when a new one is typed */
+function channelFields() {
+  const srv = $('chsrv').value.trim(), id = $('chid').value.trim(), key = $('chkey').value.trim().toLowerCase();
+  if (srv && !/^(http|tcp):\/\/[^\s\/]+(:\d+)?\/?$/.test(srv)) throw new Error('协议转换服务器：http://主机:端口 或 tcp://主机:端口');
+  if (id && !/^[\x21-\x7e]{1,64}$/.test(id)) throw new Error('设备 ID：1–64 个可见 ASCII 字符');
+  if (key && !/^[0-9a-f]{64}$/.test(key)) throw new Error('设备密钥：64 位十六进制数字');
+  if (($('pvia').checked || $('mvia').checked) && !srv) throw new Error('经协议转换服务器传输：请先填写它的地址');
+  const f = {'channel.channel_server': srv, 'channel.channel_id': id,
+             'channel.proxy_via_channel': $('pvia').checked ? '1' : '0',
+             'channel.market_via_channel': $('mvia').checked ? '1' : '0'};
+  if (key) f['channel.channel_key'] = key;
+  return f;
+}
+
+async function saveCommon(andRestart) {
+  try {
+    const [blong, bmid, bhold] = [buttonMs('blong'), buttonMs('bmid'), buttonMs('bhold')];
+    const channel = channelFields();
+    await post({'system.boot_app': $('boot').value, 'system.device_name': $('device').value.trim(),
+                'app.proxy': $('proxy').value.trim(), 'app.https_proxy': $('hproxy').value.trim(),
+                'market.market_url': $('murl').value.trim(),
+                'market.market_auto_update': $('mauto').checked ? '1' : '0',
+                'system.web_in_app': $('webapp').checked ? '1' : '0',
+                'system.factory_reset_key': $('frkey').checked ? '1' : '0',
+                'system.button_long_ms': blong, 'system.button_mid_ms': bmid, 'system.button_hold_ms': bhold,
+                ...channel});
+    $('chkey').value = '';
+    await refresh();
+    await loadApps();
+    if (andRestart) return restart();
+    say('已保存', 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+/* Every key of config.ini, by section ([wifi] has its own form above) */
+let allCfg = {};
+async function loadAllConfig() {
+  const r = await fetch('/api/fs/read?path=' + encodeURIComponent('/spiffs/config.ini'));
+  const text = r.ok ? await r.text() : '';
+  allCfg = parseIni(text);
+  const secs = Object.keys(allCfg).filter(s => s && s !== 'wifi' && allCfg[s].length);
+  /* one row per key: "key：[box]", its comment the row's tooltip */
+  $('allcfg').innerHTML = secs.map(s => `<h3>[${esc(s)}]</h3>` + allCfg[s].map(it =>
+    `<div class="cfgrow"${it.comment ? ` title="${esc(it.comment)}"` : ''}>
+     <label for="ac_${esc(s)}_${esc(it.key)}">${esc(it.key)}：</label>
+     <input id="ac_${esc(s)}_${esc(it.key)}"${/(password|secret|token|_key)$/.test(it.key) ? ' type="password" autocomplete="new-password"' : ''} value="${esc(it.value)}" data-sec="${esc(s)}" data-key="${esc(it.key)}" data-old="${esc(it.value)}"></div>`).join('')).join('') +
+    (secs.length ? '<button onclick="saveAllConfig()">保存修改的项</button><button class="plain" onclick="saveAllConfig(true)">保存并重启</button>' : '读取失败');
+}
+
+async function saveAllConfig(andRestart) {
+  const f = {};
+  for (const el of document.querySelectorAll('#allcfg input[data-key]')) {
+    const v = el.value.trim();
+    if (v === el.dataset.old) continue;
+    if (/[;#\n]/.test(v)) return say(`${el.dataset.key}：不能含有 ; 或 #`, 'warn');
+    f[el.dataset.sec + '.' + el.dataset.key] = v;
+  }
+  if (!Object.keys(f).length) return andRestart ? restart() : say('没有修改', 'warn');
+  try {
+    await post(f);
+    await loadAllConfig();
+    await refresh();
+    if (andRestart) return restart();
+    say(`已保存 ${Object.keys(f).length} 项，大部分在重启后生效`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function loadText(path, id) {
+  const r = await fetch('/api/fs/read?path=' + encodeURIComponent(path));
+  const text = await r.text();
+  $(id).value = (!r.ok || text.startsWith('{"success":false')) ? '' : text;
+}
+
+async function saveText(path, id) {
+  const r = await api('/api/upload?run=0&path=' + encodeURIComponent(path), {method: 'POST', body: $(id).value});
+  say(r.success ? '已保存 ' + path : (r.error || '保存失败'), r.success ? 'ok' : 'bad');
+}
+
+function kvRows(rows) {
+  return '<div class="kv">' + rows.filter(Boolean).map(([k, v]) => `<b>${esc(k)}</b><span>${v}</span>`).join('') + '</div>';
+}
+
+async function loadHardware() {
+  const h = await api('/api/hardware');
+  if (!h.success) { $('hw').textContent = h.error || '读取失败'; return; }
+  const c = h.chip, f = h.firmware, m = h.memory, v = h.vm, s = h.storage, r = h.app_rom, fr = h.font_rom, d = h.display, n = h.network;
+  const la = h.last_app;
+  let html = '<h3>芯片与固件</h3>' + kvRows([
+    ['芯片', `${c.model} v${(c.revision / 100).toFixed(2)}，${c.cores} 核 ${c.mhz} MHz${c.bt ? '，WiFi+BT' : ''}`],
+    ['MAC', esc(c.mac)],
+    ['Flash', kb(c.flash)],
+    ['固件', `${esc(f.version)}，${esc(f.built)}`],
+    ['ESP-IDF', esc(f.idf)],
+    ['固件镜像', `${kb(f.image)} / ${kb(f.partition)} 分区` + bar(f.image, f.partition)],
+    ['运行时间', dur(f.uptime_ms / 1000) + `，复位原因 ${esc(f.reset)}，时间${f.time_synced ? '已' : '未'}同步`],
+  ]);
+  html += '<h3>系统内存</h3>' + kvRows([
+    ['空闲', `${kb(m.free)} / ${kb(m.internal_total)}` + bar(m.internal_total - m.free, m.internal_total)],
+    ['历史最低', kb(m.min_free)],
+    ['最大连续块', kb(m.largest)],
+    ['DMA 可用', kb(m.dma_free)],
+    m.iram_total ? ['IRAM', `已用 ${kb(m.iram_total - m.iram_free)} / ${kb(m.iram_total)}（${Math.round((m.iram_total - m.iram_free) * 100 / m.iram_total)}%），` +
+                            `其中 VM ${kb(m.iram_vm)}` + bar(m.iram_total - m.iram_free, m.iram_total)] : null,
+  ]);
+  html += `<h3>当前程序：${v.settings ? '系统设置（单独运行，不是应用）' : esc(v.program)}</h3>` + kvRows([
+    ['VM 堆', `${kb(v.used)} / ${kb(v.heap)}` + bar(v.used, v.heap)],
+    v.probe ? ['开机测量', `空闲 ${kb(v.probe.free)}，最大连续块 ${kb(v.probe.largest)}，系统预留 ${kb(v.probe.reserved)}` +
+               (v.probe.wifi ? '（WiFi 已连上）' : '（WiFi 未连上）') +
+               '<div class="help">VM 堆 = 空闲 − 预留，且不超过最大连续块 − 8 KB</div>'] : null,
+    ['存活 / 峰值', `${kb(v.live)} / ${kb(v.peak)}`],
+    ['累计分配', `${v.alloc_kb} KB，GC ${v.minor_gcs} 次小回收、${v.major_gcs} 次全回收`],
+    ['栈', `峰值 ${v.stack_peak} / ${v.stack_slots} 槽`],
+    ['代码 ROM', v.rom ? kb(v.rom) + '（原地运行于 Flash）' : '无（代码在 RAM 中）'],
+  ]);
+  if (la) {
+    html += `<h3>上次运行的应用：${esc(la.id)}（进入设置前记录）</h3>` + kvRows([
+      ['VM 堆', `${kb(la.live)} / ${kb(la.heap)}` + bar(la.live, la.heap)],
+      ['堆峰值', kb(la.peak)],
+      ['代码 ROM', kb(la.rom)],
+      ['系统内存', `空闲 ${kb(la.free)}，最低 ${kb(la.min_free)}`],
+      ['运行了', dur(la.uptime_s)],
+    ]);
+  } else if (v.settings) {
+    html += '<h3>上次运行的应用</h3><div class="desc">开机直接进入了设置，没有应用的内存记录</div>';
+  }
+  html += '<h3>存储</h3>' + kvRows([
+    ['文件系统', `${kb(s.used)} / ${kb(s.total)}` + bar(s.used, s.total)],
+    ['文件', `${s.files} 个，其中应用目录 ${s.apps} 个`],
+    ['应用 ROM 分区', `${kb(r.partition)}，当前程序的代码镜像 ${r.image ? kb(r.image) : '未使用'}` + bar(r.image, r.partition)],
+  ]);
+  html += '<h3>字库</h3>' + kvRows([
+    ['系统字库', `${kb(fr.used)} / ${kb(fr.capacity)}` + bar(fr.used, fr.capacity)],
+  ]) + '<table>' + fr.fonts.map(x => `<tr><td>${esc(x.name)}</td><td>${kb(x.bytes)}</td></tr>`).join('') + '</table>' +
+    '<div class="desc" style="margin-top:6px">字体槽</div><table>' +
+    fr.slots.filter(x => x.source !== 'built-in' || x.slot < 2).map(x =>
+      `<tr><td>${x.slot}</td><td>${esc(x.name || '-')}</td><td>${x.height} px</td><td>${esc(/^built-?in$/.test(x.source) ? '内置' : x.source)}</td></tr>`).join('') + '</table>';
+  html += '<h3>显示</h3>' + kvRows([
+    ['屏幕', `${esc(d.model)} ${d.width}x${d.height}`],
+    ['模式', `${esc(d.mode)}（${d.band_lines} 行一带），${d.color_bits} 位色，配色 ${esc(d.scheme)}`],
+    ['显存', `缓冲 ${kb(d.buffer)}，DMA ${kb(d.dma)}`],
+    ['负载', `${d.fps} 帧/秒，主循环 ${d.busy_pct}% 忙，背光 ${d.backlight}`],
+    ['显示列表', d.dl_cap === undefined ? '-' : (d.dl_cmds < 0 ? `上一帧超出 ${d.dl_cap} 条，逐带重画` : `上一帧 ${d.dl_cmds} / ${d.dl_cap} 条命令`) +
+      (d.dl_heap ? `，从堆扩容 ${kb(d.dl_heap)}` : '，静态 128 条')],
+  ]);
+  html += '<h3>网络</h3>' + kvRows([
+    ['WiFi', n.connected ? `${esc(n.ssid)}，${esc(n.ip)}，${n.rssi} dBm` : '未连接'],
+    ['热点', n.ap ? `${esc(n.ap_ssid)}，${esc(n.ap_ip)}，${n.clients} 台设备` : '未开启'],
+  ]);
+  $('hw').innerHTML = html;
+}
+
+async function restart() {
+  say('正在重启...', 'ok');
+  await api('/api/reset', {method: 'POST'});
+}
+
+/* read once: the page asks the board again only when told to (a button,
+ * a save), so an open tab puts no load on it */
+refresh();
+</script>
+</body>
+</html>
