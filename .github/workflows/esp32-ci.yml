@@ -63,10 +63,12 @@ jobs:
           release_bins/firmware-manifest.json
 
     - name: Publish Release Assets (Source & Binaries Separated)
-      if: github.ref == 'refs/heads/main'
+      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.0.0
+        tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+        name: "MiniScheme ESP32 Firmware (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }})"
+        make_latest: true
         files: |
           minischeme-esp32-source.zip
           minischeme-esp32-binaries.zip
