@@ -38,20 +38,7 @@ jobs:
         cp build/minischeme_esp32.bin release_bins/minischeme_esp32.bin
         VERSION="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('1.0.{0}', github.run_number) }}"
         VERSION="${VERSION#v}"
-        python3 -c "
-import json
-manifest = {
-    'version': '$VERSION',
-    'chip': 'ESP32',
-    'files': [
-        {'name': 'bootloader.bin', 'address': '0x1000', 'offset': 4096},
-        {'name': 'partition-table.bin', 'address': '0x8000', 'offset': 32768},
-        {'name': 'minischeme_esp32.bin', 'address': '0x10000', 'offset': 65536}
-    ]
-}
-with open('release_bins/firmware-manifest.json', 'w') as f:
-    json.dump(manifest, f, indent=2)
-"
+        python3 -c "import json; m = {'version': '$VERSION', 'chip': 'ESP32', 'files': [{'name': 'bootloader.bin', 'address': '0x1000', 'offset': 4096}, {'name': 'partition-table.bin', 'address': '0x8000', 'offset': 32768}, {'name': 'minischeme_esp32.bin', 'address': '0x10000', 'offset': 65536}]}; json.dump(m, open('release_bins/firmware-manifest.json', 'w'), indent=2)"
         cd release_bins
         zip -r ../minischeme-esp32-binaries.zip bootloader.bin partition-table.bin minischeme_esp32.bin firmware-manifest.json
         cd ..
