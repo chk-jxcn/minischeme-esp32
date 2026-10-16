@@ -2830,7 +2830,7 @@ static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
     }
     char val[160];
     const char *key = mini_string_data(argv[0]);
-    if (ini_file_value(s_app_ini, key, val, sizeof(val)) ||
+    if ((ini_file_value(s_app_ini, key, val, sizeof(val)) && val[0]) ||
         (mini_app_config_key_ok(key) && ini_file_value("/spiffs/config.ini", key, val, sizeof(val)))) {
         return mini_make_string(vm, val);
     }
