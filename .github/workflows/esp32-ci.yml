@@ -1,10 +1,14 @@
-name: MiniScheme ESP32 Firmware CI
+name: MiniScheme ESP32 Firmware CI & Release
 
 on:
   push:
     branches: [ master, main ]
   pull_request:
     branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-esp32:
@@ -14,6 +18,10 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Package Source Archive
+      run: |
+        zip -r minischeme-esp32-source.zip main components docs CMakeLists.txt partitions.csv sdkconfig.defaults README.md
+
     - name: Build firmware with ESP-IDF Docker
       uses: espressif/esp-idf-ci-action@v1
       with:
@@ -21,11 +29,50 @@ jobs:
         target: esp32
         path: '.'
 
+    - name: Package Binary Archive and Manifest
+      run: |
+        mkdir -p release_bins
+        cp build/bootloader/bootloader.bin release_bins/bootloader.bin
+        cp build/partition_table/partition-table.bin release_bins/partition-table.bin
+        cp build/minischeme_esp32.bin release_bins/minischeme_esp32.bin
+        cat << 'EOF' > release_bins/firmware-manifest.json
+        {
+          "version": "1.0.0",
+          "chip": "ESP32",
+          "files": [
+            { "name": "bootloader.bin", "address": "0x1000", "offset": 4096 },
+            { "name": "partition-table.bin", "address": "0x8000", "offset": 32768 },
+            { "name": "minischeme_esp32.bin", "address": "0x10000", "offset": 65536 }
+          ]
+        }
+        EOF
+        cd release_bins
+        zip -r ../minischeme-esp32-binaries.zip bootloader.bin partition-table.bin minischeme_esp32.bin firmware-manifest.json
+        cd ..
+
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: minischeme-esp32-binaries
         path: |
-          build/bootloader/bootloader.bin
-          build/partition_table/partition-table.bin
-          build/minischeme_esp32.bin
+          minischeme-esp32-source.zip
+          minischeme-esp32-binaries.zip
+          release_bins/bootloader.bin
+          release_bins/partition-table.bin
+          release_bins/minischeme_esp32.bin
+          release_bins/firmware-manifest.json
+
+    - name: Publish Release Assets (Source & Binaries Separated)
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0.0
+        files: |
+          minischeme-esp32-source.zip
+          minischeme-esp32-binaries.zip
+          release_bins/bootloader.bin
+          release_bins/partition-table.bin
+          release_bins/minischeme_esp32.bin
+          release_bins/firmware-manifest.json
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

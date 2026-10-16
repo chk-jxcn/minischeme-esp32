@@ -3,6 +3,7 @@ build/
 sdkconfig
 sdkconfig.old
 *.bin
+!firmware/*.bin
 *.elf
 *.map
 
