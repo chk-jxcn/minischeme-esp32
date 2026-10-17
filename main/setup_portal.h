@@ -12,10 +12,14 @@
 
 /** @brief Starts the access point and the captive DNS once; false on failure. */
 bool setup_portal_start(void);
+/** @brief Switches to the next SSID and password preset. */
+bool setup_portal_switch(void);
 /** @brief The access point runs. */
 bool setup_portal_active(void);
 /** @brief Its name ("" before the start). */
 const char *setup_portal_ssid(void);
+/** @brief Its password ("12345678", etc.). */
+const char *setup_portal_pass(void);
 /** @brief Its address ("192.168.4.1"). */
 const char *setup_portal_ip(void);
 /** @brief Stations joined to it. */

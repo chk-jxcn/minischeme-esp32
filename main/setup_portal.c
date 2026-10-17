@@ -23,8 +23,23 @@ static const char *TAG = "setup";
 
 static bool s_active = false;
 static char s_ssid[33] = "";
+static char s_pass[64] = "12345678";
 static char s_ip[16] = "192.168.4.1";
 static uint32_t s_ip_addr = 0; /* network byte order, as an A record holds it */
+static int s_preset_index = 0;
+
+static void apply_preset(int idx) {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    s_preset_index = (idx >= 0 ? idx : 0) % 2;
+    if (s_preset_index == 0) {
+        snprintf(s_ssid, sizeof(s_ssid), "Desk-%02X%02X", mac[4], mac[5]);
+        snprintf(s_pass, sizeof(s_pass), "12345678");
+    } else {
+        snprintf(s_ssid, sizeof(s_ssid), "MiniScheme-%02X%02X", mac[4], mac[5]);
+        snprintf(s_pass, sizeof(s_pass), "88888888");
+    }
+}
 
 /* Answers every A question with the access point's address; other types
  * get an empty answer. Requests are handled in place (512-byte UDP). */
@@ -80,14 +95,13 @@ static void dns_task(void *arg) {
 
 bool setup_portal_start(void) {
     if (s_active) return true;
-    uint8_t mac[6] = {0};
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    snprintf(s_ssid, sizeof(s_ssid), "Desk-%02X%02X", mac[4], mac[5]);
+    apply_preset(0);
     /* a station that cannot connect would keep hopping channels */
     esp32_wifi_pause_station();
-    if (!hal_wifi_ap(s_ssid, "")) {
+    if (!hal_wifi_ap(s_ssid, s_pass)) {
         ESP_LOGE(TAG, "Access point failed to start");
         s_ssid[0] = '\0';
+        s_pass[0] = '\0';
         return false;
     }
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
@@ -102,12 +116,24 @@ bool setup_portal_start(void) {
         ESP_LOGW(TAG, "DNS task failed: open http://%s/ by hand", s_ip);
     }
     s_active = true;
-    ESP_LOGI(TAG, "Setup mode: join %s, open http://%s/", s_ssid, s_ip);
+    ESP_LOGI(TAG, "Setup mode: join %s (pass: %s), open http://%s/", s_ssid, s_pass, s_ip);
+    return true;
+}
+
+bool setup_portal_switch(void) {
+    if (!s_active) return setup_portal_start();
+    apply_preset(s_preset_index + 1);
+    if (!hal_wifi_ap(s_ssid, s_pass)) {
+        ESP_LOGE(TAG, "Access point switch failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "Setup mode switched: join %s (pass: %s), open http://%s/", s_ssid, s_pass, s_ip);
     return true;
 }
 
 bool setup_portal_active(void) { return s_active; }
 const char *setup_portal_ssid(void) { return s_ssid; }
+const char *setup_portal_pass(void) { return s_pass; }
 const char *setup_portal_ip(void) { return s_ip; }
 
 int setup_portal_clients(void) {

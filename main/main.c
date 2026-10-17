@@ -3000,14 +3000,17 @@ static Value prim_app_list(MiniVM *vm, int argc, Value *argv) {
     return list;
 }
 
-/* (setup-mode-start) => (ssid ip) of the setup access point, or #f */
+/* (setup-mode-start [switch?]) => (ssid ip pass) of the setup access point, or #f */
 static Value prim_setup_mode_start(MiniVM *vm, int argc, Value *argv) {
     if (!mini_access_privileged(vm, "setup-mode-start")) return mini_void();
-    (void)argc; (void)argv;
-    if (!setup_portal_start()) return mini_false();
+    bool do_switch = (argc > 0 && mini_is_true(argv[0]));
+    bool ok = do_switch ? setup_portal_switch() : setup_portal_start();
+    if (!ok) return mini_false();
     Value list = mini_nil(), tmp = mini_nil();
     mini_push_root(vm, &list);
     mini_push_root(vm, &tmp);
+    tmp = mini_make_string(vm, setup_portal_pass());
+    list = mini_make_cons(vm, tmp, list);
     tmp = mini_make_string(vm, setup_portal_ip());
     list = mini_make_cons(vm, tmp, list);
     tmp = mini_make_string(vm, setup_portal_ssid());
@@ -3029,7 +3032,7 @@ static void alist_put(MiniVM *vm, Value *lst, const char *key, Value v) {
     mini_pop_root(vm);
 }
 
-/* (setup-mode-status) => ((ap . #t) (ap-ssid . "Desk-A1B2") (ap-ip . "192.168.4.1")
+/* (setup-mode-status) => ((ap . #t) (ap-ssid . "Desk-A1B2") (ap-pass . "12345678") (ap-ip . "192.168.4.1")
  *   (clients . 1) (sta-connected . #t) (sta-ssid . "...") (sta-ip . "...") (saved . 0)) */
 static Value prim_setup_mode_status(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
@@ -3043,6 +3046,7 @@ static Value prim_setup_mode_status(MiniVM *vm, int argc, Value *argv) {
     alist_put(vm, &lst, "sta-ssid", mini_make_string(vm, ssid));
     alist_put(vm, &lst, "sta-connected", mini_make_bool(sta));
     alist_put(vm, &lst, "clients", mini_make_fixnum(setup_portal_clients()));
+    alist_put(vm, &lst, "ap-pass", mini_make_string(vm, setup_portal_pass()));
     alist_put(vm, &lst, "ap-ip", mini_make_string(vm, setup_portal_ip()));
     alist_put(vm, &lst, "ap-ssid", mini_make_string(vm, setup_portal_ssid()));
     alist_put(vm, &lst, "ap", mini_make_bool(setup_portal_active()));
