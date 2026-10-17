@@ -2358,7 +2358,7 @@ void mini_gui_round_rect(int x, int y, int w, int h, int r, uint16_t color, bool
         mini_gui_line(x + r, y, x + w - r - 1, y, color);
         mini_gui_line(x + r, y + h - 1, x + w - r - 1, y + h - 1, color);
         mini_gui_line(x, y + r, x, y + h - r - 1, color);
-        mini_gui_line(x + w - 1, y, x + w - 1, y + h - r - 1, color);
+        mini_gui_line(x + w - 1, y + r, x + w - 1, y + h - r - 1, color);
 
         draw_circle_helper(x + r, y + r, r, 0x8, color);
         draw_circle_helper(x + w - r - 1, y + r, r, 0x1, color);
