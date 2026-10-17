@@ -2716,19 +2716,20 @@ static bool config_apply(SystemConfig *cfg, const char *key, const char *val, in
     } else if (strcasecmp(key, "web_in_app") == 0) {
         if (!parse_long(val, 0, 1, &v)) return false;
         cfg->web_in_app = v != 0;
-    } else if (strcasecmp(key, "wifi_ssid") == 0) {
+    } else if (strcasecmp(key, "wifi_ssid") == 0 || strcasecmp(key, "ssid") == 0) {
         if (strlen(val) >= sizeof(cfg->wifi_ssid)) return false;
         snprintf(cfg->wifi_ssid, sizeof(cfg->wifi_ssid), "%s", val);
-    } else if (strcasecmp(key, "wifi_password") == 0) {
+    } else if (strcasecmp(key, "wifi_password") == 0 || strcasecmp(key, "wifi_pass") == 0) {
         if (strlen(val) >= sizeof(cfg->wifi_pass)) return false;
         snprintf(cfg->wifi_pass, sizeof(cfg->wifi_pass), "%s", val);
-    } else if (strcasecmp(key, "http_password") == 0 || strcasecmp(key, "password") == 0) {
+    } else if (strcasecmp(key, "http_password") == 0 || strcasecmp(key, "hardware_password") == 0) {
         if (strlen(val) >= sizeof(cfg->http_password)) return false;
         snprintf(cfg->http_password, sizeof(cfg->http_password), "%s", val);
         snprintf(s_http_password, sizeof(s_http_password), "%s", val);
-    } else if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "https_proxy") == 0 || strncasecmp(key, "app_", 4) == 0 ||
-               strncasecmp(key, "pcmon_", 6) == 0) {
-        /* [app] keys belong to Scheme apps: read with (config-get key) */
+    } else if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "https_proxy") == 0 ||
+               strcasecmp(key, "proxy_url") == 0 || strcasecmp(key, "converter_url") == 0 ||
+               strncasecmp(key, "app_", 4) == 0 || strncasecmp(key, "pcmon_", 6) == 0) {
+        /* [app] / [server] keys belong to Scheme apps: read with (config-get key) */
     } else if (strncasecmp(key, "channel_", 8) == 0 || strcasecmp(key, "proxy_via_channel") == 0 ||
                strcasecmp(key, "market_via_channel") == 0) {
         /* [channel]: applied by setup_channel at boot */
