@@ -14,6 +14,12 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_system.h"
+#if defined(__has_include)
+#if __has_include("esp_random.h")
+#include "esp_random.h"
+#endif
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -23,22 +29,59 @@ static const char *TAG = "setup";
 
 static bool s_active = false;
 static char s_ssid[33] = "";
-static char s_pass[64] = "12345678";
+static char s_pass[64] = "";
 static char s_ip[16] = "192.168.4.1";
 static uint32_t s_ip_addr = 0; /* network byte order, as an A record holds it */
 static int s_preset_index = 0;
+
+static void gen_random_letters(char *buf, size_t count) {
+    if (count == 0) return;
+    while (1) {
+        for (size_t i = 0; i < count; i++) {
+            buf[i] = (char)('A' + (esp_random() % 26));
+        }
+        buf[count] = '\0';
+        /* Ensure it does not spell MINI */
+        if (count >= 4 && strncmp(buf, "MINI", 4) == 0) continue;
+        break;
+    }
+}
+
+static void gen_random_digits(char *buf, size_t len) {
+    if (len < 2) {
+        if (len == 1) buf[0] = '\0';
+        return;
+    }
+    size_t digits = len - 1;
+    while (1) {
+        bool all_same = true;
+        bool asc = true;
+        bool desc = true;
+        for (size_t i = 0; i < digits; i++) {
+            buf[i] = (char)('0' + (esp_random() % 10));
+            if (i > 0) {
+                if (buf[i] != buf[0]) all_same = false;
+                if (buf[i] != buf[i - 1] + 1) asc = false;
+                if (buf[i] != buf[i - 1] - 1) desc = false;
+            }
+        }
+        buf[digits] = '\0';
+        if (!all_same && !asc && !desc) break;
+    }
+}
 
 static void apply_preset(int idx) {
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     s_preset_index = (idx >= 0 ? idx : 0) % 2;
+    char prefix[5];
+    gen_random_letters(prefix, 4);
     if (s_preset_index == 0) {
-        snprintf(s_ssid, sizeof(s_ssid), "Desk-%02X%02X", mac[4], mac[5]);
-        snprintf(s_pass, sizeof(s_pass), "12345678");
+        snprintf(s_ssid, sizeof(s_ssid), "%s-%02X%02X", prefix, mac[4], mac[5]);
     } else {
-        snprintf(s_ssid, sizeof(s_ssid), "MiniScheme-%02X%02X", mac[4], mac[5]);
-        snprintf(s_pass, sizeof(s_pass), "88888888");
+        snprintf(s_ssid, sizeof(s_ssid), "%s-AP", prefix);
     }
+    gen_random_digits(s_pass, 9);
 }
 
 /* Answers every A question with the access point's address; other types
