@@ -72,7 +72,6 @@
 #include "minischeme_device.h"
 #include "minischeme_jsonfeed.h"
 #include "msbc.h"
-#include "app_default_msbc.h"
 #include "app_settings_msbc.h"
 #include "setup_portal.h"
 #include "setup_page_html.h"
@@ -3299,12 +3298,6 @@ static void read_wall_time(MiniWallTime *t, time_t now) {
 /* Application Install (ROM image -> SPIFFS)                                 */
 /* ========================================================================= */
 
-static uint32_t fnv1a(const uint8_t *data, size_t len) {
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < len; i++) { h ^= data[i]; h *= 16777619u; }
-    return h;
-}
-
 static bool file_has_magic(const char *path, const char *magic) {
     char head[4];
     FILE *fp = fopen(path, "rb");
@@ -3325,6 +3318,21 @@ static bool boot_app_path(const char *value, char *out, size_t cap) {
     const char *rel = strncmp(value, "/spiffs/", 8) == 0 ? value + 8 : (value[0] == '/' ? value + 1 : value);
     if (snprintf(out, cap, "/spiffs/%s", rel) >= (int)cap) return false;
     return safe_spiffs_path(out);
+}
+
+/* Returns true if an application is installed and ready to boot */
+static bool has_installed_app(void) {
+    char path[64];
+    if (boot_app_path(s_sys_cfg.boot_app, path, sizeof(path))) {
+        if (strncmp(path, APPS_DIR "/settings/", sizeof(APPS_DIR "/settings/") - 1) != 0 &&
+            (file_has_magic(path, "MSBC") || file_has_magic(path, "MFAS"))) {
+            return true;
+        }
+    }
+    if (file_has_magic(APP_FASL_PATH, "MFAS") || file_has_magic(APP_MSBC_PATH, "MSBC")) {
+        return true;
+    }
+    return false;
 }
 
 /* Picks the app of this boot and makes its config file from its metadata */
@@ -3465,36 +3473,10 @@ static void migrate_legacy_app(void) {
     ESP_LOGI(TAG, "Legacy bytecode app moved to %s", APP_MSBC_PATH);
 }
 
-/* Installs the embedded app only on first boot or after a firmware update,
- * so apps uploaded from the WebREPL survive reboots. */
+/* If no app is installed, the device boots directly into the built-in system settings.
+ * The firmware no longer forcefully writes a default app into /spiffs/app.msbc. */
 static void sync_embedded_app(void) {
-    uint32_t sig = fnv1a(app_default_msbc_data, APP_DEFAULT_MSBC_LEN) ^ (uint32_t)APP_DEFAULT_MSBC_LEN;
-    uint32_t stored = 0;
-    bool have_app = false;
-    FILE *fp = fopen(APP_MSBC_PATH, "rb");
-    if (!fp) fp = fopen(APP_FASL_PATH, "rb");
-    if (fp) { have_app = true; fclose(fp); }
-    fp = fopen(APP_ROM_SIG_PATH, "rb");
-    if (fp) {
-        if (fread(&stored, 1, sizeof(stored), fp) != sizeof(stored)) stored = 0;
-        fclose(fp);
-    }
-    if (have_app && stored == sig) return;
-
-    ESP_LOGI(TAG, "Installing embedded app image (%u bytes) to %s", (unsigned)APP_DEFAULT_MSBC_LEN, APP_MSBC_PATH);
-    fp = fopen(APP_MSBC_PATH, "wb");
-    if (!fp) {
-        ESP_LOGE(TAG, "Failed to write %s", APP_MSBC_PATH);
-        return;
-    }
-    fwrite(app_default_msbc_data, 1, APP_DEFAULT_MSBC_LEN, fp);
-    fclose(fp);
-    app_installed(APP_MSBC_PATH);
-    fp = fopen(APP_ROM_SIG_PATH, "wb");
-    if (fp) {
-        fwrite(&sig, 1, sizeof(sig), fp);
-        fclose(fp);
-    }
+    /* No-op: boot into settings if no app is installed */
 }
 
 /* ========================================================================= */
@@ -4228,6 +4210,11 @@ void app_main(void) {
     s_settings_boot = 0; /* the next restart runs the boot app again */
     if (s_builtin_boot == BUILTIN_SETTINGS_MAGIC) s_builtin_settings = s_settings_mode;
     s_builtin_boot = 0;
+    if (!s_settings_mode && !has_installed_app()) {
+        ESP_LOGI(TAG, "No app installed; starting built-in system settings");
+        s_settings_mode = true;
+        s_builtin_settings = true;
+    }
     if (!s_settings_mode) s_last_app.magic = 0; /* the app's own figures are live again */
     mini_device_button_system_gesture(!s_settings_mode); /* in the settings a long hold is a long press */
     if (s_settings_mode) {
@@ -4359,7 +4346,7 @@ void app_main(void) {
         app_failed("load", why);
     }
     if (mini_get_error(s_vm)) {
-        ESP_LOGE(TAG, "App load from %s failed: %s; using embedded image", app_path, mini_get_error(s_vm));
+        ESP_LOGE(TAG, "App load from %s failed: %s; using built-in settings", app_path, mini_get_error(s_vm));
         mini_clear_error(s_vm);
         if (fasl_app) {
             /* a failed snapshot restore may have emptied the heap: start over */
@@ -4370,7 +4357,7 @@ void app_main(void) {
                 return;
             }
         }
-        execute_msbc_chunk(s_vm, app_default_msbc_data, APP_DEFAULT_MSBC_LEN);
+        execute_msbc_chunk(s_vm, app_settings_msbc_data, APP_SETTINGS_MSBC_LEN);
     }
     if (mini_get_error(s_vm)) {
         ESP_LOGE(TAG, "Application load error: %s", mini_get_error(s_vm));
