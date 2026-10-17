@@ -1159,10 +1159,12 @@ static void serial_poll(void) {
 
 static void http_cors(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range");
+    httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth");
     /* Chrome Private Network Access preflight */
     httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+    httpd_resp_set_hdr(req, "Access-Control-Max-Age", "86400");
 }
 
 static esp_err_t http_send_json(httpd_req_t *req, const char *json) {
