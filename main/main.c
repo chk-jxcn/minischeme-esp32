@@ -1753,6 +1753,71 @@ static bool settings_name_ok(const char *s) {
     return true;
 }
 
+/* Built-in password security filter: rejects < 6 chars, all identical chars,
+ * ascending or descending sequential numbers (e.g. 12345678, 87654321),
+ * repeated digits (88888888, 00000000), and common weak passwords. */
+static bool is_weak_password(const char *pwd) {
+    if (!pwd) return true;
+    size_t len = strlen(pwd);
+    if (len < 6) return true;
+
+    /* Check all identical characters */
+    bool all_same = true;
+    for (size_t i = 1; i < len; i++) {
+        if (pwd[i] != pwd[0]) {
+            all_same = false;
+            break;
+        }
+    }
+    if (all_same) return true;
+
+    /* Common weak passwords blacklist */
+    static const char *const s_weak_list[] = {
+        "123456", "1234567", "12345678", "123456789", "01234567",
+        "88888888", "00000000", "11111111", "66666666",
+        "87654321", "76543210", "654321", "987654321",
+        "password", "admin123", "qwertyui", NULL
+    };
+    for (int j = 0; s_weak_list[j]; j++) {
+        if (strcasecmp(pwd, s_weak_list[j]) == 0) return true;
+    }
+
+    /* Check for 4+ consecutive ascending, descending, or repeated digits */
+    int asc_run = 1, desc_run = 1, rep_run = 1;
+    for (size_t i = 1; i < len; i++) {
+        char p = pwd[i - 1], c = pwd[i];
+        if (p >= '0' && p <= '9' && c >= '0' && c <= '9') {
+            int diff = (int)c - (int)p;
+            if (diff == 1) {
+                asc_run++;
+                if (asc_run >= 4) return true;
+            } else {
+                asc_run = 1;
+            }
+
+            if (diff == -1) {
+                desc_run++;
+                if (desc_run >= 4) return true;
+            } else {
+                desc_run = 1;
+            }
+
+            if (diff == 0) {
+                rep_run++;
+                if (rep_run >= 4) return true;
+            } else {
+                rep_run = 1;
+            }
+        } else {
+            asc_run = 1;
+            desc_run = 1;
+            rep_run = 1;
+        }
+    }
+
+    return false;
+}
+
 /* POST /api/settings, body "section.key=value&...": each value written to
  * config.ini (comments kept); new WiFi settings are tried at once */
 static esp_err_t http_settings_post(httpd_req_t *req) {
@@ -1781,6 +1846,13 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (!settings_name_ok(section) || !settings_name_ok(key)) {
             free(body);
             return http_error(req, "section and key: a-z, 0-9, _");
+        }
+        if (strcmp(key, "wifi_password") == 0 || strcmp(key, "hardware_password") == 0 ||
+            strcmp(key, "http_password") == 0 || strcmp(key, "password") == 0) {
+            if (value[0] != '\0' && is_weak_password(value)) {
+                free(body);
+                return http_error(req, "weak password: must be at least 6 characters and cannot use sequential or repeated digits");
+            }
         }
         const char *v = value;
         if (!config_save(section, &key, &v, 1)) {
@@ -3128,6 +3200,10 @@ static Value prim_config_set(MiniVM *vm, int argc, Value *argv) {
         return mini_void();
     }
     const char *key = mini_string_data(argv[1]), *value = mini_string_data(argv[2]);
+    if (strstr(key, "password") != NULL && value[0] != '\0' && is_weak_password(value)) {
+        vm_error(vm, "config-set!: weak password rejected (sequential or repeated numbers)");
+        return mini_void();
+    }
     return config_save(mini_string_data(argv[0]), &key, &value, 1) ? mini_true() : mini_false();
 }
 

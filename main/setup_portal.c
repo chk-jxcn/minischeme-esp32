@@ -53,21 +53,10 @@ static void gen_random_digits(char *buf, size_t len) {
         return;
     }
     size_t digits = len - 1;
-    while (1) {
-        bool all_same = true;
-        bool asc = true;
-        bool desc = true;
-        for (size_t i = 0; i < digits; i++) {
-            buf[i] = (char)('0' + (esp_random() % 10));
-            if (i > 0) {
-                if (buf[i] != buf[0]) all_same = false;
-                if (buf[i] != buf[i - 1] + 1) asc = false;
-                if (buf[i] != buf[i - 1] - 1) desc = false;
-            }
-        }
-        buf[digits] = '\0';
-        if (!all_same && !asc && !desc) break;
+    for (size_t i = 0; i < digits; i++) {
+        buf[i] = (char)('0' + (esp_random() % 10));
     }
+    buf[digits] = '\0';
 }
 
 static void apply_preset(int idx) {
