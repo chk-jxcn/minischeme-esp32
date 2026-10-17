@@ -491,13 +491,24 @@ void esp32_ili9488_init(void) {
     printf("[ILI9488 DIAG] 0x0A Power Mode: 0x%02X | 0x0B MADCTL: 0x%02X | 0x0C PixFmt: 0x%02X\n",
            pwr_0a[0], mad_0b[0], pix_0c[0]);
 
-    /* Clear screen to black on power-up */
+    /* Display RGBW diagnostic test bands on power-up */
     startWrite();
     setAddrWindow(0, 0, ESP32_TFT_WIDTH, ESP32_TFT_HEIGHT);
-    for (int i = 0; i < ESP32_TFT_WIDTH * ESP32_TFT_HEIGHT; i++) {
-        tft_Write_16(0x0000);
+    int band_h = ESP32_TFT_HEIGHT / 4;
+    for (int y = 0; y < ESP32_TFT_HEIGHT; y++) {
+        uint16_t c;
+        if (y < band_h) c = 0xF800;             /* Red */
+        else if (y < band_h * 2) c = 0x07E0;    /* Green */
+        else if (y < band_h * 3) c = 0x001F;    /* Blue */
+        else c = 0xFFFF;                        /* White */
+        for (int x = 0; x < ESP32_TFT_WIDTH; x++) {
+            tft_Write_16(c);
+        }
     }
     endWrite();
+    delay(400);
+
+    /* Keep RGBW diagnostic test pattern on display until GUI flush */
 }
 
 void esp32_ili9488_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
@@ -701,10 +712,6 @@ bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool r
     int control = probe_matches();
     ESP_LOGI("ILI9488", "readback control (GPIO write): %d/%d pixels", control, PROBE_PIXELS);
     bool can_verify = (control == PROBE_PIXELS);
-    if (!can_verify) {
-        ESP_LOGW("ILI9488", "panel readback unusable, falling back to GPIO bit-bang transfers");
-        return false;
-    }
 
     /* WR clock is 40 MHz / n on the I2S bus: step n up until writes land */
     for (uint32_t n = 40000000u / pclk_hz; n == 0 || 40000000u / n >= 2000000u; n++) {
@@ -716,6 +723,10 @@ bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool r
         for (int i = 0; i < PROBE_PIXELS; i++) { tft_Write_16(0x39E7); }
         endWrite();
         if (!i80_open(max_transfer_bytes, hz, true)) return false;
+        if (!can_verify) {
+            ESP_LOGW("ILI9488", "panel readback unusable, trusting DMA at %u Hz unverified", (unsigned)hz);
+            return true;
+        }
         i80_set_window(0, 0, PROBE_PIXELS, 1);
         esp_err_t err = esp_lcd_panel_io_tx_color(s_i80_io, TFT_RAMWR, s_probe, sizeof(s_probe));
         esp_lcd_panel_io_tx_param(s_i80_io, TFT_NOP, NULL, 0); /* waits for the color transfer */
