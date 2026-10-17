@@ -3403,6 +3403,11 @@ static bool boot_app_path(const char *value, char *out, size_t cap) {
 
 /* Returns true if an application is installed and ready to boot */
 static bool has_installed_app(void) {
+    if (!s_sys_cfg.boot_app[0] ||
+        strcasecmp(s_sys_cfg.boot_app, "settings") == 0 ||
+        strcasecmp(s_sys_cfg.boot_app, "system") == 0) {
+        return false;
+    }
     char path[64];
     if (boot_app_path(s_sys_cfg.boot_app, path, sizeof(path))) {
         if (strncmp(path, APPS_DIR "/settings/", sizeof(APPS_DIR "/settings/") - 1) != 0 &&
@@ -4292,7 +4297,7 @@ void app_main(void) {
     if (s_builtin_boot == BUILTIN_SETTINGS_MAGIC) s_builtin_settings = s_settings_mode;
     s_builtin_boot = 0;
     if (!s_settings_mode && !has_installed_app()) {
-        ESP_LOGI(TAG, "No app installed; starting built-in system settings");
+        ESP_LOGI(TAG, "Starting system settings (boot app is settings or no app installed)");
         s_settings_mode = true;
         s_builtin_settings = true;
     }
