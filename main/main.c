@@ -173,7 +173,7 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 /* Defaults of the [display] / [memory] options in config.ini */
 #define CONFIG_VERSION        3
 #define DEF_BAND_LINES        13                    /* 320 px: 8.3 KB band + 16.6 KB DMA */
-#define DEF_LCD_CLOCK_HZ      (20 * 1000 * 1000)    /* verified at boot, lowered if needed */
+#define DEF_LCD_CLOCK_HZ      (10 * 1000 * 1000)    /* safe DMA clock across parallel ILI9488 panels */
 #define DEF_MAX_HEAP          (128 * 1024)
 #define DEF_VM_EDEN           (4 * 1024)
 #define DEF_VM_STACK          1024
