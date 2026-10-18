@@ -2980,7 +2980,7 @@ static void mirror_stream_task(void *pvParameters) {
 
 static void start_mirror_server(void) {
     if (s_mirror_task_handle != NULL) return;
-    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 2560, NULL, 5, &s_mirror_task_handle, 0);
+    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 4096, NULL, 5, &s_mirror_task_handle, 0);
 }
 
 #endif /* MINISCHEME_FW_HTTP */
