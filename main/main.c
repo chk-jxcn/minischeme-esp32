@@ -47,6 +47,7 @@
 #include "esp_partition.h"
 #include "esp_attr.h"
 #include <stdarg.h>
+#include <errno.h>
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -2575,6 +2576,402 @@ static void start_http_server(void) {
     }
     s_http_started = true;
     ESP_LOGI(TAG, "HTTP remote API listening on port %d", config.server_port);
+    start_mirror_server();
+}
+
+/* ========================================================================= */
+/* TCP Mirror Streaming Server (T2 & T3 on port 8088, Zero PSRAM)            */
+/* ========================================================================= */
+
+#define MIRROR_TCP_PORT 8088
+#define MIRROR_CHUNK_CAP 3072 /* 3 KB internal SRAM buffer, zero PSRAM */
+
+static TaskHandle_t s_mirror_task_handle = NULL;
+
+/* RFC 3174 SHA-1 for WebSocket handshake */
+static void mirror_sha1_transform(uint32_t state[5], const uint8_t buffer[64]) {
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)buffer[i * 4] << 24) |
+               ((uint32_t)buffer[i * 4 + 1] << 16) |
+               ((uint32_t)buffer[i * 4 + 2] << 8) |
+               ((uint32_t)buffer[i * 4 + 3]);
+    }
+    for (int i = 16; i < 80; i++) {
+        uint32_t t = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
+        w[i] = (t << 1) | (t >> 31);
+    }
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
+        uint32_t temp = ((a << 5) | (a >> 27)) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = (b << 30) | (b >> 2);
+        b = a;
+        a = temp;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+}
+
+static void mirror_sha1(const uint8_t *data, size_t len, uint8_t out[20]) {
+    uint32_t state[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
+    uint8_t block[64];
+    size_t i = 0;
+    while (i + 64 <= len) {
+        mirror_sha1_transform(state, data + i);
+        i += 64;
+    }
+    size_t rem = len - i;
+    memcpy(block, data + i, rem);
+    block[rem++] = 0x80;
+    if (rem > 56) {
+        memset(block + rem, 0, 64 - rem);
+        mirror_sha1_transform(state, block);
+        memset(block, 0, 56);
+    } else {
+        memset(block + rem, 0, 56 - rem);
+    }
+    uint64_t bits = (uint64_t)len * 8;
+    for (int b = 0; b < 8; b++) {
+        block[56 + b] = (uint8_t)(bits >> (56 - b * 8));
+    }
+    mirror_sha1_transform(state, block);
+    for (int j = 0; j < 5; j++) {
+        out[j * 4] = (uint8_t)(state[j] >> 24);
+        out[j * 4 + 1] = (uint8_t)(state[j] >> 16);
+        out[j * 4 + 2] = (uint8_t)(state[j] >> 8);
+        out[j * 4 + 3] = (uint8_t)(state[j]);
+    }
+}
+
+static void mirror_b64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_max) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t oi = 0;
+    for (size_t i = 0; i < in_len && oi + 4 < out_max; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        if (i + 1 < in_len) v |= (uint32_t)in[i + 1] << 8;
+        if (i + 2 < in_len) v |= (uint32_t)in[i + 2];
+        out[oi++] = tbl[(v >> 18) & 0x3F];
+        out[oi++] = tbl[(v >> 12) & 0x3F];
+        out[oi++] = (i + 1 < in_len) ? tbl[(v >> 6) & 0x3F] : '=';
+        out[oi++] = (i + 2 < in_len) ? tbl[v & 0x3F] : '=';
+    }
+    out[oi] = '\0';
+}
+
+static bool mirror_ws_accept(const char *key, char *out, size_t out_max) {
+    char combined[128];
+    snprintf(combined, sizeof(combined), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+    uint8_t sha[20];
+    mirror_sha1((const uint8_t *)combined, strlen(combined), sha);
+    mirror_b64_encode(sha, 20, out, out_max);
+    return true;
+}
+
+static void mirror_stream_task(void *pvParameters) {
+    (void)pvParameters;
+    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (listen_fd < 0) {
+        ESP_LOGE(TAG, "Mirror stream: socket creation failed (errno %d)", errno);
+        s_mirror_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serv_addr.sin_port = htons(MIRROR_TCP_PORT);
+
+    if (bind(listen_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0) {
+        ESP_LOGE(TAG, "Mirror stream: socket bind to port %d failed (errno %d)", MIRROR_TCP_PORT, errno);
+        close(listen_fd);
+        s_mirror_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (listen(listen_fd, 2) != 0) {
+        ESP_LOGE(TAG, "Mirror stream: socket listen failed (errno %d)", errno);
+        close(listen_fd);
+        s_mirror_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Mirror stream server (T2/T3) listening on port %d", MIRROR_TCP_PORT);
+
+    char *chunk_buf = (char *)malloc(MIRROR_CHUNK_CAP);
+    if (!chunk_buf) {
+        ESP_LOGE(TAG, "Mirror stream: out of memory for chunk buffer");
+        close(listen_fd);
+        s_mirror_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_fd < 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        int nodelay = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+        /* Send timeout: 3 seconds */
+        struct timeval tv_send = { .tv_sec = 3, .tv_usec = 0 };
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send));
+
+        /* Handshake read timeout: 3 seconds */
+        struct timeval tv_handshake = { .tv_sec = 3, .tv_usec = 0 };
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_handshake, sizeof(tv_handshake));
+
+        char rx_buf[512];
+        int rx_len = recv(client_fd, rx_buf, sizeof(rx_buf) - 1, 0);
+        if (rx_len <= 0) {
+            close(client_fd);
+            continue;
+        }
+        rx_buf[rx_len] = '\0';
+
+        bool is_ws = false;
+        uint32_t client_since = 0;
+        bool authed = false;
+
+        if (strncmp(rx_buf, "AUTH", 4) == 0) {
+            if (s_http_password[0] == '\0') {
+                authed = true;
+            } else {
+                char req_pass[65] = {0};
+                const char *p = rx_buf + 4;
+                while (*p == ' ') p++;
+                int pi = 0;
+                while (*p && *p != ' ' && *p != '\r' && *p != '\n' && pi < (int)sizeof(req_pass) - 1) {
+                    req_pass[pi++] = *p++;
+                }
+                req_pass[pi] = '\0';
+                if (strcmp(req_pass, s_http_password) == 0) authed = true;
+            }
+
+            const char *since_ptr = strstr(rx_buf, "since=");
+            if (since_ptr) {
+                client_since = (uint32_t)strtoul(since_ptr + 6, NULL, 10);
+            }
+
+            if (!authed) {
+                const char *err = "ERR auth failed\n";
+                send(client_fd, err, strlen(err), 0);
+                close(client_fd);
+                continue;
+            }
+            const char *ok = "+OK\n";
+            send(client_fd, ok, strlen(ok), 0);
+        } else if (strncmp(rx_buf, "GET ", 4) == 0) {
+            if (s_http_password[0] == '\0') {
+                authed = true;
+            } else {
+                char auth_token[65] = {0};
+                const char *tok = strstr(rx_buf, "auth=");
+                if (!tok) tok = strstr(rx_buf, "token=");
+                if (tok) {
+                    tok = strchr(tok, '=') + 1;
+                    int ti = 0;
+                    while (*tok && *tok != '&' && *tok != ' ' && *tok != '\r' && *tok != '\n' && ti < (int)sizeof(auth_token) - 1) {
+                        auth_token[ti++] = *tok++;
+                    }
+                    auth_token[ti] = '\0';
+                    if (strcmp(auth_token, s_http_password) == 0) authed = true;
+                }
+            }
+
+            if (!authed) {
+                const char *resp_401 = "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n";
+                send(client_fd, resp_401, strlen(resp_401), 0);
+                close(client_fd);
+                continue;
+            }
+
+            const char *key_hdr = strstr(rx_buf, "Sec-WebSocket-Key:");
+            if (!key_hdr) key_hdr = strstr(rx_buf, "sec-websocket-key:");
+            if (!key_hdr) {
+                close(client_fd);
+                continue;
+            }
+            key_hdr += 18;
+            while (*key_hdr == ' ') key_hdr++;
+            char ws_key[64] = {0};
+            int ki = 0;
+            while (*key_hdr && *key_hdr != '\r' && *key_hdr != '\n' && ki < (int)sizeof(ws_key) - 1) {
+                ws_key[ki++] = *key_hdr++;
+            }
+            ws_key[ki] = '\0';
+
+            char ws_accept[64] = {0};
+            mirror_ws_accept(ws_key, ws_accept, sizeof(ws_accept));
+
+            char ws_resp[256];
+            int n = snprintf(ws_resp, sizeof(ws_resp),
+                             "HTTP/1.1 101 Switching Protocols\r\n"
+                             "Upgrade: websocket\r\n"
+                             "Connection: Upgrade\r\n"
+                             "Sec-WebSocket-Accept: %s\r\n\r\n", ws_accept);
+            send(client_fd, ws_resp, (size_t)n, 0);
+            is_ws = true;
+        } else {
+            const char *err = "ERR unknown protocol\n";
+            send(client_fd, err, strlen(err), 0);
+            close(client_fd);
+            continue;
+        }
+
+        struct timeval tv_poll = { .tv_sec = 0, .tv_usec = 20000 };
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_poll, sizeof(tv_poll));
+
+        int from_row = 0;
+        uint32_t pass_clock = 0;
+
+        while (1) {
+            int r = recv(client_fd, rx_buf, sizeof(rx_buf) - 1, 0);
+            if (r > 0) {
+                rx_buf[r] = '\0';
+                if (is_ws) {
+                    if ((uint8_t)rx_buf[0] == 0x88) break;
+                    if ((uint8_t)rx_buf[0] == 0x89) {
+                        uint8_t pong[2] = { 0x8A, 0x00 };
+                        send(client_fd, pong, 2, 0);
+                    }
+                } else {
+                    if (strncmp(rx_buf, "QUIT", 4) == 0) break;
+                    if (strncmp(rx_buf, "FULL", 4) == 0) { client_since = 0; from_row = 0; }
+                    if (strncmp(rx_buf, "PING", 4) == 0) send(client_fd, "PONG\n", 5, 0);
+                }
+            } else if (r == 0) {
+                break;
+            } else {
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    break;
+                }
+            }
+
+            uint32_t cur_clock = mini_mirror_clock();
+            if (cur_clock == client_since && from_row == 0) {
+                vTaskDelay(pdMS_TO_TICKS(15));
+                continue;
+            }
+
+            RemoteJob job = {
+                .kind = JOB_SCREEN,
+                .buf = NULL,
+                .len = 0,
+                .path = {0},
+                .out = chunk_buf,
+                .out_cap = MIRROR_CHUNK_CAP,
+                .out_len = 0,
+                .full = (client_since == 0),
+                .since_set = true,
+                .since = client_since,
+                .from = from_row,
+                .bits = 0,
+                .scheme = -1,
+                .failed = false
+            };
+            submit_job_and_wait(&job);
+
+            if (job.out_len < MINI_MIRROR_HEADER) {
+                if (from_row > 0) {
+                    from_row = 0;
+                    client_since = pass_clock;
+                } else {
+                    client_since = cur_clock;
+                }
+                continue;
+            }
+
+            uint8_t flags = (uint8_t)chunk_buf[5];
+            uint16_t nrows = (uint16_t)((uint8_t)chunk_buf[10] | (((uint8_t)chunk_buf[11]) << 8));
+            uint32_t chunk_clock = (uint32_t)((uint8_t)chunk_buf[12] |
+                                              (((uint8_t)chunk_buf[13]) << 8) |
+                                              (((uint8_t)chunk_buf[14]) << 16) |
+                                              (((uint8_t)chunk_buf[15]) << 24));
+            if (from_row == 0) {
+                pass_clock = chunk_clock;
+            }
+
+            int last_row = -1;
+            if (nrows > 0) {
+                size_t at = 16;
+                for (int i = 0; i < (int)nrows && at + 4 <= job.out_len; i++) {
+                    last_row = (int)((uint8_t)chunk_buf[at] | (((uint8_t)chunk_buf[at + 1]) << 8));
+                    uint16_t nbytes = (uint16_t)((uint8_t)chunk_buf[at + 2] | (((uint8_t)chunk_buf[at + 3]) << 8));
+                    at += 4 + (size_t)nbytes;
+                }
+            }
+
+            if (is_ws) {
+                uint8_t ws_hdr[4];
+                ws_hdr[0] = 0x82;
+                ws_hdr[1] = 126;
+                ws_hdr[2] = (uint8_t)(job.out_len >> 8);
+                ws_hdr[3] = (uint8_t)(job.out_len & 0xFF);
+                if (send(client_fd, ws_hdr, 4, 0) < 0 ||
+                    send(client_fd, chunk_buf, job.out_len, 0) < 0) {
+                    break;
+                }
+            } else {
+                uint32_t len_le = (uint32_t)job.out_len;
+                if (send(client_fd, &len_le, 4, 0) < 0 ||
+                    send(client_fd, chunk_buf, job.out_len, 0) < 0) {
+                    break;
+                }
+            }
+
+            if ((flags & MINI_MIRROR_MORE) && last_row >= 0) {
+                from_row = last_row + 1;
+            } else {
+                from_row = 0;
+                client_since = pass_clock;
+                vTaskDelay(pdMS_TO_TICKS(25));
+            }
+        }
+
+        close(client_fd);
+    }
+
+    free(chunk_buf);
+    close(listen_fd);
+    s_mirror_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void start_mirror_server(void) {
+    if (s_mirror_task_handle != NULL) return;
+    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 4096, NULL, 5, &s_mirror_task_handle, 0);
 }
 
 #endif /* MINISCHEME_FW_HTTP */
