@@ -353,6 +353,11 @@ uint8_t mini_backlight_get(void);
  * every change made from Scheme so the host can keep it. */
 bool mini_backlight_auto(void);
 void mini_backlight_auto_set(bool on);
+void mini_backlight_set_params(int offset, int min_val, int max_val);
+int  mini_backlight_get_offset(void);
+int  mini_backlight_get_min(void);
+int  mini_backlight_get_max(void);
+int  mini_backlight_calc_dynamic(int light_raw, int min_val, int max_val, int offset);
 void mini_backlight_auto_step(void);
 void mini_backlight_set_hook(void (*hook)(bool auto_on, int level));
 void mini_button_set(bool pressed); // for simulator injection

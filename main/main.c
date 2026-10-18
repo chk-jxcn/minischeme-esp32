@@ -1688,6 +1688,8 @@ static bool sta_status(char *ssid, size_t ssid_cap, char *ip, size_t ip_cap, int
     return true;
 }
 
+static void setup_channel(const char *cfg);
+
 /* GET /api/settings: what the settings page shows (never the password) */
 static esp_err_t http_settings_get(httpd_req_t *req) {
     char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
@@ -1700,7 +1702,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     static const char *const keys[] = { "device_name", "boot_app", "wifi_ssid", "proxy", "market_url",
                                         "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                        "channel_server", "channel_id", "proxy_via_channel", "market_via_channel" };
+                                        "channel_server", "channel_id", "proxy_via_channel", "market_via_channel",
+                                        "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
     char vals[NKEYS][96];
     for (int i = 0; i < NKEYS; i++) {
@@ -1719,7 +1722,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     static const char *const names[] = { "device_name", "boot", "wifi_ssid", "proxy", "market_url",
                                          "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                         "channel_server", "channel_id", "proxy_via_channel", "market_via_channel" };
+                                         "channel_server", "channel_id", "proxy_via_channel", "market_via_channel",
+                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
     n += (size_t)snprintf(out + n, 2048 - n, ",\"channel_key_set\":%s,\"channel_ready\":%s",
                           key_set ? "true" : "false", mini_chan_enabled() ? "true" : "false");
     for (int i = 0; i < NKEYS && n < 1900; i++) {
@@ -1821,7 +1825,7 @@ static bool is_weak_password(const char *pwd) {
 }
 
 /* POST /api/settings, body "section.key=value&...": each value written to
- * config.ini (comments kept); new WiFi settings are tried at once */
+ * config.ini (comments kept); new WiFi, button, channel, and backlight settings apply at once */
 static esp_err_t http_settings_post(httpd_req_t *req) {
     const char *err = NULL;
     size_t len = 0;
@@ -1829,7 +1833,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
     char *body = (char *)http_read_body(req, &len, &err);
     if (!body) return http_error(req, err);
     char wifi_ssid[33] = "", wifi_pass[65] = "";
-    bool wifi = false, have_pass = false, buttons = false;
+    bool wifi = false, have_pass = false, buttons = false, backlight_upd = false, channel_upd = false;
     int saved = 0;
     for (char *field = strtok(body, "&"); field; field = strtok(NULL, "&")) {
         char *eq = strchr(field, '=');
@@ -1865,13 +1869,33 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strcmp(key, "wifi_ssid") == 0) { snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", value); wifi = true; }
         if (strcmp(key, "wifi_password") == 0) { snprintf(wifi_pass, sizeof(wifi_pass), "%s", value); have_pass = true; wifi = true; }
         if (strncmp(key, "button_", 7) == 0) buttons = true;
+        if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
+        if (strncmp(key, "channel_", 8) == 0 || strcmp(key, "proxy_via_channel") == 0 ||
+            strcmp(key, "market_via_channel") == 0 || strcmp(key, "proxy") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
     free(body);
-    if (buttons) {   /* the KEY 18 times apply at once */
+    if (buttons || backlight_upd || channel_upd) {
         char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
         if (cfg) {
-            mini_device_button_config(cfg);
+            if (buttons) mini_device_button_config(cfg);
+            if (channel_upd) setup_channel(cfg);
+            if (backlight_upd) {
+                char vbuf[16];
+                int cur_off = mini_backlight_get_offset();
+                int cur_min = mini_backlight_get_min();
+                int cur_max = mini_backlight_get_max();
+                if (mini_device_config_value(cfg, "backlight_offset", vbuf, sizeof(vbuf)) && vbuf[0]) cur_off = atoi(vbuf);
+                if (mini_device_config_value(cfg, "backlight_min", vbuf, sizeof(vbuf)) && vbuf[0]) cur_min = atoi(vbuf);
+                if (mini_device_config_value(cfg, "backlight_max", vbuf, sizeof(vbuf)) && vbuf[0]) cur_max = atoi(vbuf);
+                mini_backlight_set_params(cur_off, cur_min, cur_max);
+                bool auto_bl = mini_backlight_auto();
+                if (mini_device_config_value(cfg, "auto_backlight", vbuf, sizeof(vbuf)) && vbuf[0]) auto_bl = (atoi(vbuf) != 0);
+                if (!auto_bl && mini_device_config_value(cfg, "backlight", vbuf, sizeof(vbuf)) && vbuf[0]) {
+                    mini_backlight_set((uint8_t)atoi(vbuf));
+                }
+                mini_backlight_auto_set(auto_bl);
+            }
             free(cfg);
         }
     }
@@ -2568,6 +2592,9 @@ typedef struct {
     MiniGuiScheme scheme;          /* color scheme (palette) */
     bool auto_backlight;           /* brightness from the light sensor */
     int backlight;                 /* fixed brightness otherwise */
+    int backlight_offset;          /* dynamic curve offset -10..10 */
+    int backlight_min;             /* dynamic minimum brightness 0..255 */
+    int backlight_max;             /* dynamic maximum brightness 0..255 */
     int width;
     int height;
     bool lcd_dma;                  /* I2S DMA bus (false: GPIO bit-bang) */
@@ -2605,6 +2632,9 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->scheme = MINI_GUI_SCHEME_COLOR;
     cfg->auto_backlight = true;
     cfg->backlight = 220;
+    cfg->backlight_offset = 0;
+    cfg->backlight_min = 30;
+    cfg->backlight_max = 255;
     cfg->width = 320;
     cfg->height = 480;
     cfg->lcd_dma = true;
@@ -2669,6 +2699,15 @@ static bool config_apply(SystemConfig *cfg, const char *key, const char *val, in
     } else if (strcasecmp(key, "backlight") == 0) {
         if (!parse_long(val, 0, 255, &v)) return false;
         cfg->backlight = (int)v;
+    } else if (strcasecmp(key, "backlight_offset") == 0) {
+        if (!parse_long(val, -10, 10, &v)) return false;
+        cfg->backlight_offset = (int)v;
+    } else if (strcasecmp(key, "backlight_min") == 0) {
+        if (!parse_long(val, 0, 255, &v)) return false;
+        cfg->backlight_min = (int)v;
+    } else if (strcasecmp(key, "backlight_max") == 0) {
+        if (!parse_long(val, 0, 255, &v)) return false;
+        cfg->backlight_max = (int)v;
     } else if (strcasecmp(key, "width") == 0) {
         if (!parse_long(val, 16, 480, &v)) return false;
         cfg->width = (int)v;
@@ -2723,20 +2762,19 @@ static bool config_apply(SystemConfig *cfg, const char *key, const char *val, in
     } else if (strcasecmp(key, "web_in_app") == 0) {
         if (!parse_long(val, 0, 1, &v)) return false;
         cfg->web_in_app = v != 0;
-    } else if (strcasecmp(key, "wifi_ssid") == 0 || strcasecmp(key, "ssid") == 0) {
+    } else if (strcasecmp(key, "wifi_ssid") == 0) {
         if (strlen(val) >= sizeof(cfg->wifi_ssid)) return false;
         snprintf(cfg->wifi_ssid, sizeof(cfg->wifi_ssid), "%s", val);
-    } else if (strcasecmp(key, "wifi_password") == 0 || strcasecmp(key, "wifi_pass") == 0) {
+    } else if (strcasecmp(key, "wifi_password") == 0) {
         if (strlen(val) >= sizeof(cfg->wifi_pass)) return false;
         snprintf(cfg->wifi_pass, sizeof(cfg->wifi_pass), "%s", val);
-    } else if (strcasecmp(key, "http_password") == 0 || strcasecmp(key, "hardware_password") == 0) {
+    } else if (strcasecmp(key, "http_password") == 0 || strcasecmp(key, "password") == 0) {
         if (strlen(val) >= sizeof(cfg->http_password)) return false;
         snprintf(cfg->http_password, sizeof(cfg->http_password), "%s", val);
         snprintf(s_http_password, sizeof(s_http_password), "%s", val);
-    } else if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "https_proxy") == 0 ||
-               strcasecmp(key, "proxy_url") == 0 || strcasecmp(key, "converter_url") == 0 ||
-               strncasecmp(key, "app_", 4) == 0 || strncasecmp(key, "pcmon_", 6) == 0) {
-        /* [app] / [server] keys belong to Scheme apps: read with (config-get key) */
+    } else if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "https_proxy") == 0 || strncasecmp(key, "app_", 4) == 0 ||
+               strncasecmp(key, "pcmon_", 6) == 0) {
+        /* [app] keys belong to Scheme apps: read with (config-get key) */
     } else if (strncasecmp(key, "channel_", 8) == 0 || strcasecmp(key, "proxy_via_channel") == 0 ||
                strcasecmp(key, "market_via_channel") == 0) {
         /* [channel]: applied by setup_channel at boot */
@@ -3410,11 +3448,6 @@ static bool boot_app_path(const char *value, char *out, size_t cap) {
 
 /* Returns true if an application is installed and ready to boot */
 static bool has_installed_app(void) {
-    if (!s_sys_cfg.boot_app[0] ||
-        strcasecmp(s_sys_cfg.boot_app, "settings") == 0 ||
-        strcasecmp(s_sys_cfg.boot_app, "system") == 0) {
-        return false;
-    }
     char path[64];
     if (boot_app_path(s_sys_cfg.boot_app, path, sizeof(path))) {
         if (strncmp(path, APPS_DIR "/settings/", sizeof(APPS_DIR "/settings/") - 1) != 0 &&
@@ -4075,11 +4108,14 @@ static void backlight_changed(bool auto_on, int level) {
 static void backlight_save_pending(void) {
     if (!s_bl_pending || esp_timer_get_time() - s_bl_changed_us < 3000000) return;
     s_bl_pending = false;
-    char level[8];
+    char level[8], offset[8], min_val[8], max_val[8];
     snprintf(level, sizeof(level), "%d", s_sys_cfg.backlight);
-    const char *keys[2] = { "auto_backlight", "backlight" };
-    const char *values[2] = { s_sys_cfg.auto_backlight ? "1" : "0", level };
-    if (!config_save("display", keys, values, 2)) ESP_LOGW(TAG, "Backlight setting not saved");
+    snprintf(offset, sizeof(offset), "%d", s_sys_cfg.backlight_offset);
+    snprintf(min_val, sizeof(min_val), "%d", s_sys_cfg.backlight_min);
+    snprintf(max_val, sizeof(max_val), "%d", s_sys_cfg.backlight_max);
+    const char *keys[5] = { "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
+    const char *values[5] = { s_sys_cfg.auto_backlight ? "1" : "0", level, offset, min_val, max_val };
+    if (!config_save("display", keys, values, 5)) ESP_LOGW(TAG, "Backlight setting not saved");
 }
 
 static void record_last_app(void) {
@@ -4272,6 +4308,7 @@ void app_main(void) {
     /* 4. Peripherals */
     esp32_backlight_init();
     mini_backlight_set((uint8_t)s_sys_cfg.backlight);
+    mini_backlight_set_params(s_sys_cfg.backlight_offset, s_sys_cfg.backlight_min, s_sys_cfg.backlight_max);
     mini_backlight_auto_set(s_sys_cfg.auto_backlight);
     mini_backlight_set_hook(backlight_changed);
     esp32_ws2812_init();
@@ -4304,7 +4341,7 @@ void app_main(void) {
     if (s_builtin_boot == BUILTIN_SETTINGS_MAGIC) s_builtin_settings = s_settings_mode;
     s_builtin_boot = 0;
     if (!s_settings_mode && !has_installed_app()) {
-        ESP_LOGI(TAG, "Starting system settings (boot app is settings or no app installed)");
+        ESP_LOGI(TAG, "No app installed; starting built-in system settings");
         s_settings_mode = true;
         s_builtin_settings = true;
     }

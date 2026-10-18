@@ -1135,6 +1135,9 @@ uint8_t mini_backlight_get(void) {
  * (mini_device_clock_tick); (backlight-set n) turns it off. A host hook
  * keeps the choice (config.ini [display] auto_backlight / backlight). */
 static bool s_backlight_auto = true;
+static int  s_backlight_offset = 0;   /* -10 to 10 */
+static int  s_backlight_min = 30;     /* 0 to 255 */
+static int  s_backlight_max = 255;    /* 0 to 255 */
 static void (*s_backlight_hook)(bool auto_on, int level) = NULL;
 
 bool mini_backlight_auto(void) {
@@ -1145,17 +1148,73 @@ void mini_backlight_auto_set(bool on) {
     s_backlight_auto = on;
 }
 
+void mini_backlight_set_params(int offset, int min_val, int max_val) {
+    if (offset < -10) offset = -10;
+    if (offset > 10) offset = 10;
+    if (min_val < 0) min_val = 0;
+    if (min_val > 255) min_val = 255;
+    if (max_val < 0) max_val = 0;
+    if (max_val > 255) max_val = 255;
+    if (min_val > max_val) {
+        int tmp = min_val;
+        min_val = max_val;
+        max_val = tmp;
+    }
+    s_backlight_offset = offset;
+    s_backlight_min = min_val;
+    s_backlight_max = max_val;
+}
+
+int mini_backlight_get_offset(void) {
+    return s_backlight_offset;
+}
+
+int mini_backlight_get_min(void) {
+    return s_backlight_min;
+}
+
+int mini_backlight_get_max(void) {
+    return s_backlight_max;
+}
+
+int mini_backlight_calc_dynamic(int light_raw, int min_val, int max_val, int offset) {
+    if (min_val < 0) min_val = 0;
+    if (min_val > 255) min_val = 255;
+    if (max_val < 0) max_val = 0;
+    if (max_val > 255) max_val = 255;
+    if (min_val > max_val) {
+        int tmp = min_val;
+        min_val = max_val;
+        max_val = tmp;
+    }
+    if (offset < -10) offset = -10;
+    if (offset > 10) offset = 10;
+    if (light_raw <= 0) return min_val;
+    if (light_raw >= 4095) return max_val;
+
+    double frac = (double)light_raw / 4095.0;
+    /* Gamma centered around 0.5 (square-root human eye response at offset 0).
+     * Offset > 0 decreases gamma (brighter curve), offset < 0 increases gamma (dimmer curve).
+     * 2^(-offset / 5.0) == exp(-offset * ln(2) / 5.0). */
+    double gamma = 0.5 * exp(-(double)offset * (0.6931471805599453 / 5.0));
+    double ratio = pow(frac, gamma);
+    int target = min_val + (int)((double)(max_val - min_val) * ratio + 0.5);
+    if (target < min_val) target = min_val;
+    if (target > max_val) target = max_val;
+    if (target < 0) target = 0;
+    if (target > 255) target = 255;
+    return target;
+}
+
 void mini_backlight_set_hook(void (*hook)(bool auto_on, int level)) {
     s_backlight_hook = hook;
 }
 
-/* Square-root curve: a dark room ~70, indoors ~190, direct light 255; each
+/* Dynamic brightness curve bounded by [min, max] with offset exponent; each
  * step goes half way, so the light changes smoothly */
 void mini_backlight_auto_step(void) {
     if (!s_backlight_auto) return;
-    double frac = (double)mini_light_read() / 4095.0;
-    int target = 60 + (int)(195.0 * sqrt(frac < 0 ? 0 : (frac > 1 ? 1 : frac)) + 0.5);
-    if (target > 255) target = 255;
+    int target = mini_backlight_calc_dynamic(mini_light_read(), s_backlight_min, s_backlight_max, s_backlight_offset);
     int now = s_backlight_val;
     int next = now + (target - now) / 2;
     if (next == now && now != target) next = target;
@@ -3647,6 +3706,39 @@ static Value prim_backlight_get(MiniVM *vm, int argc, Value *argv) {
     return mini_make_fixnum(mini_backlight_get());
 }
 
+/* (backlight-offset) => current offset; (backlight-offset n) sets -10..10 */
+static Value prim_backlight_offset(MiniVM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc >= 1 && mini_is_fixnum(argv[0])) {
+        int v = (int)mini_to_fixnum(argv[0]);
+        mini_backlight_set_params(v, s_backlight_min, s_backlight_max);
+        if (s_backlight_auto) mini_backlight_auto_step();
+    }
+    return mini_make_fixnum(s_backlight_offset);
+}
+
+/* (backlight-min) => current min; (backlight-min n) sets 0..255 */
+static Value prim_backlight_min(MiniVM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc >= 1 && mini_is_fixnum(argv[0])) {
+        int v = (int)mini_to_fixnum(argv[0]);
+        mini_backlight_set_params(s_backlight_offset, v, s_backlight_max);
+        if (s_backlight_auto) mini_backlight_auto_step();
+    }
+    return mini_make_fixnum(s_backlight_min);
+}
+
+/* (backlight-max) => current max; (backlight-max n) sets 0..255 */
+static Value prim_backlight_max(MiniVM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc >= 1 && mini_is_fixnum(argv[0])) {
+        int v = (int)mini_to_fixnum(argv[0]);
+        mini_backlight_set_params(s_backlight_offset, s_backlight_min, v);
+        if (s_backlight_auto) mini_backlight_auto_step();
+    }
+    return mini_make_fixnum(s_backlight_max);
+}
+
 static Value prim_button_read(MiniVM *vm, int argc, Value *argv) {
     (void)vm; (void)argc; (void)argv;
     return mini_make_fixnum(mini_button_read() ? 1 : 0);
@@ -4482,9 +4574,12 @@ void mini_register_gui_lib(MiniVM *vm) {
         { "ws2812-clear",    prim_ws2812_clear },
         { "light-read",      prim_light_read },
         { "light-lux",       prim_light_lux },
-        { "backlight-set",   prim_backlight_set },
-        { "backlight-auto",  prim_backlight_auto },
-        { "backlight-get",   prim_backlight_get },
+        { "backlight-set",    prim_backlight_set },
+        { "backlight-auto",   prim_backlight_auto },
+        { "backlight-get",    prim_backlight_get },
+        { "backlight-offset", prim_backlight_offset },
+        { "backlight-min",    prim_backlight_min },
+        { "backlight-max",    prim_backlight_max },
         { "button-read",     prim_button_read },
         { "button-pressed?", prim_button_pressed_p },
         { "display-model",      prim_display_model },

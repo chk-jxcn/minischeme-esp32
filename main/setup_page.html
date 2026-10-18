@@ -131,6 +131,16 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
 <label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
 <label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
+<div class="desc" style="margin-top:10px">屏幕亮度与光感调节（保存后立即生效）：</div>
+<label><input type="checkbox" id="blfixed"> 固定亮度模式（勾选后使用下方固定亮度值；不勾选则根据光感自动平滑调节）</label>
+<div class="row">
+<div><label for="blval">固定亮度值（0–255，默认 220）</label><input id="blval" type="number" min="0" max="255" step="1" placeholder="220"></div>
+<div><label for="bloff">亮度偏移指数（-10–10，默认 0）</label><input id="bloff" type="number" min="-10" max="10" step="1" placeholder="0"></div>
+</div>
+<div class="row">
+<div><label for="blmin">最低亮度限制（0–255，默认 30）</label><input id="blmin" type="number" min="0" max="255" step="1" placeholder="30"></div>
+<div><label for="blmax">最高亮度限制（0–255，默认 255）</label><input id="blmax" type="number" min="0" max="255" step="1" placeholder="255"></div>
+</div>
 <div class="desc" style="margin-top:10px">按键时间（毫秒，留空用默认值，保存后立即生效）：短长按和中长按交给应用；长长按打开硬件信息页，在硬件信息页上中长按进入系统设置。<span id="btnnow"></span></div>
 <label for="blong">短长按（默认 800，300–3000）</label>
 <input id="blong" type="number" min="300" max="3000" step="100" placeholder="800">
@@ -176,6 +186,22 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <script>
 const $ = id => document.getElementById(id);
 let state = {}, apps = [], marketApps = [];
+let authToken = '';
+try {
+  const sp = new URLSearchParams(location.search);
+  const qAuth = sp.get('auth') || sp.get('token');
+  if (qAuth) {
+    authToken = qAuth;
+    localStorage.setItem('minischeme_http_password', qAuth);
+  } else {
+    authToken = localStorage.getItem('minischeme_http_password') || '';
+  }
+} catch (e) {}
+
+function authUrl(path) {
+  if (!authToken) return path;
+  return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'auth=' + encodeURIComponent(authToken);
+}
 
 function say(text, cls) {
   const m = $('msg');
@@ -190,10 +216,20 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 }
 
-async function api(path, opts) {
-  const r = await fetch(path, opts);
+async function api(path, opts, retried) {
+  const r = await fetch(authUrl(path), opts);
   const text = await r.text();
-  try { return JSON.parse(text); } catch (e) { return {success: r.ok, text}; }
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = {success: r.ok, text}; }
+  if (r.status === 401 && !retried) {
+    const p = prompt('设备已开启访问密码保护，请输入硬件访问密码 (hardware_password)：', authToken || '');
+    if (p !== null) {
+      authToken = p.trim();
+      try { localStorage.setItem('minischeme_http_password', authToken); } catch (e) {}
+      return api(path, opts, true);
+    }
+  }
+  return data;
 }
 
 function form(obj) {
@@ -384,6 +420,11 @@ async function refresh() {
   if (document.activeElement !== $('webapp')) $('webapp').checked = !/^(0|false|no|off)$/i.test(state.web_in_app || '');
   if (document.activeElement !== $('mauto')) $('mauto').checked = on(state.market_auto_update);
   if (document.activeElement !== $('frkey')) $('frkey').checked = !/^(0|false|no|off)$/i.test(state.factory_reset_key || '');
+  if (document.activeElement !== $('blfixed')) $('blfixed').checked = /^(0|false|no|off)$/i.test(state.auto_backlight || '1');
+  keep('blval', state.backlight || '220');
+  keep('bloff', state.backlight_offset || '0');
+  keep('blmin', state.backlight_min || '30');
+  keep('blmax', state.backlight_max || '255');
   keep('blong', state.button_long_ms);
   keep('bmid', state.button_mid_ms);
   keep('bhold', state.button_hold_ms);
@@ -736,12 +777,21 @@ async function saveCommon(andRestart) {
   try {
     const [blong, bmid, bhold] = [buttonMs('blong'), buttonMs('bmid'), buttonMs('bhold')];
     const channel = channelFields();
+    const blval = String(Math.max(0, Math.min(255, parseInt($('blval').value || '220', 10) || 220)));
+    const bloff = String(Math.max(-10, Math.min(10, parseInt($('bloff').value || '0', 10) || 0)));
+    const blmin = String(Math.max(0, Math.min(255, parseInt($('blmin').value || '30', 10) || 30)));
+    const blmax = String(Math.max(0, Math.min(255, parseInt($('blmax').value || '255', 10) || 255)));
     await post({'system.boot_app': $('boot').value, 'system.device_name': $('device').value.trim(),
                 'app.proxy': $('proxy').value.trim(), 'app.https_proxy': $('hproxy').value.trim(),
                 'market.market_url': $('murl').value.trim(),
                 'market.market_auto_update': $('mauto').checked ? '1' : '0',
                 'system.web_in_app': $('webapp').checked ? '1' : '0',
                 'system.factory_reset_key': $('frkey').checked ? '1' : '0',
+                'display.auto_backlight': $('blfixed').checked ? '0' : '1',
+                'display.backlight': blval,
+                'display.backlight_offset': bloff,
+                'display.backlight_min': blmin,
+                'display.backlight_max': blmax,
                 'system.button_long_ms': blong, 'system.button_mid_ms': bmid, 'system.button_hold_ms': bhold,
                 ...channel});
     $('chkey').value = '';
@@ -755,7 +805,7 @@ async function saveCommon(andRestart) {
 /* Every key of config.ini, by section ([wifi] has its own form above) */
 let allCfg = {};
 async function loadAllConfig() {
-  const r = await fetch('/api/fs/read?path=' + encodeURIComponent('/spiffs/config.ini'));
+  const r = await fetch(authUrl('/api/fs/read?path=' + encodeURIComponent('/spiffs/config.ini')));
   const text = r.ok ? await r.text() : '';
   allCfg = parseIni(text);
   const secs = Object.keys(allCfg).filter(s => s && s !== 'wifi' && allCfg[s].length);
@@ -786,7 +836,7 @@ async function saveAllConfig(andRestart) {
 }
 
 async function loadText(path, id) {
-  const r = await fetch('/api/fs/read?path=' + encodeURIComponent(path));
+  const r = await fetch(authUrl('/api/fs/read?path=' + encodeURIComponent(path)));
   const text = await r.text();
   $(id).value = (!r.ok || text.startsWith('{"success":false')) ? '' : text;
 }
