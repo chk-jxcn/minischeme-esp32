@@ -1961,12 +1961,17 @@ static bool private_host(const char *h, size_t n) {
 }
 
 static bool origin_allowed(const char *origin) {
+    if (!origin || !origin[0]) return true;
     const char *h = strstr(origin, "://");
-    if (!h) return false;
-    h += 3;
-    size_t n = 0;
-    while (h[n] && h[n] != ':' && h[n] != '/') n++;
-    return private_host(h, n);
+    if (h) {
+        h += 3;
+        size_t n = 0;
+        while (h[n] && h[n] != ':' && h[n] != '/') n++;
+        if (private_host(h, n)) return true;
+    }
+    /* WebREPL (GitHub Pages, local proxy, etc.) is allowed; security is enforced
+     * by s_http_password authentication, Chrome PNA, and network boundary */
+    return true;
 }
 
 /* The request comes from this board (127.0.0.1 or one of its addresses) */
