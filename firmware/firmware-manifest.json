@@ -1,9 +1,21 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.39",
   "chip": "ESP32",
   "files": [
-    { "name": "bootloader.bin", "address": "0x1000", "offset": 4096 },
-    { "name": "partition-table.bin", "address": "0x8000", "offset": 32768 },
-    { "name": "minischeme_esp32.bin", "address": "0x10000", "offset": 65536 }
+    {
+      "name": "bootloader.bin",
+      "address": "0x1000",
+      "offset": 4096
+    },
+    {
+      "name": "partition-table.bin",
+      "address": "0x8000",
+      "offset": 32768
+    },
+    {
+      "name": "minischeme_esp32.bin",
+      "address": "0x10000",
+      "offset": 65536
+    }
   ]
 }
