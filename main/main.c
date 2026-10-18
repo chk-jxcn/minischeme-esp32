@@ -2585,7 +2585,9 @@ static void start_http_server(void) {
     }
     s_http_started = true;
     ESP_LOGI(TAG, "HTTP remote API listening on port %d", config.server_port);
-    start_mirror_server();
+    if (s_vm != NULL) {
+        start_mirror_server();
+    }
 }
 
 /* ========================================================================= */
@@ -2732,15 +2734,6 @@ static void mirror_stream_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "Mirror stream server (T2/T3) listening on port %d", MIRROR_TCP_PORT);
 
-    char *chunk_buf = (char *)malloc(MIRROR_CHUNK_CAP);
-    if (!chunk_buf) {
-        ESP_LOGE(TAG, "Mirror stream: out of memory for chunk buffer");
-        close(listen_fd);
-        s_mirror_task_handle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
@@ -2859,6 +2852,13 @@ static void mirror_stream_task(void *pvParameters) {
             continue;
         }
 
+        char *chunk_buf = (char *)malloc(MIRROR_CHUNK_CAP);
+        if (!chunk_buf) {
+            ESP_LOGE(TAG, "Mirror stream: out of memory for chunk buffer");
+            close(client_fd);
+            continue;
+        }
+
         struct timeval tv_poll = { .tv_sec = 0, .tv_usec = 20000 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_poll, sizeof(tv_poll));
 
@@ -2969,10 +2969,10 @@ static void mirror_stream_task(void *pvParameters) {
             }
         }
 
+        free(chunk_buf);
         close(client_fd);
     }
 
-    free(chunk_buf);
     close(listen_fd);
     s_mirror_task_handle = NULL;
     vTaskDelete(NULL);
@@ -2980,7 +2980,7 @@ static void mirror_stream_task(void *pvParameters) {
 
 static void start_mirror_server(void) {
     if (s_mirror_task_handle != NULL) return;
-    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 4096, NULL, 5, &s_mirror_task_handle, 0);
+    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 2560, NULL, 5, &s_mirror_task_handle, 0);
 }
 
 #endif /* MINISCHEME_FW_HTTP */
@@ -4823,6 +4823,11 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to initialize MiniVM!");
         return;
     }
+#if MINISCHEME_FW_HTTP
+    if (s_http_started) {
+        start_mirror_server();
+    }
+#endif
 
     /* 7. Run the app in place from Flash, else load it from SPIFFS to RAM
      * (bytecode, or a heap snapshot restored in place of the whole heap),
