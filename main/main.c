@@ -39,8 +39,16 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include <unistd.h>
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#ifndef TCP_NODELAY
+#define TCP_NODELAY 1
+#endif
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "lfsvfs.h"
@@ -2516,6 +2524,7 @@ static void setup_channel(const char *cfg) {
 
 static size_t s_http_stack = DEF_HTTP_STACK; /* [memory] http_stack */
 static bool s_http_started = false;
+static void start_mirror_server(void);
 
 static void start_http_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
