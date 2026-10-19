@@ -1144,6 +1144,8 @@ const char mini_device_config_template[] =
     "; (made from the app's defaults on its first start) overrides them\n"
     "proxy =                ; tools/app_proxy.py on a PC, http://<pc-ip>:8087: HTTPS sources for the apps\n"
     "https_proxy =          ; protocol converter for apps' https:// data (<it>/fetch?url=...); empty: proxy\n"
+    "carousel = 1           ; 1: auto-turn pages in multi-page apps; 0: manual only\n"
+    "carousel_seconds = 10  ; seconds per page (or comma-separated seconds per page)\n"
     "\n"
     "[market]\n"
     "; the app market: install and update apps in the system settings (the hardware pages' mid press, or\n"

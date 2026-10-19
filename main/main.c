@@ -4629,6 +4629,11 @@ void app_main(void) {
         const char *values[2] = { "1", "1" };
         config_save("text", keys, values, 2);
     }
+    if (!ini_file_value("/spiffs/config.ini", "carousel", wm_probe, sizeof(wm_probe))) {
+        const char *keys[2] = { "carousel", "carousel_seconds" };
+        const char *values[2] = { "1", "10" };
+        config_save("app", keys, values, 2);
+    }
     load_or_create_config("/spiffs/config.ini", &s_sys_cfg);
     s_http_stack = s_sys_cfg.http_stack;
     if (s_sys_cfg.color_fmt == MINI_GUI_COLOR_4BPP) s_sys_cfg.color_fmt = MINI_GUI_COLOR_RGB565;
