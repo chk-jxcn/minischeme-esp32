@@ -5,8 +5,8 @@
  *        of HTTPS (TLS needs 30-45 KB of RAM per connection on the board).
  *
  * Keys: the converter keeps one master key; a device's key is
- * HKDF-SHA256(salt "msc1 device key", ikm master, info device id), so the
- * converter needs no list of devices and the master key never leaves it.
+ * HKDF-SHA256(salt hardware hash key, ikm master, info device id), made when
+ * the device registers (below) and kept in the converter's device list.
  * Each request draws 16 random bytes (its nonce); HKDF-SHA256(salt nonce,
  * ikm device key, info "msc1 request keys") gives 64 bytes: the request key
  * and the response key. A key is used for one request only.
@@ -77,23 +77,52 @@ const char *mini_chan_error(int code);
 /** @brief 64 hex digits -> 32 bytes. */
 bool mini_chan_parse_key(const char *hex, uint8_t key[32]);
 
-/** @brief The device's channel settings (config.ini [channel]): server
- *         http://host:port or tcp://host:port, id, key (64 hex digits); the
- *         app proxy's and the market's base URLs and whether each goes
- *         through the converter. Empty or invalid: no channel. */
-void mini_chan_configure(const char *server, const char *id, const char *key_hex,
-                         const char *proxy_base, bool proxy_via, const char *market_base, bool market_via);
-/** @brief A server, an id and a valid key are set. */
-bool mini_chan_enabled(void);
-/** @brief url goes through the converter: the app proxy's URLs and any
- *         https:// URL (the converter fetches it) with proxy_via, the
- *         market's with market_via. */
-bool mini_chan_routes(const char *url);
-/** @brief The converter address, "" without a channel. */
-const char *mini_chan_server(void);
+/* Server addresses in config.ini carry the device's key for that server:
+ * "proxy = <key>@http://host:port" ("[<key>]@..." too), the key 64 hex
+ * digits. A value without a key is a server the device has not registered
+ * with yet. */
+/** @brief The URL part of a config value (the value itself without a key). */
+const char *mini_chan_url_of(const char *value);
+/** @brief The key part of a "key@url" value; false without one. */
+bool mini_chan_key_of(const char *value, uint8_t key[32]);
+/** @brief scheme://host[:port] of url, lowercase, into out. */
+void mini_chan_origin(const char *url, char *out, size_t cap);
 
 #if defined(ESP_PLATFORM)
-/* One GET, plain HTTP or through the converter (mini_chan_routes) */
+/* Servers and registration. The device id is its WiFi MAC (12 uppercase hex
+ * digits); its hardware hash key is HKDF-SHA256(salt id, ikm the hardware
+ * password, info "msc1_hw_hash"), the password itself never leaves it. The
+ * first request to a server without a key registers there (POST
+ * <server>/channel/auth): a new device gets its key, a known one answers a
+ * challenge with HMAC-SHA256(hash key, challenge) and gets its key back.
+ * The key is handed to the saver (written next to the address in its file).
+ * A server without the channel, a device without a password or a failed
+ * registration is used over plain HTTP. */
+typedef enum { MINI_CHAN_PENDING, MINI_CHAN_READY, MINI_CHAN_PLAIN, MINI_CHAN_FAILED } MiniChanState;
+/** @brief Called from the fetching task with a key to keep. */
+typedef void (*MiniChanSaver)(const char *origin, const char *key_hex);
+
+/** @brief The device id and hardware password ("" none); servers not ready
+ *         are tried again. */
+void mini_chan_set_device(const char *id, const char *password);
+/** @brief The server list is rebuilt from config values between begin and
+ *         end: a server keeps its state (and a key it registered) while a
+ *         value names it; one no value names is dropped. */
+void mini_chan_servers_begin(void);
+void mini_chan_server_add(const char *value);
+void mini_chan_servers_end(void);
+/** @brief The converter for https:// URLs (a config value, key allowed). */
+void mini_chan_set_https(const char *value);
+void mini_chan_set_saver(MiniChanSaver fn);
+/** @brief Registers with every server not tried yet (blocks, the HTTP task). */
+void mini_chan_register_all(int timeout_ms);
+/** @brief The servers' states as a JSON array: server, state (ready, plain,
+ *         failed, pending), reason (no_password, no_channel, password,
+ *         unreachable, refused, tcp, error) and error. */
+size_t mini_chan_status_json(char *out, size_t cap);
+
+/* One GET, plain HTTP or through the converter: an https:// URL goes to the
+ * https converter, any other to its own server when that server is ready */
 typedef struct MiniFetch MiniFetch;
 #define MINI_FETCH_REDIRECTS 1      /* follow HTTP redirects (plain HTTP only) */
 #define MINI_FETCH_BIG       2      /* 1 KB receive buffer instead of 512 B */

@@ -51,7 +51,7 @@ static void fetch_task(void *arg) {
         snprintf(F.err, sizeof(F.err), "out of memory");
         goto done;
     }
-    /* plain HTTP, or through the encrypted channel (config.ini [channel] market_via_channel) */
+    /* plain HTTP, or through the encrypted channel when the market's server is registered */
     c = mini_fetch_open(F.url, 10000, MINI_FETCH_REDIRECTS | MINI_FETCH_BIG, &status, &length, F.err, sizeof(F.err));
     if (!c) goto done;
     if (status != 200) {
@@ -216,6 +216,8 @@ static bool host_config(const char *key, char *out, size_t cap) {
     text[n] = '\0';
     bool ok = mini_device_config_value(text, key, out, cap);
     free(text);
+    const char *url = mini_chan_url_of(out);   /* proxy = <key>@http://...: the address only */
+    if (url != out) memmove(out, url, strlen(url) + 1);
     return ok;
 }
 

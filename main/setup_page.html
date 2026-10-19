@@ -113,21 +113,14 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <input id="device" maxlength="23">
 <label for="boot">启动应用（重启后生效）</label>
 <select id="boot"></select>
-<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取）</label>
+<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取；单个应用可在自己的 config.ini 里用 proxy_url 指定别的服务器）</label>
 <input id="proxy" placeholder="http://电脑IP:8087">
-<label><input type="checkbox" id="pvia"> 经协议转换服务器加密传输（应用的 https:// 数据也由它取）</label>
-<label for="hproxy">HTTPS 转换地址（不加密时，应用请求 https:// 经它的 /fetch 转成 http；留空用应用代理）</label>
+<label for="hproxy">HTTPS 转换地址（应用请求 https:// 数据时由它代取；留空用应用代理）</label>
 <input id="hproxy" placeholder="http://电脑IP:8087">
 <label for="murl">应用市场地址（留空：应用代理的 /market）</label>
 <input id="murl" placeholder="http://电脑IP:8087/market">
-<label><input type="checkbox" id="mvia"> 经协议转换服务器加密传输</label>
-<label for="chsrv">协议转换服务器（加密通道：AES-256-GCM，每台设备一个密钥；http://服务器:8087 或 tcp://服务器:8089；重启后生效）</label>
-<input id="chsrv" placeholder="http://服务器:8087">
-<div class="row">
-<div><label for="chid">设备 ID</label><input id="chid" maxlength="64" placeholder="desk-1"></div>
-<div><label for="chkey">设备密钥（64 位十六进制，留空则保持原密钥）</label><input id="chkey" type="password" autocomplete="new-password"></div>
-</div>
 <div class="desc" id="chstate"></div>
+<div class="desc">加密通道：设备第一次连接服务器时用硬件密码自动注册（设备 ID 为 WiFi MAC，密码不发给服务器），每台服务器一个密钥，保存在该服务器地址所在的配置项里。服务器没有开启加密通道或没有设置硬件密码时使用明文连接。</div>
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
 <label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
 <label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
@@ -409,14 +402,7 @@ async function refresh() {
   keep('proxy', state.proxy);
   keep('hproxy', state.https_proxy);
   keep('murl', state.market_url);
-  keep('chsrv', state.channel_server);
-  keep('chid', state.channel_id);
-  if (document.activeElement !== $('pvia')) $('pvia').checked = on(state.proxy_via_channel);
-  if (document.activeElement !== $('mvia')) $('mvia').checked = on(state.market_via_channel);
-  $('chstate').innerHTML = !state.channel_server ? '没有设置协议转换服务器：应用代理和市场都直接连接。'
-    : (state.channel_key_set ? '设备密钥已设置' : '<span class="warn">还没有设备密钥</span>') +
-      (state.channel_ready ? '，加密通道已启用。' : '，加密通道未启用（填好地址、ID 和密钥后保存并重启）。') +
-      ' 密钥在服务器上生成：python tools/app_proxy.py --device-key 设备ID';
+  $('chstate').innerHTML = channelText(state);
   if (document.activeElement !== $('webapp')) $('webapp').checked = !/^(0|false|no|off)$/i.test(state.web_in_app || '');
   if (document.activeElement !== $('mauto')) $('mauto').checked = on(state.market_auto_update);
   if (document.activeElement !== $('frkey')) $('frkey').checked = !/^(0|false|no|off)$/i.test(state.factory_reset_key || '');
@@ -759,24 +745,30 @@ function buttonMs(id) {
   return v;
 }
 
-/* The encrypted channel's fields: the key only when a new one is typed */
-function channelFields() {
-  const srv = $('chsrv').value.trim(), id = $('chid').value.trim(), key = $('chkey').value.trim().toLowerCase();
-  if (srv && !/^(http|tcp):\/\/[^\s\/]+(:\d+)?\/?$/.test(srv)) throw new Error('协议转换服务器：http://主机:端口 或 tcp://主机:端口');
-  if (id && !/^[\x21-\x7e]{1,64}$/.test(id)) throw new Error('设备 ID：1–64 个可见 ASCII 字符');
-  if (key && !/^[0-9a-f]{64}$/.test(key)) throw new Error('设备密钥：64 位十六进制数字');
-  if (($('pvia').checked || $('mvia').checked) && !srv) throw new Error('经协议转换服务器传输：请先填写它的地址');
-  const f = {'channel.channel_server': srv, 'channel.channel_id': id,
-             'channel.proxy_via_channel': $('pvia').checked ? '1' : '0',
-             'channel.market_via_channel': $('mvia').checked ? '1' : '0'};
-  if (key) f['channel.channel_key'] = key;
-  return f;
+/* Each server the device uses: registered there (encrypted), plain, or why not */
+function channelText(state) {
+  const list = state.channel || [];
+  if (!list.length) return '没有设置服务器。';
+  const why = {
+    no_password: '没有设置硬件密码（[server] hardware_password），使用明文连接',
+    no_channel: '服务器没有开启加密通道，使用明文连接',
+    password: '硬件密码与这台设备在该服务器上注册时用的不一致',
+    unreachable: '连不上服务器，稍后自动重试',
+    refused: '服务器不接受这台设备的密钥',
+    tcp: 'tcp:// 地址需要先经 http:// 注册'
+  };
+  return list.map(c => {
+    const s = esc(c.server), text = why[c.reason] || esc(c.error || '');
+    if (c.state === 'ready') return `🔒 已在 ${s} 注册（加密通道）`;
+    if (c.state === 'pending') return `⏳ ${s}：` + (c.reason === 'unreachable' ? text : '尚未注册，第一次连接时自动注册');
+    if (c.state === 'plain') return `${s}：${text}`;
+    return `<span class="warn">${s} 注册失败：${text}</span>`;
+  }).join('<br>') + (state.device_id ? `<br>设备 ID：${esc(state.device_id)}（WiFi MAC）` : '');
 }
 
 async function saveCommon(andRestart) {
   try {
     const [blong, bmid, bhold] = [buttonMs('blong'), buttonMs('bmid'), buttonMs('bhold')];
-    const channel = channelFields();
     const blval = String(Math.max(0, Math.min(255, parseInt($('blval').value || '220', 10) || 220)));
     const bloff = String(Math.max(-10, Math.min(10, parseInt($('bloff').value || '0', 10) || 0)));
     const blmin = String(Math.max(0, Math.min(255, parseInt($('blmin').value || '30', 10) || 30)));
@@ -792,9 +784,7 @@ async function saveCommon(andRestart) {
                 'display.backlight_offset': bloff,
                 'display.backlight_min': blmin,
                 'display.backlight_max': blmax,
-                'system.button_long_ms': blong, 'system.button_mid_ms': bmid, 'system.button_hold_ms': bhold,
-                ...channel});
-    $('chkey').value = '';
+                'system.button_long_ms': blong, 'system.button_mid_ms': bmid, 'system.button_hold_ms': bhold});
     await refresh();
     await loadApps();
     if (andRestart) return restart();

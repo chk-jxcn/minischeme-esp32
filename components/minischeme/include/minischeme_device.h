@@ -223,8 +223,6 @@ extern const char mini_device_config_fonts_section[];
  * and wrap_marquee / wrap_marquee_fps / wrap_marquee_step for wrapped text
  * (defaults when missing); the section is appended to older files */
 extern const char mini_device_config_text_section[];
-/** @brief [channel] (the encrypted converter), appended to an older config.ini. */
-extern const char mini_device_config_channel_section[];
 void mini_device_apply_text_config(const char *ini);
 
 /* A progress bar (track and fill) across the middle of a black screen,

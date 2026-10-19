@@ -1148,8 +1148,12 @@ const char mini_device_config_template[] =
     "[app]\n"
     "; keys every app reads with (config-get \"key\"); an app's own config.ini in its folder\n"
     "; (made from the app's defaults on its first start) overrides them\n"
-    "proxy =                ; tools/app_proxy.py on a PC, http://<pc-ip>:8087: HTTPS sources for the apps\n"
+    "proxy =                ; the app proxy / protocol converter (tools/app_proxy.py), http://<host>:8087\n"
     "https_proxy =          ; protocol converter for apps' https:// data (<it>/fetch?url=...); empty: proxy\n"
+    "; The device registers with a converter by itself on first use ([server] hardware_password, its\n"
+    "; MAC as its id) and keeps the key it gets in the same value: proxy = <key>@http://<host>:8087.\n"
+    "; Each server has its own key; an app's own proxy_url / converter_url (its config.ini) keep theirs there.\n"
+    "; A server without the encrypted channel, or no hardware password: plain HTTP.\n"
     "carousel = 1           ; 1: auto-turn pages in multi-page apps; 0: manual only\n"
     "carousel_seconds = 10  ; seconds per page (or comma-separated seconds per page)\n"
     "\n"
@@ -1158,28 +1162,7 @@ const char mini_device_config_template[] =
     "; the web page's \"enter settings mode\"); while an app runs the web page lists what is installed and new\n"
     "market_url =           ; index.json and app images; empty: <proxy>/market (tools/app_proxy.py)\n"
     "market_auto_update = 0 ; 1: an app's boot checks once when the network comes up; with updates the\n"
-    ";                        settings install them and return to the app (no network: skipped, no retry)\n"
-    "\n"
-    "[channel]\n"
-    "; the encrypted protocol converter (tools/app_proxy.py on a server): AES-256-GCM with a key per\n"
-    "; device instead of HTTPS; the app proxy and the market each go through it or not\n"
-    "channel_server =       ; http://<server>:8087 (POST /channel) or tcp://<server>:8089; empty: none\n"
-    "channel_id =           ; this device's name at the converter\n"
-    "channel_key =          ; its key, 64 hex digits: python tools/app_proxy.py --device-key <channel_id>\n"
-    "proxy_via_channel = 0  ; 1: the app proxy ([app] proxy) and apps' https:// data through the converter\n"
-    "market_via_channel = 0 ; 1: the app market (market_url) through the converter\n";
-
-/* Appended to a config.ini written before [channel] existed */
-const char mini_device_config_channel_section[] =
-    "\n"
-    "[channel]\n"
-    "; the encrypted protocol converter (tools/app_proxy.py on a server): AES-256-GCM with a key per\n"
-    "; device instead of HTTPS; the app proxy and the market each go through it or not\n"
-    "channel_server =       ; http://<server>:8087 (POST /channel) or tcp://<server>:8089; empty: none\n"
-    "channel_id =           ; this device's name at the converter\n"
-    "channel_key =          ; its key, 64 hex digits: python tools/app_proxy.py --device-key <channel_id>\n"
-    "proxy_via_channel = 0  ; 1: the app proxy ([app] proxy) and apps' https:// data through the converter\n"
-    "market_via_channel = 0 ; 1: the app market (market_url) through the converter\n";
+    ";                        settings install them and return to the app (no network: skipped, no retry)\n";
 
 /* Appended to a config.ini written before boot_app / WiFi / proxy existed */
 const char mini_device_config_system_section[] =

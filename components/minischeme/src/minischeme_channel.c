@@ -1,8 +1,9 @@
 /**
  * @file minischeme_channel.c
  * @brief The encrypted channel to the protocol converter (format in
- *        minischeme_channel.h); on the ESP32 also the GET used by the JSON
- *        feed and the app market, plain or through the converter.
+ *        minischeme_channel.h); on the ESP32 also the servers the device
+ *        registers with and the GET used by the JSON feed and the app
+ *        market, plain or through the converter.
  */
 
 #include "minischeme_channel.h"
@@ -12,7 +13,11 @@
 
 #if defined(ESP_PLATFORM)
 #include "esp_http_client.h"
+#include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include <errno.h>
@@ -163,72 +168,474 @@ bool mini_chan_parse_key(const char *hex, uint8_t key[32]) {
 }
 
 /* ========================================================================= */
-/* Settings and routing                                                       */
+/* "key@url" config values                                                    */
 /* ========================================================================= */
 
-typedef struct {
-    char server[128];
-    char id[MINI_CHAN_ID_MAX + 1];
-    uint8_t key[32];
-    char proxy[128];
-    char market[160];
-    bool proxy_via, market_via;
-} ChanConfig;
-
-static ChanConfig *s_chan = NULL;   /* allocated only when a channel is set */
-
-static void copy_base(char *dst, size_t cap, const char *src) {
-    snprintf(dst, cap, "%s", src ? src : "");
-    size_t n = strlen(dst);
-    while (n > 0 && dst[n - 1] == '/') dst[--n] = '\0';
+static bool is_hex(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-void mini_chan_configure(const char *server, const char *id, const char *key_hex,
-                         const char *proxy_base, bool proxy_via, const char *market_base, bool market_via) {
-    if (s_chan) {
-        mini_wipe(s_chan, sizeof(*s_chan));
-        free(s_chan);
-        s_chan = NULL;
+/* The key's 64 digits in value, else NULL; *url_at: the URL after it */
+static const char *key_part(const char *value, const char **url_at) {
+    const char *k = value;
+    bool bracket = *k == '[';
+    if (bracket) k++;
+    for (int i = 0; i < 64; i++) {
+        if (!is_hex(k[i])) return NULL;
     }
-    uint8_t key[32];
-    bool scheme_ok = server && (strncmp(server, "http://", 7) == 0 || strncmp(server, "tcp://", 6) == 0);
-    size_t id_len = id ? strlen(id) : 0;
-    if (!scheme_ok || id_len == 0 || id_len > MINI_CHAN_ID_MAX || !mini_chan_parse_key(key_hex, key)) return;
-    s_chan = (ChanConfig *)calloc(1, sizeof(ChanConfig));
-    if (s_chan) {
-        copy_base(s_chan->server, sizeof(s_chan->server), server);
-        snprintf(s_chan->id, sizeof(s_chan->id), "%s", id);
-        memcpy(s_chan->key, key, sizeof(key));
-        copy_base(s_chan->proxy, sizeof(s_chan->proxy), proxy_base);
-        copy_base(s_chan->market, sizeof(s_chan->market), market_base);
-        s_chan->proxy_via = proxy_via;
-        s_chan->market_via = market_via;
+    const char *p = k + 64;
+    if (bracket && *p++ != ']') return NULL;
+    if (*p != '@') return NULL;
+    *url_at = p + 1;
+    return k;
+}
+
+const char *mini_chan_url_of(const char *value) {
+    const char *url;
+    if (!value) return "";
+    while (*value == ' ' || *value == '\t') value++;
+    return key_part(value, &url) ? url : value;
+}
+
+bool mini_chan_key_of(const char *value, uint8_t key[32]) {
+    const char *url, *k;
+    if (!value) return false;
+    while (*value == ' ' || *value == '\t') value++;
+    k = key_part(value, &url);
+    if (!k) return false;
+    char hex[65];
+    memcpy(hex, k, 64);
+    hex[64] = '\0';
+    bool ok = mini_chan_parse_key(hex, key);
+    mini_wipe(hex, sizeof(hex));
+    return ok;
+}
+
+void mini_chan_origin(const char *url, char *out, size_t cap) {
+    if (cap == 0) return;
+    out[0] = '\0';
+    const char *s = url ? strstr(url, "://") : NULL;
+    if (!s) return;
+    size_t n = (size_t)(s + 3 - url);
+    while (url[n] && url[n] != '/' && url[n] != '?' && url[n] != '#') n++;
+    if (n >= cap) n = cap - 1;
+    for (size_t i = 0; i < n; i++) {
+        char c = url[i];
+        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
     }
-    mini_wipe(key, sizeof(key));
-}
-
-bool mini_chan_enabled(void) { return s_chan != NULL; }
-
-const char *mini_chan_server(void) { return s_chan ? s_chan->server : ""; }
-
-/* url is base or below it (base "http://a:80" does not take "http://a:8087") */
-static bool url_under(const char *url, const char *base) {
-    size_t n = strlen(base);
-    if (n == 0 || strncmp(url, base, n) != 0) return false;
-    return url[n] == '\0' || url[n] == '/' || url[n] == '?';
-}
-
-bool mini_chan_routes(const char *url) {
-    if (!s_chan || !url) return false;
-    if (s_chan->proxy_via && (url_under(url, s_chan->proxy) || strncmp(url, "https://", 8) == 0)) return true;
-    return s_chan->market_via && url_under(url, s_chan->market);
+    out[n] = '\0';
 }
 
 /* ========================================================================= */
-/* ESP32: one GET, plain or through the converter                             */
+/* ESP32: servers, registration, and one GET plain or through the converter   */
 /* ========================================================================= */
 
 #if defined(ESP_PLATFORM)
+#define CHAN_SERVERS 4
+#define CHAN_RETRY_US (30LL * 1000000)   /* an unreachable server is tried again after this */
+
+typedef struct {
+    char origin[96];
+    uint8_t key[32];
+    bool used, seen, has_key;
+    bool from_config;    /* this round: a config value carried the key */
+    bool plain_entry;    /* this round: a value named the server without a key */
+    bool retried;        /* registered again once after the server refused the key */
+    uint8_t state;       /* MiniChanState */
+    char reason[16];
+    char error[80];
+    int64_t retry_us;    /* PENDING: not before this time */
+} ChanServer;
+
+static ChanServer s_srv[CHAN_SERVERS];
+static char s_dev_id[MINI_CHAN_ID_MAX + 1];
+static uint8_t s_hash_key[32];
+static bool s_has_pass;
+static char s_https[128];
+static MiniChanSaver s_saver;
+static SemaphoreHandle_t s_lock, s_reg_lock;   /* the table; one registration at a time */
+
+static void chan_lock(void) {
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+}
+
+static void chan_unlock(void) {
+    if (s_lock) xSemaphoreGive(s_lock);
+}
+
+static ChanServer *find_server(const char *origin) {
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        if (s_srv[i].used && strcmp(s_srv[i].origin, origin) == 0) return &s_srv[i];
+    }
+    return NULL;
+}
+
+static void set_state(ChanServer *s, MiniChanState st, const char *reason, const char *error) {
+    s->state = (uint8_t)st;
+    snprintf(s->reason, sizeof(s->reason), "%s", reason);
+    snprintf(s->error, sizeof(s->error), "%s", error);
+}
+
+static void to_hex(const uint8_t *b, size_t n, char *out) {
+    static const char d[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i] = d[b[i] >> 4];
+        out[2 * i + 1] = d[b[i] & 15];
+    }
+    out[2 * n] = '\0';
+}
+
+void mini_chan_set_device(const char *id, const char *password) {
+    chan_lock();
+    if (!s_reg_lock) s_reg_lock = xSemaphoreCreateMutex();
+    snprintf(s_dev_id, sizeof(s_dev_id), "%s", id ? id : "");
+    s_has_pass = password && password[0] && s_dev_id[0];
+    if (s_has_pass) {
+        static const char info[] = "msc1_hw_hash";
+        mini_hkdf_sha256((const uint8_t *)s_dev_id, strlen(s_dev_id), (const uint8_t *)password, strlen(password),
+                         (const uint8_t *)info, sizeof(info) - 1, s_hash_key, sizeof(s_hash_key));
+    } else {
+        mini_wipe(s_hash_key, sizeof(s_hash_key));
+    }
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        if (s_srv[i].used && s_srv[i].state != MINI_CHAN_READY) {
+            set_state(&s_srv[i], MINI_CHAN_PENDING, "", "");
+            s_srv[i].retry_us = 0;
+        }
+    }
+    chan_unlock();
+}
+
+void mini_chan_set_saver(MiniChanSaver fn) { s_saver = fn; }
+
+void mini_chan_servers_begin(void) {
+    chan_lock();
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        s_srv[i].seen = s_srv[i].from_config = s_srv[i].plain_entry = false;
+    }
+    chan_unlock();
+}
+
+void mini_chan_server_add(const char *value) {
+    char origin[96];
+    mini_chan_origin(mini_chan_url_of(value), origin, sizeof(origin));
+    if (strncmp(origin, "http://", 7) != 0 && strncmp(origin, "tcp://", 6) != 0) return;
+    if (origin[strlen(origin) - 1] == '/') return;   /* no host */
+    uint8_t key[32];
+    bool keyed = mini_chan_key_of(value, key);
+    chan_lock();
+    ChanServer *s = find_server(origin);
+    for (int i = 0; !s && i < CHAN_SERVERS; i++) {
+        if (!s_srv[i].used) {
+            s = &s_srv[i];
+            memset(s, 0, sizeof(*s));
+            s->used = true;
+            snprintf(s->origin, sizeof(s->origin), "%s", origin);
+            set_state(s, MINI_CHAN_PENDING, "", "");
+        }
+    }
+    if (s) {
+        s->seen = true;
+        if (keyed && !s->from_config) {   /* the file's key comes first */
+            bool same = s->has_key && memcmp(s->key, key, sizeof(key)) == 0;
+            memcpy(s->key, key, sizeof(key));
+            s->has_key = s->from_config = true;
+            if (!same || s->state != MINI_CHAN_FAILED) set_state(s, MINI_CHAN_READY, "", "");
+        } else if (!keyed) {
+            s->plain_entry = true;
+        }
+    }
+    chan_unlock();
+    mini_wipe(key, sizeof(key));
+}
+
+void mini_chan_servers_end(void) {
+    char save[CHAN_SERVERS][96], hex[CHAN_SERVERS][65];
+    int n = 0;
+    chan_lock();
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        ChanServer *s = &s_srv[i];
+        if (!s->used) continue;
+        if (!s->seen) {
+            mini_wipe(s, sizeof(*s));
+            continue;
+        }
+        if (s->has_key && s->state == MINI_CHAN_READY && s->plain_entry) {   /* a value lost the key: write it again */
+            memcpy(save[n], s->origin, sizeof(save[n]));   /* both 96 bytes, NUL-terminated */
+            to_hex(s->key, sizeof(s->key), hex[n]);
+            n++;
+        }
+    }
+    chan_unlock();
+    for (int i = 0; i < n; i++) {
+        if (s_saver) s_saver(save[i], hex[i]);
+        mini_wipe(hex[i], sizeof(hex[i]));
+    }
+}
+
+void mini_chan_set_https(const char *value) {
+    chan_lock();
+    snprintf(s_https, sizeof(s_https), "%s", mini_chan_url_of(value));
+    size_t n = strlen(s_https);
+    while (n > 0 && s_https[n - 1] == '/') s_https[--n] = '\0';
+    chan_unlock();
+}
+
+/* ---- registration (POST <server>/channel/auth) ---- */
+
+/* A JSON POST: the status (-1: no answer) and up to cap - 1 bytes of the body */
+static int post_json(const char *url, const char *body, char *resp, size_t cap, int timeout_ms) {
+    resp[0] = '\0';
+    esp_http_client_config_t cfg = {
+        .url = url, .method = HTTP_METHOD_POST, .timeout_ms = timeout_ms,
+        .buffer_size = 512, .buffer_size_tx = 512, .disable_auto_redirect = true,
+    };
+    esp_http_client_handle_t h = esp_http_client_init(&cfg);
+    if (!h) return -1;
+    int status = -1, n = (int)strlen(body);
+    esp_http_client_set_header(h, "Content-Type", "application/json");
+    if (esp_http_client_open(h, n) == ESP_OK && esp_http_client_write(h, body, n) == n) {
+        esp_http_client_fetch_headers(h);
+        status = esp_http_client_get_status_code(h);
+        int got = 0, k;
+        while (got < (int)cap - 1 && (k = esp_http_client_read(h, resp + got, (int)cap - 1 - got)) > 0) got += k;
+        resp[got] = '\0';
+    }
+    esp_http_client_close(h);
+    esp_http_client_cleanup(h);
+    return status;
+}
+
+/* The string value of "name" in a flat JSON object */
+static bool json_str(const char *json, const char *name, char *out, size_t cap) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", name);
+    const char *p = strstr(json, pat);
+    if (!p) return false;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    if (*p++ != ':') return false;
+    while (*p == ' ') p++;
+    if (*p++ != '"') return false;
+    size_t n = 0;
+    while (p[n] && p[n] != '"' && n + 1 < cap) n++;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return p[n] == '"';
+}
+
+static size_t parse_hex(const char *hex, uint8_t *out, size_t cap) {
+    size_t n = 0;
+    for (; is_hex(hex[2 * n]) && is_hex(hex[2 * n + 1]) && n < cap; n++) {
+        char two[3] = { hex[2 * n], hex[2 * n + 1], '\0' };
+        out[n] = (uint8_t)strtoul(two, NULL, 16);
+    }
+    return n;
+}
+
+typedef struct {
+    MiniChanState state;
+    const char *reason;
+    char error[80];
+    int64_t retry_us;
+    uint8_t key[32];
+} RegResult;
+
+static void reg_unreachable(RegResult *r) {
+    r->state = MINI_CHAN_PENDING;
+    r->reason = "unreachable";
+    snprintf(r->error, sizeof(r->error), "cannot reach the server; trying again later");
+    r->retry_us = esp_timer_get_time() + CHAN_RETRY_US;
+}
+
+static bool reg_key(RegResult *r, const char *resp) {
+    char hex[72];
+    if (!json_str(resp, "master_key_2", hex, sizeof(hex)) || !mini_chan_parse_key(hex, r->key)) {
+        r->state = MINI_CHAN_FAILED;
+        r->reason = "error";
+        snprintf(r->error, sizeof(r->error), "the server sent no key");
+        return false;
+    }
+    mini_wipe(hex, sizeof(hex));
+    r->state = MINI_CHAN_READY;
+    r->reason = "";
+    return true;
+}
+
+/* The buffers of one registration (on the heap: the JSON feed's task has 4 KB of stack) */
+typedef struct {
+    char url[112], body[200], resp[400], hex[65], status[24], challenge[136];
+    uint8_t ch[64], mac[32];
+} RegBufs;
+
+static void reg_exchange(const char *origin, const char *id, const uint8_t hash_key[32], int timeout_ms,
+                         RegResult *r) {
+    RegBufs *b = (RegBufs *)calloc(1, sizeof(RegBufs));
+    if (!b) {
+        reg_unreachable(r);
+        snprintf(r->error, sizeof(r->error), "out of memory; trying again later");
+        return;
+    }
+    snprintf(b->url, sizeof(b->url), "%s/channel/auth", origin);
+    to_hex(hash_key, 32, b->hex);
+    snprintf(b->body, sizeof(b->body), "{\"mac\":\"%s\",\"hardware_hash_key\":\"%s\"}", id, b->hex);
+    int st = post_json(b->url, b->body, b->resp, sizeof(b->resp), timeout_ms);
+    if (st < 0 || st >= 500) {
+        reg_unreachable(r);
+    } else if (st == 404 || (st == 403 && strstr(b->resp, "disabled"))) {
+        r->state = MINI_CHAN_PLAIN;
+        r->reason = "no_channel";
+        snprintf(r->error, sizeof(r->error), "the server has no encrypted channel: plain HTTP");
+    } else if (st == 200 && json_str(b->resp, "status", b->status, sizeof(b->status)) &&
+               strcmp(b->status, "registered") == 0) {
+        reg_key(r, b->resp);
+    } else if (st == 200 && strcmp(b->status, "challenge_required") == 0 &&
+               json_str(b->resp, "challenge", b->challenge, sizeof(b->challenge))) {
+        /* registered before (a factory reset): prove the hash key, get the key back */
+        size_t n = parse_hex(b->challenge, b->ch, sizeof(b->ch));
+        mini_hmac_sha256(hash_key, 32, b->ch, n, b->mac);
+        to_hex(b->mac, sizeof(b->mac), b->hex);
+        snprintf(b->body, sizeof(b->body), "{\"mac\":\"%s\",\"response\":\"%s\"}", id, b->hex);
+        st = post_json(b->url, b->body, b->resp, sizeof(b->resp), timeout_ms);
+        if (st < 0 || st >= 500) {
+            reg_unreachable(r);
+        } else if (st == 200) {
+            reg_key(r, b->resp);
+        } else {
+            r->state = MINI_CHAN_FAILED;
+            r->reason = st == 403 ? "password" : "error";
+            snprintf(r->error, sizeof(r->error), st == 403
+                     ? "the hardware password differs from the one this device registered with"
+                     : "registration: HTTP %d", st);
+        }
+    } else {
+        r->state = MINI_CHAN_FAILED;
+        r->reason = st == 403 ? "password" : "error";
+        snprintf(r->error, sizeof(r->error), st == 403 ? "the server refused the registration"
+                                                       : "registration: HTTP %d", st);
+    }
+    mini_wipe(b, sizeof(*b));
+    free(b);
+}
+
+/* Registers with the server at origin when it waits for it; true with its key when ready */
+static bool chan_ready(const char *origin, int timeout_ms, uint8_t key[32]) {
+    chan_lock();
+    ChanServer *s = find_server(origin);
+    bool ready = s && s->state == MINI_CHAN_READY;
+    bool due = s && s->state == MINI_CHAN_PENDING && esp_timer_get_time() >= s->retry_us;
+    if (ready) memcpy(key, s->key, 32);
+    chan_unlock();
+    if (ready || !due) return ready;
+    if (!s_reg_lock || xSemaphoreTake(s_reg_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
+    RegResult r;
+    memset(&r, 0, sizeof(r));
+    uint8_t hash_key[32];
+    char id[MINI_CHAN_ID_MAX + 1];
+    chan_lock();
+    s = find_server(origin);
+    ready = s && s->state == MINI_CHAN_READY;   /* another task registered meanwhile */
+    due = s && s->state == MINI_CHAN_PENDING && esp_timer_get_time() >= s->retry_us;
+    if (ready) memcpy(key, s->key, 32);
+    bool has_pass = s_has_pass;
+    memcpy(hash_key, s_hash_key, sizeof(hash_key));
+    snprintf(id, sizeof(id), "%s", s_dev_id);
+    chan_unlock();
+    if (due) {
+        if (!has_pass) {
+            r.state = MINI_CHAN_PLAIN;
+            r.reason = "no_password";
+            snprintf(r.error, sizeof(r.error), "no hardware password ([server] hardware_password): plain HTTP");
+        } else if (strncmp(origin, "tcp://", 6) == 0) {
+            r.state = MINI_CHAN_FAILED;
+            r.reason = "tcp";
+            snprintf(r.error, sizeof(r.error), "a tcp:// converter needs a key: register over http:// first");
+        } else {
+            reg_exchange(origin, id, hash_key, timeout_ms < 4000 ? 4000 : timeout_ms, &r);
+        }
+        chan_lock();
+        s = find_server(origin);
+        if (s) {
+            set_state(s, r.state, r.reason, r.error);
+            s->retry_us = r.retry_us;
+            if (r.state == MINI_CHAN_READY) {
+                memcpy(s->key, r.key, 32);
+                s->has_key = true;
+            }
+        }
+        chan_unlock();
+        ready = r.state == MINI_CHAN_READY;
+        if (ready) {
+            char hex[65];
+            memcpy(key, r.key, 32);
+            to_hex(r.key, 32, hex);
+            if (s_saver) s_saver(origin, hex);
+            mini_wipe(hex, sizeof(hex));
+        }
+        ESP_LOGI("MiniChannel", "%s: %s%s%s", origin, ready ? "registered" : "not registered",
+                 r.error[0] ? ": " : "", r.error);
+    }
+    xSemaphoreGive(s_reg_lock);
+    mini_wipe(hash_key, sizeof(hash_key));
+    mini_wipe(&r, sizeof(r));
+    return ready;
+}
+
+/* The server refused the device's key: register again once, then give up */
+static void chan_refused(const char *origin) {
+    chan_lock();
+    ChanServer *s = find_server(origin);
+    if (s && s->state == MINI_CHAN_READY) {
+        mini_wipe(s->key, sizeof(s->key));
+        s->has_key = false;
+        if (!s->retried) {
+            s->retried = true;
+            s->retry_us = 0;
+            set_state(s, MINI_CHAN_PENDING, "refused", "the server refused the key: registering again");
+        } else {
+            set_state(s, MINI_CHAN_FAILED, "refused", "the server refuses this device's key");
+        }
+    }
+    chan_unlock();
+}
+
+void mini_chan_register_all(int timeout_ms) {
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        char origin[96] = "";
+        uint8_t key[32];
+        chan_lock();
+        if (s_srv[i].used && s_srv[i].state == MINI_CHAN_PENDING) {
+            memcpy(origin, s_srv[i].origin, sizeof(origin));
+        }
+        chan_unlock();
+        if (origin[0]) chan_ready(origin, timeout_ms, key);
+        mini_wipe(key, sizeof(key));
+    }
+}
+
+size_t mini_chan_status_json(char *out, size_t cap) {
+    static const char *const names[] = { "pending", "ready", "plain", "failed" };
+    size_t n = 0;
+    if (cap < 3) return 0;
+    out[n++] = '[';
+    chan_lock();
+    for (int i = 0; i < CHAN_SERVERS; i++) {
+        const ChanServer *s = &s_srv[i];
+        if (!s->used || n + 2 >= cap) continue;
+        int k = snprintf(out + n, cap - n, "%s{\"server\":\"%s\",\"state\":\"%s\",\"reason\":\"%s\",\"error\":\"%s\"}",
+                         n > 1 ? "," : "", s->origin, names[s->state & 3], s->reason, s->error);
+        if (k < 0 || (size_t)k >= cap - n - 1) break;
+        n += (size_t)k;
+    }
+    chan_unlock();
+    out[n++] = ']';
+    out[n] = '\0';
+    return n;
+}
+
+/* ---- one GET ---- */
+
 struct MiniFetch {
     esp_http_client_handle_t h;   /* plain HTTP, or the channel's HTTP transport */
     int sock;                     /* the channel's TCP transport, else -1 */
@@ -307,21 +714,16 @@ static bool send_all(int s, const uint8_t *p, size_t n) {
     return true;
 }
 
-/* The request sent over HTTP (POST <server>/channel); the reply's status */
-static bool chan_http_send(MiniFetch *f, const uint8_t *msg, size_t len, int timeout_ms, char *err, size_t cap) {
-    size_t n = strlen(s_chan->server) + 9;
-    char *url = (char *)malloc(n);
-    if (!url) {
-        snprintf(err, cap, "out of memory");
-        return false;
-    }
-    snprintf(url, n, "%s/channel", s_chan->server);
+/* The request sent over HTTP (POST <server>/channel); *refused: a 403 */
+static bool chan_http_send(MiniFetch *f, const char *server, const uint8_t *msg, size_t len, int timeout_ms,
+                           bool *refused, char *err, size_t cap) {
+    char url[112];
+    snprintf(url, sizeof(url), "%s/channel", server);
     esp_http_client_config_t cfg = {
         .url = url, .method = HTTP_METHOD_POST, .timeout_ms = timeout_ms,
         .buffer_size = 512, .buffer_size_tx = 256, .disable_auto_redirect = true,
     };
     f->h = esp_http_client_init(&cfg);
-    free(url);
     if (!f->h) {
         snprintf(err, cap, "out of memory");
         return false;
@@ -338,16 +740,40 @@ static bool chan_http_send(MiniFetch *f, const uint8_t *msg, size_t len, int tim
     esp_http_client_fetch_headers(f->h);
     int status = esp_http_client_get_status_code(f->h);
     if (status != 200) {
-        snprintf(err, cap, status == 403 ? "converter: refused (check channel_id and channel_key)"
+        *refused = status == 403;
+        snprintf(err, cap, status == 403 ? "converter: refused the device's key (registering again)"
                                          : "converter: HTTP %d", status);
         return false;
     }
     return true;
 }
 
+/* <base>/fetch?url=<url, percent-encoded> (malloc'd) */
+static char *fetch_url(const char *base, const char *url) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t cap = strlen(base) + 12 + strlen(url) * 3 + 1;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    size_t n = (size_t)snprintf(out, cap, "%s/fetch?url=", base);
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
+        bool plain = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+                     *p == '-' || *p == '_' || *p == '.' || *p == '~';
+        if (plain) {
+            out[n++] = (char)*p;
+        } else {
+            out[n++] = '%';
+            out[n++] = hex[*p >> 4];
+            out[n++] = hex[*p & 15];
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
 MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *status, int64_t *length,
                            char *err, size_t err_cap) {
     MiniFetch *f = (MiniFetch *)calloc(1, sizeof(MiniFetch));
+    char *plain_url = NULL;
     if (!f) {
         snprintf(err, err_cap, "out of memory");
         return NULL;
@@ -355,13 +781,34 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     f->sock = -1;
     *status = 0;
     *length = -1;
-    if (!mini_chan_routes(url)) {
+    /* the server: an https:// URL's converter, else the URL's own */
+    bool https = strncmp(url, "https://", 8) == 0;
+    char base[128], origin[96];
+    chan_lock();
+    snprintf(base, sizeof(base), "%s", s_https);
+    chan_unlock();
+    if (https && !base[0]) {
+        snprintf(err, err_cap, "an https:// URL needs a protocol converter: config.ini [app] https_proxy or proxy");
+        goto fail;
+    }
+    mini_chan_origin(https ? base : url, origin, sizeof(origin));
+    uint8_t key[32];
+    if (!chan_ready(origin, timeout_ms, key)) {
+        if (https) {
+            plain_url = fetch_url(base, url);
+            if (!plain_url) {
+                snprintf(err, err_cap, "out of memory");
+                goto fail;
+            }
+        }
         bool big = (flags & MINI_FETCH_BIG) != 0;
         esp_http_client_config_t cfg = {
-            .url = url, .timeout_ms = timeout_ms, .buffer_size = big ? 1024 : 512, .buffer_size_tx = big ? 512 : 256,
+            .url = plain_url ? plain_url : url, .timeout_ms = timeout_ms,
+            .buffer_size = big ? 1024 : 512, .buffer_size_tx = big ? 512 : 256,
             .disable_auto_redirect = !(flags & MINI_FETCH_REDIRECTS), .max_redirection_count = 3,
         };
         f->h = esp_http_client_init(&cfg);
+        free(plain_url);
         if (!f->h || esp_http_client_open(f->h, 0) != ESP_OK) {
             snprintf(err, err_cap, f->h ? "cannot connect" : "out of memory");
             goto fail;
@@ -375,6 +822,7 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     /* through the converter */
     time_t now = time(NULL);
     if (now < 1600000000) {   /* the converter checks the time: wait for NTP */
+        mini_wipe(key, sizeof(key));
         snprintf(err, err_cap, "converter: the clock is not set yet");
         goto fail;
     }
@@ -382,31 +830,36 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     uint8_t nonce[16];
     esp_fill_random(nonce, sizeof(nonce));
     size_t len = 0;
-    uint8_t *msg = f->r ? mini_chan_request(s_chan->key, s_chan->id, nonce, (uint32_t)now, "GET", url, NULL, 0,
+    uint8_t *msg = f->r ? mini_chan_request(key, s_dev_id, nonce, (uint32_t)now, "GET", url, NULL, 0,
                                             f->r, &len) : NULL;
+    mini_wipe(key, sizeof(key));
     if (!msg) {
         free(f->r);
         f->r = NULL;
         snprintf(err, err_cap, "out of memory");
         goto fail;
     }
-    bool sent;
+    bool sent, refused = false;
     MiniChanRecv recv_fn;
-    if (strncmp(s_chan->server, "tcp://", 6) == 0) {
-        f->sock = tcp_connect(s_chan->server + 6, timeout_ms, err, err_cap);
+    if (strncmp(origin, "tcp://", 6) == 0) {
+        f->sock = tcp_connect(origin + 6, timeout_ms, err, err_cap);
         sent = f->sock >= 0 && send_all(f->sock, msg, len);
         if (f->sock >= 0 && !sent) snprintf(err, err_cap, "converter: send failed");
         recv_fn = tcp_recv;
     } else {
-        sent = chan_http_send(f, msg, len, timeout_ms, err, err_cap);
+        sent = chan_http_send(f, origin, msg, len, timeout_ms, &refused, err, err_cap);
         recv_fn = http_recv;
     }
     mini_wipe(msg, len);
     free(msg);
-    if (!sent) goto fail;
+    if (!sent) {
+        if (refused) chan_refused(origin);
+        goto fail;
+    }
     int e = mini_chan_start(f->r, recv_fn, f);
     if (e) {
-        snprintf(err, err_cap, e == MINI_CHAN_ECLOSED ? "converter: refused (check channel_id, channel_key, clock)"
+        if (e == MINI_CHAN_ECLOSED && f->sock >= 0) chan_refused(origin);   /* tcp: a refusal closes */
+        snprintf(err, err_cap, e == MINI_CHAN_ECLOSED ? "converter: refused (the device's key or the clock)"
                                                       : "converter: %s", mini_chan_error(e));
         goto fail;
     }

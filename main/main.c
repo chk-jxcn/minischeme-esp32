@@ -1790,64 +1790,99 @@ static bool sta_status(char *ssid, size_t ssid_cap, char *ip, size_t ip_cap, int
 }
 
 static void setup_channel(const char *cfg);
-/* Set by the HTTP task when [channel] settings change; the main loop applies
- * them (the channel is in use there: it must not be freed under a request) */
+static bool ini_file_value(const char *path, const char *key, char *val, size_t cap);
+/* Set by the HTTP task when a server address or the hardware password
+ * changes; the main loop rebuilds the server list from the files */
 static volatile bool s_channel_dirty = false;
+static char s_chan_id[16] = "";   /* this device at the converters: its WiFi MAC, 12 hex digits */
 
-/* GET /api/settings: what the settings page shows (never the password) */
-static esp_err_t http_settings_get(httpd_req_t *req) {
-    char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
-    char *out = (char *)malloc(2048);
-    char *esc = (char *)malloc(200);
-    if (!cfg || !out || !esc) {
-        free(cfg); free(out); free(esc);
-        return http_error(req, "out of memory");
+/* Values naming a protocol converter: the device's key for it is kept in
+ * the same value, "<key>@http://host:port" (minischeme_channel.h) */
+static const char *const SYS_SERVER_KEYS[] = { "proxy", "https_proxy", "proxy_url", "converter_url" };
+static const char *const APP_SERVER_KEYS[] = { "proxy_url", "proxy", "converter_url" };
+
+static bool is_server_key(const char *key) {
+    for (size_t i = 0; i < sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]); i++) {
+        if (strcmp(key, SYS_SERVER_KEYS[i]) == 0) return true;
     }
+    return false;
+}
+
+/* value for key, keeping the key the old value had for the same server */
+static const char *keep_server_key(const char *key, const char *value, char *buf, size_t cap) {
+    uint8_t k[32];
+    char old[200], o1[96], o2[96];
+    if (!is_server_key(key) || mini_chan_key_of(value, k) || !value[0]) return value;
+    if (!ini_file_value("/spiffs/config.ini", key, old, sizeof(old)) || !mini_chan_key_of(old, k)) return value;
+    mini_wipe(k, sizeof(k));
+    mini_chan_origin(mini_chan_url_of(old), o1, sizeof(o1));
+    mini_chan_origin(value, o2, sizeof(o2));
+    const char *at = strchr(old, '@');
+    if (strcmp(o1, o2) != 0 || !at || (size_t)(at - old) + strlen(value) + 2 > cap) {
+        mini_wipe(old, sizeof(old));
+        return value;
+    }
+    snprintf(buf, cap, "%.*s@%s", (int)(at - old), old, value);
+    mini_wipe(old, sizeof(old));
+    return buf;
+}
+
+/* GET /api/settings: what the settings page shows (never the password, never a key) */
+#define SETTINGS_JSON_CAP 4096
+static esp_err_t http_settings_get(httpd_req_t *req) {
+    /* the servers not registered with yet are tried now: the page shows the outcome */
+    mini_chan_register_all(4000);
+    char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+    char *out = (char *)malloc(SETTINGS_JSON_CAP);
+    char *esc = (char *)malloc(200);
     static const char *const keys[] = { "device_name", "boot_app", "wifi_ssid", "proxy", "market_url",
                                         "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                        "channel_server", "channel_id", "proxy_via_channel", "market_via_channel",
                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
-    char vals[NKEYS][96];
+    char (*vals)[200] = (char (*)[200])malloc(NKEYS * 200);
+    if (!cfg || !out || !esc || !vals) {
+        free(cfg); free(out); free(esc); free(vals);
+        return http_error(req, "out of memory");
+    }
     for (int i = 0; i < NKEYS; i++) {
         if (!mini_device_config_value(cfg, keys[i], vals[i], sizeof(vals[i]))) vals[i][0] = '\0';
+        const char *url = mini_chan_url_of(vals[i]);   /* the address, never the key */
+        if (url != vals[i]) memmove(vals[i], url, strlen(url) + 1);
     }
-    char key_hex[72] = "";   /* never sent: whether one is set */
-    bool key_set = mini_device_config_value(cfg, "channel_key", key_hex, sizeof(key_hex)) && key_hex[0];
-    mini_wipe(key_hex, sizeof(key_hex));
     free(cfg);
     char ssid[33], ip[16];
     int rssi;
     bool sta = sta_status(ssid, sizeof(ssid), ip, sizeof(ip), &rssi);
-    size_t n = (size_t)snprintf(out, 2048, "{\"success\":true,\"settings_mode\":%s,\"saved\":%d,\"free_heap\":%u",
+    size_t n = (size_t)snprintf(out, SETTINGS_JSON_CAP, "{\"success\":true,\"settings_mode\":%s,\"saved\":%d,\"free_heap\":%u",
                                 s_settings_mode ? "true" : "false", s_settings_saved,
                                 (unsigned)esp_get_free_heap_size());
     static const char *const names[] = { "device_name", "boot", "wifi_ssid", "proxy", "market_url",
                                          "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                         "channel_server", "channel_id", "proxy_via_channel", "market_via_channel",
                                          "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
-    n += (size_t)snprintf(out + n, 2048 - n, ",\"channel_key_set\":%s,\"channel_ready\":%s",
-                          key_set ? "true" : "false", mini_chan_enabled() ? "true" : "false");
-    for (int i = 0; i < NKEYS && n < 1900; i++) {
+    /* the converters this device uses and whether it is registered there */
+    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
+    n += mini_chan_status_json(out + n, 1100);
+    for (int i = 0; i < NKEYS && n < SETTINGS_JSON_CAP - 700; i++) {
         json_escape(vals[i], esc, 200);
-        n += (size_t)snprintf(out + n, 2048 - n, ",\"%s\":\"%s\"", names[i], esc);
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"%s\":\"%s\"", names[i], esc);
     }
+    free(vals);
     json_escape(s_settings_mode ? "settings" : s_app_path, esc, 200);
-    n += (size_t)snprintf(out + n, 2048 - n, ",\"app\":\"%s\",\"settings_from\":\"%s\"", esc,
+    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app\":\"%s\",\"settings_from\":\"%s\"", esc,
                           s_settings_mode ? s_settings_from : "");
     json_escape(s_settings_mode ? "" : (s_app_name[0] ? s_app_name : s_app_id), esc, 200);
-    n += (size_t)snprintf(out + n, 2048 - n, ",\"app_name\":\"%s\",\"app_web\":%s", esc,
+    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app_name\":\"%s\",\"app_web\":%s", esc,
                           (!s_settings_mode && s_app_web_len) ? "true" : "false");
     json_escape(ssid, esc, 200);
-    n += (size_t)snprintf(out + n, 2048 - n, ",\"sta_connected\":%s,\"sta_ssid\":\"%s\",\"sta_ip\":\"%s\",\"rssi\":%d",
+    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"sta_connected\":%s,\"sta_ssid\":\"%s\",\"sta_ip\":\"%s\",\"rssi\":%d",
                           sta ? "true" : "false", esc, ip, rssi);
     uint32_t bl, bm, bh;
     mini_device_button_get_timing(&bl, &bm, &bh);   /* the times in effect */
-    n += (size_t)snprintf(out + n, 2048 - n, ",\"button_ms\":[%u,%u,%u]", (unsigned)bl, (unsigned)bm, (unsigned)bh);
+    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"button_ms\":[%u,%u,%u]", (unsigned)bl, (unsigned)bm, (unsigned)bh);
     json_escape(setup_portal_ssid(), esc, 200);
-    snprintf(out + n, 2048 - n, ",\"ap\":%s,\"ap_ssid\":\"%s\",\"ap_ip\":\"%s\",\"clients\":%d}",
+    snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"ap\":%s,\"ap_ssid\":\"%s\",\"ap_ip\":\"%s\",\"clients\":%d}",
              setup_portal_active() ? "true" : "false", esc, setup_portal_ip(), setup_portal_clients());
     esp_err_t r = http_send_json(req, out);
     free(out);
@@ -1966,8 +2001,11 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
                 return http_error(req, "weak password: must be at least 6 characters and cannot use sequential or repeated digits");
             }
         }
-        const char *v = value;
-        if (!config_save(section, &key, &v, 1)) {
+        char keyed[200];
+        const char *v = keep_server_key(key, value, keyed, sizeof(keyed));
+        bool saved_ok = config_save(section, &key, &v, 1);
+        mini_wipe(keyed, sizeof(keyed));
+        if (!saved_ok) {
             free(body);
             return http_error(req, "cannot write /spiffs/config.ini");
         }
@@ -1985,8 +2023,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strcmp(key, "wifi_password") == 0) { snprintf(wifi_pass, sizeof(wifi_pass), "%s", value); have_pass = true; wifi = true; }
         if (strncmp(key, "button_", 7) == 0) buttons = true;
         if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
-        if (strncmp(key, "channel_", 8) == 0 || strcmp(key, "proxy_via_channel") == 0 ||
-            strcmp(key, "market_via_channel") == 0 || strcmp(key, "proxy") == 0) channel_upd = true;
+        if (is_server_key(key) || strcmp(key, "hardware_password") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
     free(body);
@@ -2411,8 +2448,54 @@ static char *json_string_alloc(const char *text) {
     return out;
 }
 
+/* An ini text with the converter keys taken out of its values (in place):
+ * "proxy_url = <key>@http://..." reads "proxy_url = http://..." */
+static void ini_hide_keys(char *text) {
+    for (char *line = text; line && *line; ) {
+        char *end = strchr(line, '\n');
+        char *eq = strchr(line, '=');
+        if (eq && (!end || eq < end)) {
+            char *v = eq + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            const char *url = mini_chan_url_of(v);
+            if (url != v) {
+                size_t cut = (size_t)(url - v);
+                memmove(v, url, strlen(url) + 1);
+                if (end) end -= cut;
+            }
+        }
+        line = end ? end + 1 : NULL;
+    }
+}
+
+/* new_text (malloc'd) with the key of old_text's value put back in each
+ * value that still names the same server; new_text itself when none */
+static char *ini_keep_keys(const char *old_text, char *new_text, const char *const *keys, size_t nkeys) {
+    char o[200], v[200], on[96], vn[96], nv[200];
+    uint8_t k[32];
+    for (size_t i = 0; old_text && new_text && i < nkeys; i++) {
+        if (!mini_device_config_value(old_text, keys[i], o, sizeof(o)) || !mini_chan_key_of(o, k)) continue;
+        if (!mini_device_config_value(new_text, keys[i], v, sizeof(v)) || !v[0] || mini_chan_key_of(v, k)) continue;
+        mini_chan_origin(mini_chan_url_of(o), on, sizeof(on));
+        mini_chan_origin(v, vn, sizeof(vn));
+        const char *at = strchr(o, '@');
+        if (strcmp(on, vn) != 0 || !at) continue;
+        int n = snprintf(nv, sizeof(nv), "%.*s@%s", (int)(at - o), o, v);
+        if (n < 0 || (size_t)n >= sizeof(nv)) continue;
+        char *next = mini_device_config_set(new_text, "config", keys[i], nv);
+        if (next) {
+            free(new_text);
+            new_text = next;
+        }
+    }
+    mini_wipe(k, sizeof(k));
+    mini_wipe(o, sizeof(o));
+    mini_wipe(nv, sizeof(nv));
+    return new_text;
+}
+
 /* GET /api/apps/config?key=: the app's metadata ([fields], [config]) and its
- * config.ini, read only when the page opens that app's form */
+ * config.ini (without converter keys), read only when the page opens that app's form */
 static esp_err_t http_app_config_get(httpd_req_t *req) {
     char key[48], dir[64], image[80], ini[96];
     if (!http_query(req, "key", key, sizeof(key)) || !app_by_key(key, dir, sizeof(dir), image, sizeof(image))) {
@@ -2424,6 +2507,7 @@ static esp_err_t http_app_config_get(httpd_req_t *req) {
     bool exists = fp != NULL;
     if (fp) fclose(fp);
     char *text = exists ? read_small_file(ini, 16 * 1024) : NULL;
+    if (text) ini_hide_keys(text);
     char *jm = json_string_alloc(meta ? meta : ""), *jt = json_string_alloc(text ? text : ""), *jp = json_string_alloc(ini);
     free(meta);
     free(text);
@@ -2457,11 +2541,31 @@ static esp_err_t http_app_config_post(httpd_req_t *req) {
     uint8_t *body = req->content_len ? http_read_body(req, &len, &err) : (uint8_t *)calloc(1, 1);
     if (!body) return http_error(req, err ? err : "out of memory");
     snprintf(ini, sizeof(ini), "%s/config.ini", dir);
+    {   /* a server address the form left unchanged keeps the device's key for it */
+        char *old = read_small_file(ini, 16 * 1024);
+        char *text = (char *)malloc(len + 1);
+        if (text) {
+            memcpy(text, body, len);
+            text[len] = '\0';
+            text = ini_keep_keys(old, text, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]));
+        }
+        if (old) mini_wipe(old, strlen(old));
+        free(old);
+        if (!text) {
+            free(body);
+            return http_error(req, "out of memory");
+        }
+        free(body);
+        body = (uint8_t *)text;
+        len = strlen(text);
+    }
     FILE *fp = fopen(ini, "wb");
     bool ok = fp && fwrite(body, 1, len, fp) == len;
     if (fp) ok = fclose(fp) == 0 && ok;
+    mini_wipe(body, len);
     free(body);
     if (!ok) return http_error(req, "cannot write the config");
+    if (strcmp(ini, s_app_ini) == 0) s_channel_dirty = true;   /* the running app's server may have changed */
     ESP_LOGI(TAG, "Config of %s saved (%u bytes)", key, (unsigned)len);
     return http_send_json(req, "{\"success\":true}");
 }
@@ -2587,33 +2691,130 @@ static esp_err_t http_wifi_scan(httpd_req_t *req) {
     return r;
 }
 
-/* config.ini [channel]: the encrypted converter for the app proxy and the
- * market (minischeme_channel.h); the market's base as the market computes it */
-static bool config_on(const char *cfg, const char *key) {
-    char v[8] = "";
-    if (!cfg || !mini_device_config_value(cfg, key, v, sizeof(v))) return false;
-    return v[0] == '1' || v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T' ||
-           ((v[0] == 'o' || v[0] == 'O') && (v[1] == 'n' || v[1] == 'N'));
+/* The protocol converters (minischeme_channel.h): the servers named in
+ * config.ini and in the running app's ini, the device id (the MAC) and the
+ * hardware password the device registers with; apps' https:// data goes to
+ * the app's own converter_url, else [app] https_proxy, else proxy */
+static void channel_saver(const char *origin, const char *key_hex);
+
+static void add_servers(const char *text, const char *const *keys, size_t nkeys) {
+    char v[200];
+    for (size_t i = 0; text && i < nkeys; i++) {
+        if (mini_device_config_value(text, keys[i], v, sizeof(v)) && v[0]) mini_chan_server_add(v);
+    }
+    mini_wipe(v, sizeof(v));
 }
 
 static void setup_channel(const char *cfg) {
-    char server[128] = "", id[72] = "", key[72] = "", proxy[128] = "", market[160] = "";
-    if (cfg) {
-        mini_device_config_value(cfg, "channel_server", server, sizeof(server));
-        mini_device_config_value(cfg, "channel_id", id, sizeof(id));
-        mini_device_config_value(cfg, "channel_key", key, sizeof(key));
-        mini_device_config_value(cfg, "proxy", proxy, sizeof(proxy));
+    uint8_t mac[6] = { 0 };
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(s_chan_id, sizeof(s_chan_id), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    char pass[72] = "", v[200] = "";
+    if (cfg) mini_device_config_value(cfg, "hardware_password", pass, sizeof(pass));
+    mini_chan_set_saver(channel_saver);
+    mini_chan_set_device(s_chan_id, pass);
+    mini_wipe(pass, sizeof(pass));
+    mini_chan_servers_begin();
+    add_servers(cfg, SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]));
+    char *app = s_app_ini[0] ? read_small_file(s_app_ini, 32 * 1024) : NULL;
+    add_servers(app, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]));
+    mini_chan_servers_end();
+    if ((!app || !mini_device_config_value(app, "converter_url", v, sizeof(v)) || !v[0]) && cfg &&
+        (!mini_device_config_value(cfg, "https_proxy", v, sizeof(v)) || !v[0])) {
+        mini_device_config_value(cfg, "proxy", v, sizeof(v));
     }
-    mini_market_url(market, sizeof(market));
-    mini_chan_configure(server, id, key, proxy, config_on(cfg, "proxy_via_channel"),
-                        market, config_on(cfg, "market_via_channel"));
-    mini_wipe(key, sizeof(key));
-    if (server[0]) {
-        ESP_LOGI(TAG, "Channel %s: %s (app proxy %s, market %s)", server,
-                 mini_chan_enabled() ? "ready" : "not set up (channel_id, a 64-digit channel_key)",
-                 config_on(cfg, "proxy_via_channel") ? "through it" : "direct",
-                 config_on(cfg, "market_via_channel") ? "through it" : "direct");
+    free(app);
+    mini_chan_set_https(v);
+    mini_json_feed_set_https_proxy(mini_chan_url_of(v));
+    mini_wipe(v, sizeof(v));
+}
+
+/* Keys the converters gave (in the fetching tasks), written by the main loop */
+typedef struct {
+    char origin[96];
+    char hex[65];
+} ChanSave;
+#define CHAN_SAVES 4
+static ChanSave s_chan_saves[CHAN_SAVES];
+static volatile int s_chan_save_n = 0;
+static portMUX_TYPE s_chan_save_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void channel_saver(const char *origin, const char *key_hex) {
+    size_t on = strlen(origin), kn = strlen(key_hex);
+    if (on >= sizeof(s_chan_saves[0].origin) || kn >= sizeof(s_chan_saves[0].hex)) return;
+    portENTER_CRITICAL(&s_chan_save_mux);
+    int i = 0;
+    while (i < s_chan_save_n && strcmp(s_chan_saves[i].origin, origin) != 0) i++;
+    if (i < CHAN_SAVES) {
+        memcpy(s_chan_saves[i].origin, origin, on + 1);
+        memcpy(s_chan_saves[i].hex, key_hex, kn + 1);
+        if (i == s_chan_save_n) s_chan_save_n++;
     }
+    portEXIT_CRITICAL(&s_chan_save_mux);
+}
+
+/* The key written into every value of path (among keys) naming the server */
+static void ini_file_put_key(const char *path, const char *const *keys, size_t nkeys, const char *origin,
+                             const char *hex) {
+    char *text = read_small_file(path, 32 * 1024);
+    if (!text || !text[0]) {
+        free(text);
+        return;
+    }
+    bool changed = false;
+    char v[200], nv[200], o[96];
+    for (size_t i = 0; text && i < nkeys; i++) {
+        if (!mini_device_config_value(text, keys[i], v, sizeof(v)) || !v[0]) continue;
+        const char *url = mini_chan_url_of(v);
+        mini_chan_origin(url, o, sizeof(o));
+        if (strcmp(o, origin) != 0) continue;
+        int k = snprintf(nv, sizeof(nv), "%s@%s", hex, url);
+        if (k < 0 || (size_t)k >= sizeof(nv) || strcmp(nv, v) == 0) continue;
+        char *next = mini_device_config_set(text, "app", keys[i], nv);
+        if (next) {
+            mini_wipe(text, strlen(text));
+            free(text);
+            text = next;
+            changed = true;
+        }
+    }
+    mini_wipe(v, sizeof(v));
+    mini_wipe(nv, sizeof(nv));
+    if (changed && text) {
+        char tmp[96];
+        snprintf(tmp, sizeof(tmp), "%.88s.tmp", path);
+        FILE *fp = fopen(tmp, "wb");
+        size_t len = strlen(text);
+        bool ok = fp && fwrite(text, 1, len, fp) == len;
+        if (fp) ok = fclose(fp) == 0 && ok;
+        if (ok) ok = rename(tmp, path) == 0;
+        if (!ok) remove(tmp);
+        ESP_LOGI(TAG, "%s: the key for %s %s", path, origin, ok ? "saved" : "NOT saved");
+    }
+    if (text) mini_wipe(text, strlen(text));
+    free(text);
+}
+
+/* Main loop: the keys registered since the last call, into the files */
+static void channel_save_pending(void) {
+    if (s_chan_save_n == 0) return;
+    ChanSave saves[CHAN_SAVES];
+    int n;
+    portENTER_CRITICAL(&s_chan_save_mux);
+    n = s_chan_save_n;
+    memcpy(saves, s_chan_saves, sizeof(saves));
+    memset(s_chan_saves, 0, sizeof(s_chan_saves));
+    s_chan_save_n = 0;
+    portEXIT_CRITICAL(&s_chan_save_mux);
+    for (int i = 0; i < n; i++) {
+        ini_file_put_key("/spiffs/config.ini", SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
+                         saves[i].origin, saves[i].hex);
+        if (s_app_ini[0]) {
+            ini_file_put_key(s_app_ini, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]),
+                             saves[i].origin, saves[i].hex);
+        }
+    }
+    mini_wipe(saves, sizeof(saves));
 }
 
 static size_t s_http_stack = DEF_HTTP_STACK; /* [memory] http_stack */
@@ -3321,7 +3522,7 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
         /* [app] keys belong to Scheme apps: read with (config-get key) */
     } else if (strncasecmp(key, "channel_", 8) == 0 || strcasecmp(key, "proxy_via_channel") == 0 ||
                strcasecmp(key, "market_via_channel") == 0) {
-        /* [channel]: applied by setup_channel at boot */
+        /* [channel]: retired; the key for a converter is kept with its address (proxy = <key>@http://...) */
     } else if (strncasecmp(key, "carousel", 8) == 0 || strstr(key, "marquee") != NULL ||
                strncasecmp(key, "market_", 7) == 0 || strcasecmp(key, "rom_build_heap") == 0) {
         /* [app] carousel*, [text] *marquee*, [market]: read where they are used
@@ -3352,7 +3553,7 @@ static bool write_config_template(const char *path) {
 static void config_append_missing(const char *path, const char *key, const char *text) {
     FILE *fp = fopen(path, "r");
     if (!fp) return;
-    char line[192];
+    char line[320];
     bool found = false;
     size_t klen = strlen(key);
     while (!found && fgets(line, sizeof(line), fp)) {
@@ -3381,7 +3582,7 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
     SystemConfig parsed;
     config_defaults(&parsed);
     int version = 0;
-    char line[192], section[24] = "";
+    char line[320], section[24] = "";
     while (fgets(line, sizeof(line), fp)) {
         char *p = line;
         char *comment = strpbrk(p, ";#");
@@ -3509,11 +3710,13 @@ static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
         vm_error(vm, "config-get: expected a key string");
         return mini_void();
     }
-    char val[160];
+    char val[200];
     const char *key = mini_string_data(argv[0]);
     if ((ini_file_value(s_app_ini, key, val, sizeof(val)) && val[0]) ||
         (mini_app_config_key_ok(key) && ini_file_value("/spiffs/config.ini", key, val, sizeof(val)))) {
-        return mini_make_string(vm, val);
+        Value s = mini_make_string(vm, mini_chan_url_of(val));   /* proxy = <key>@http://...: the address */
+        mini_wipe(val, sizeof(val));
+        return s;
     }
     return mini_false();
 }
@@ -4775,7 +4978,6 @@ void app_main(void) {
     /* 2. Config + display buffer BEFORE the VM so the buffer stays contiguous */
     config_append_missing("/spiffs/config.ini", "boot_app", mini_device_config_system_section);
     config_append_missing("/spiffs/config.ini", "marquee", mini_device_config_text_section);
-    config_append_missing("/spiffs/config.ini", "channel_server", mini_device_config_channel_section);
     char wm_probe[8];
     if (!ini_file_value("/spiffs/config.ini", "wrap_marquee", wm_probe, sizeof(wm_probe))) {
         /* [text] from before wrapped text had its own marquee */
@@ -4890,16 +5092,6 @@ void app_main(void) {
     map_font_rom();
     apply_font_config("/spiffs/config.ini");
     factory_hold_at_boot();
-    {   /* apps' https:// feeds go through the protocol converter ([app] https_proxy, else proxy) */
-        char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
-        char conv[128] = "";
-        if (cfg && (!mini_device_config_value(cfg, "https_proxy", conv, sizeof(conv)) || !conv[0])) {
-            mini_device_config_value(cfg, "proxy", conv, sizeof(conv));
-        }
-        mini_json_feed_set_https_proxy(conv);
-        setup_channel(cfg);
-        free(cfg);
-    }
 
     /* 5. Install the app and make sure its Flash (XIP) image is current.
      * The check runs while the VM block is still held so its small
@@ -4932,6 +5124,11 @@ void app_main(void) {
             vm_heap_hold = NULL;
             app_failed("api", s_app_api_err);
         }
+    }
+    {   /* the protocol converters of config.ini and of the app's ini */
+        char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+        setup_channel(cfg);
+        free(cfg);
     }
     const char *app_path = s_app_path;
     bool fasl_app = !s_settings_mode && file_has_magic(app_path, "MFAS");
@@ -5130,6 +5327,7 @@ void app_main(void) {
             setup_channel(cfg);
             free(cfg);
         }
+        channel_save_pending();
 #endif
 
         /* Physical button (GPIO 18), or the WebREPL's: short, long and mid

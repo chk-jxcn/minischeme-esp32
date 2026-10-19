@@ -700,7 +700,7 @@ static void jf_task(void *arg) {
         /* a fast poll (the PC monitor, 1 s) gives up soon; a slow feed waits
          * for a proxy that fetches its sources first (up to 15 s) */
         int timeout = interval < 3000 ? 3000 : (interval > 15000 ? 15000 : (int)interval);
-        /* plain HTTP, or through the encrypted channel (config.ini [channel]) */
+        /* plain HTTP, or through the encrypted channel of the URL's server */
         bool ok = false;
         char err[64] = "cannot connect";
         int status = 0;
@@ -748,10 +748,12 @@ void mini_json_feed_set_https_proxy(const char *base) {
 }
 
 /* url as the board fetches it (malloc'd): an https:// one through the
- * converter's /fetch; NULL (with why) when there is no converter */
+ * converter's /fetch; NULL (with why) when there is no converter. On the
+ * ESP32 mini_fetch_open sends it to the converter itself (encrypted, or
+ * plain as <it>/fetch?url=...). */
 static char *feed_url(const char *url, const char **why) {
 #if defined(ESP_PLATFORM)
-    bool direct = mini_chan_routes(url);   /* the encrypted channel's converter fetches https:// itself */
+    bool direct = s_https_proxy != NULL;
 #else
     bool direct = false;
 #endif
