@@ -361,14 +361,17 @@ struct MiniVM {
     uint32_t     xrom_sym_count;
 
     char error_buf[MAX_ERROR_LEN];
-    char trace_buf[1024];
+    char *trace_buf;
     bool has_error;
+    bool stack_trace_enabled;
 };
 
 /* Internal VM helpers */
 char  *vm_strdup(const char *s);
 void   vm_error(MiniVM *vm, const char *fmt, ...);
 const char *mini_get_error_trace(const MiniVM *vm);
+void   mini_set_stack_trace_enabled(MiniVM *vm, bool enabled);
+bool   mini_is_stack_trace_enabled(const MiniVM *vm);
 size_t mini_capture_stack_trace(MiniVM *vm, char *buf, size_t max_len);
 
 /* Memory and Generational Garbage Collection */

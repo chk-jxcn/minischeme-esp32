@@ -105,6 +105,7 @@
     { "vm-frame-depth", "(vm-frame-depth)", "Language / Virtual machine", "Call frames in use." }, \
     { "vm-rom-bytes", "(vm-rom-bytes)", "Language / Virtual machine", "Size of the attached Code ROM image (0 when the app runs from RAM)." }, \
     { "vm-stats", "(vm-stats)", "Language / Virtual machine", "VM counters: GCs, allocation, live and peak heap, stack and frame peaks." }, \
+    { "vm-stack-trace", "(vm-stack-trace [on?])", "Language / Virtual machine", "Query or enable/disable stack trace capture upon errors (enabled by default in WASM, disabled on hardware)." }, \
     { "+", "(+ z ...)", "Language / Numbers", "Return the sum of the arguments (0 if no arguments)." }, \
     { "-", "(- z1 [z2 ...])", "Language / Numbers", "Subtract following arguments from z1, or negate z1." }, \
     { "*", "(* z ...)", "Language / Numbers", "Return the product of the arguments (1 if no arguments)." }, \
@@ -282,6 +283,9 @@
     { "backlight-set", "(backlight-set val)", "Hardware / Backlight", "Set LCD backlight brightness PWM (0-255); turns the automatic backlight off. Kept in config.ini [display] backlight." }, \
     { "backlight-get", "(backlight-get)", "Hardware / Backlight", "Current LCD backlight brightness (0-255), set by backlight-set or by the automatic backlight." }, \
     { "backlight-auto", "(backlight-auto [on?])", "Hardware / Backlight", "Automatic backlight from the light sensor: #t while on; (backlight-auto #t) / #f turns it on / off. backlight-set turns it off. Kept in config.ini [display] auto_backlight." }, \
+    { "backlight-offset", "(backlight-offset [offset])", "Hardware / Backlight", "Get or set backlight brightness offset (-10 to 10) for automatic backlight calculation." }, \
+    { "backlight-min", "(backlight-min [val])", "Hardware / Backlight", "Get or set minimum backlight brightness level (0 to 255)." }, \
+    { "backlight-max", "(backlight-max [val])", "Hardware / Backlight", "Get or set maximum backlight brightness level (0 to 255)." }, \
     { "display-model", "(display-model)", "Display / Display", "Panel model string." }, \
     { "display-rotation", "(display-rotation [r])", "Display / Display", "Panel rotation 0..3 (0 and 2 portrait 320x480, 1 and 3 landscape 480x320); returns the rotation." }, \
     { "display-dma-ram", "(display-dma-ram)", "Display / Display", "Bytes of the LCD driver's DMA and staging buffers (0 without DMA)." }, \

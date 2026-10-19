@@ -85,7 +85,9 @@ void vm_error(MiniVM *vm, const char *fmt, ...) {
     vsnprintf(vm->error_buf, MAX_ERROR_LEN, fmt, ap);
     va_end(ap);
     vm->has_error = true;
-    mini_capture_stack_trace(vm, vm->trace_buf, sizeof(vm->trace_buf));
+    if (vm->stack_trace_enabled && vm->trace_buf) {
+        mini_capture_stack_trace(vm, vm->trace_buf, 1024);
+    }
 }
 
 const char *mini_get_error(const MiniVM *vm) {
@@ -93,13 +95,33 @@ const char *mini_get_error(const MiniVM *vm) {
 }
 
 const char *mini_get_error_trace(const MiniVM *vm) {
-    return (vm && vm->has_error && vm->trace_buf[0]) ? vm->trace_buf : NULL;
+    return (vm && vm->has_error && vm->stack_trace_enabled && vm->trace_buf && vm->trace_buf[0]) ? vm->trace_buf : NULL;
+}
+
+void mini_set_stack_trace_enabled(MiniVM *vm, bool enabled) {
+    if (!vm) return;
+    vm->stack_trace_enabled = enabled;
+    if (enabled) {
+        if (!vm->trace_buf) {
+            vm->trace_buf = (char *)malloc(1024);
+            if (vm->trace_buf) vm->trace_buf[0] = '\0';
+        }
+    } else {
+        if (vm->trace_buf) {
+            free(vm->trace_buf);
+            vm->trace_buf = NULL;
+        }
+    }
+}
+
+bool mini_is_stack_trace_enabled(const MiniVM *vm) {
+    return vm ? vm->stack_trace_enabled : false;
 }
 
 void mini_clear_error(MiniVM *vm) {
     vm->has_error = false;
     vm->error_buf[0] = '\0';
-    vm->trace_buf[0] = '\0';
+    if (vm->trace_buf) vm->trace_buf[0] = '\0';
     vm->sp = vm->stack;
     vm->call_frame_count = 0;
 }
@@ -213,6 +235,13 @@ MiniVM *mini_create_ext(const MiniConfig *config) {
 
     MiniVM *vm = (MiniVM *)calloc(1, sizeof(MiniVM));
     if (!vm) return NULL;
+    vm->stack_trace_enabled = config ? config->enable_stack_trace : false;
+    if (vm->stack_trace_enabled) {
+        vm->trace_buf = (char *)malloc(1024);
+        if (vm->trace_buf) vm->trace_buf[0] = '\0';
+    } else {
+        vm->trace_buf = NULL;
+    }
 
     size_t eden_sz = (config && config->eden_bytes > 0) ? config->eden_bytes : 0;
     if (eden_sz == 0) {
@@ -431,6 +460,10 @@ void mini_destroy(MiniVM *vm) {
     if (vm->rom_owned_buffer) {
         free(vm->rom_owned_buffer);
         vm->rom_owned_buffer = NULL;
+    }
+    if (vm->trace_buf) {
+        free(vm->trace_buf);
+        vm->trace_buf = NULL;
     }
     if (mini_get_active_vm() == vm) {
         mini_set_active_vm(NULL);

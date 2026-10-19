@@ -219,6 +219,16 @@ static Value prim_vm_stats(MiniVM *vm, int argc, Value *argv) {
     return lst;
 }
 
+/* (vm-stack-trace [on?]) => boolean: query or enable/disable stack trace */
+static Value prim_vm_stack_trace(MiniVM *vm, int argc, Value *argv) {
+    if (argc == 0) {
+        return mini_is_stack_trace_enabled(vm) ? mini_true() : mini_false();
+    }
+    bool on = !mini_is_false(argv[0]);
+    mini_set_stack_trace_enabled(vm, on);
+    return on ? mini_true() : mini_false();
+}
+
 static Value prim_set_car(MiniVM *vm, int argc, Value *argv) {
     if (argc != 2 || !mini_is_pair(argv[0])) {
         vm_error(vm, "set-car!: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
@@ -1427,6 +1437,7 @@ const BuiltinCFuncEntry BUILTIN_CFUNCS[] = {
     { "set-car!", prim_set_car },
     { "vm-rom-bytes", prim_vm_rom_bytes },
     { "vm-stats", prim_vm_stats },
+    { "vm-stack-trace", prim_vm_stack_trace },
     { "set-cdr!", prim_set_cdr },
     { "list", prim_list },
     { "caar", prim_caar },

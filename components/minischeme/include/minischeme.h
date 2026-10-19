@@ -107,6 +107,7 @@ typedef struct MiniConfig {
     size_t frame_capacity;        /* Call frame capacity (default 256 / compact 128) */
     bool skip_init_fasl;          /* If true, do not automatically load embedded init_fasl upon initialization */
     size_t eden_bytes;            /* Nursery (Eden) generation size in bytes (0 for default 16KB) */
+    bool enable_stack_trace;      /* If true, capture stack trace on errors (default false on hardware, true in WASM) */
 } MiniConfig;
 
 /* ========================================================================= */
@@ -504,6 +505,16 @@ const char *mini_get_error(const MiniVM *vm);
  * @brief Retrieve the call stack trace of the last error, if available.
  */
 const char *mini_get_error_trace(const MiniVM *vm);
+
+/**
+ * @brief Enable or disable stack trace capture upon errors.
+ */
+void mini_set_stack_trace_enabled(MiniVM *vm, bool enabled);
+
+/**
+ * @brief Query whether stack trace capture is currently enabled.
+ */
+bool mini_is_stack_trace_enabled(const MiniVM *vm);
 
 /**
  * @brief Clear any pending error state.

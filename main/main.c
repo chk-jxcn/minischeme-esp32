@@ -3026,6 +3026,8 @@ typedef struct {
     char wifi_pass[65];
     /* [http] */
     char http_password[65];
+    /* [debug] */
+    bool stack_trace;              /* capture stack trace on errors (default false on hardware) */
 } SystemConfig;
 
 static SystemConfig s_sys_cfg;
@@ -3058,6 +3060,7 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->web_in_app = true;
     cfg->factory_reset_key = true;
     cfg->app_storage_kb = 256;
+    cfg->stack_trace = false; /* disabled by default on hardware to save memory */
     cfg->button_ms[0] = cfg->button_ms[1] = cfg->button_ms[2] = 0;
     cfg->wifi_ssid[0] = '\0';   /* no network until the settings page sets one */
     cfg->wifi_pass[0] = '\0';
@@ -3189,6 +3192,9 @@ static bool config_apply(SystemConfig *cfg, const char *key, const char *val, in
     } else if (strcasecmp(key, "http_stack") == 0) {
         if (!parse_long(val, 3072, 32768, &v)) return false;
         cfg->http_stack = (size_t)v;
+    } else if (strcasecmp(key, "stack_trace") == 0) {
+        if (!parse_long(val, 0, 1, &v)) return false;
+        cfg->stack_trace = v != 0;
     } else {
         return false;
     }
@@ -4386,6 +4392,7 @@ static MiniVM *create_app_vm(size_t heap) {
     cfg.stack_size         = s_sys_cfg.vm_stack;
     cfg.frame_capacity     = s_sys_cfg.vm_frames;
     cfg.skip_init_fasl     = true;
+    cfg.enable_stack_trace = s_sys_cfg.stack_trace;
     MiniVM *vm = mini_create_ext(&cfg);
     if (!vm) return NULL;
     mini_register_hardware_lib(vm);
