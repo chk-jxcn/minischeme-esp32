@@ -21,24 +21,25 @@ jobs:
 
     - name: Package Source Archive
       run: |
-        zip -r minischeme-esp32-source.zip main components docs CMakeLists.txt partitions.csv sdkconfig.defaults README.md
+        zip -r minischeme-esp32-source.zip main components docs tools CMakeLists.txt partitions.csv sdkconfig.defaults README.md
 
     - name: Build firmware with ESP-IDF Docker
       uses: espressif/esp-idf-ci-action@v1
       with:
-        esp_idf_version: release-v5.4
+        esp_idf_version: v6.1   # the IDF the board firmware is built and tested with
         target: esp32
         path: '.'
 
-    - name: Package Binary Archive and Manifest
+    # The Release carries the committed firmware/ images: built with IDF 6.1
+    # and tested on the board before the tag (a CI build cannot be byte-identical:
+    # the app descriptor holds the build time). The CI build above proves the
+    # tagged source compiles; this step proves firmware/ is complete and intact
+    # and, for a tag, that its manifest names that version.
+    - name: Package the committed firmware/ images
       run: |
+        python3 tools/check_manifest.py firmware "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}"
         mkdir -p release_bins
-        cp build/bootloader/bootloader.bin release_bins/bootloader.bin
-        cp build/partition_table/partition-table.bin release_bins/partition-table.bin
-        cp build/minischeme_esp32.bin release_bins/minischeme_esp32.bin
-        VERSION="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('1.0.{0}', github.run_number) }}"
-        VERSION="${VERSION#v}"
-        python3 -c "import json; m = {'version': '$VERSION', 'chip': 'ESP32', 'files': [{'name': 'bootloader.bin', 'address': '0x1000', 'offset': 4096}, {'name': 'partition-table.bin', 'address': '0x8000', 'offset': 32768}, {'name': 'minischeme_esp32.bin', 'address': '0x10000', 'offset': 65536}]}; json.dump(m, open('release_bins/firmware-manifest.json', 'w'), indent=2)"
+        cp firmware/bootloader.bin firmware/partition-table.bin firmware/minischeme_esp32.bin firmware/firmware-manifest.json release_bins/
         cd release_bins
         zip -r ../minischeme-esp32-binaries.zip bootloader.bin partition-table.bin minischeme_esp32.bin firmware-manifest.json
         cd ..
@@ -56,11 +57,12 @@ jobs:
           release_bins/firmware-manifest.json
 
     - name: Publish Release Assets (Source & Binaries Separated)
-      if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      # releases come only from a pushed version tag (git tag v1.0.X): no automatic tags
+      if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
-        name: "MiniScheme ESP32 Firmware (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }})"
+        tag_name: ${{ github.ref_name }}
+        name: "MiniScheme ESP32 Firmware (${{ github.ref_name }})"
         make_latest: true
         files: |
           minischeme-esp32-source.zip
