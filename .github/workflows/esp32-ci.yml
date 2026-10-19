@@ -56,6 +56,7 @@ jobs:
           release_bins/minischeme_esp32.bin
           release_bins/fontrom.bin
           release_bins/firmware-manifest.json
+        retention-days: 1   # storage quota: the Release keeps the files
 
     - name: Publish Release Assets (Source & Binaries Separated)
       # releases come only from a pushed version tag (git tag v1.0.X): no automatic tags
