@@ -724,10 +724,6 @@ bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool r
         endWrite();
         if (!i80_open(max_transfer_bytes, hz, true)) return false;
         if (!can_verify) {
-            if (hz > 10000000u) {
-                i80_close();
-                continue;
-            }
             ESP_LOGW("ILI9488", "panel readback unusable, trusting DMA at %u Hz unverified", (unsigned)hz);
             return true;
         }

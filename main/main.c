@@ -182,7 +182,7 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 /* Defaults of the [display] / [memory] options in config.ini */
 #define CONFIG_VERSION        3
 #define DEF_BAND_LINES        13                    /* 320 px: 8.3 KB band + 16.6 KB DMA */
-#define DEF_LCD_CLOCK_HZ      (10 * 1000 * 1000)    /* safe DMA clock across parallel ILI9488 panels */
+#define DEF_LCD_CLOCK_HZ      (20 * 1000 * 1000)    /* verified at boot, lowered if needed */
 #define DEF_MAX_HEAP          (128 * 1024)
 #define DEF_VM_EDEN           (4 * 1024)
 #define DEF_VM_STACK          1024
@@ -1166,14 +1166,106 @@ static void serial_poll(void) {
 /* HTTP Server                                                               */
 /* ========================================================================= */
 
+/* ---- Who may call the API -------------------------------------------------------
+ * Every /api route goes through http_guard:
+ *  - a browser page of another origin may call it only from this network
+ *    (localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, *.local) or from the
+ *    published WebREPL (WEBREPL_ORIGIN): any other page on the internet
+ *    cannot reach the board through the visitor's browser;
+ *  - "Origin: null" is an app's own page (sandboxed by /app's CSP): it may
+ *    call /api/app/call and /api/app/file, and only when the request comes
+ *    from this board's /app page (its Referer), not from a sandboxed frame
+ *    of some other site;
+ *  - with [http] http_password set, every route needs it (X-MiniScheme-Auth
+ *    header or ?auth=), except the app routes called by the board's own
+ *    /app page;
+ *  - the board itself (an app's JSON feed aimed at its own address) gets
+ *    nothing: the API is not for the apps. */
+#define WEBREPL_ORIGIN "https://chk-jxcn.github.io"
+
+static char s_http_password[65] = "";   /* [http] http_password, "" = open */
+
+static bool private_host(const char *h, size_t n) {
+    char host[64];
+    if (n == 0 || n >= sizeof(host)) return false;
+    memcpy(host, h, n);
+    host[n] = '\0';
+    if (strcasecmp(host, "localhost") == 0 || (n > 6 && strcasecmp(host + n - 6, ".local") == 0)) return true;
+    unsigned a, b, c, d;
+    char tail;
+    if (sscanf(host, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) return false;
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    return a == 127 || a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+
+/* The host part of "scheme://host[:port][/...]" or of a Host header ("host[:port]") */
+static void host_span(const char *s, const char **h, size_t *n) {
+    const char *p = strstr(s, "://");
+    p = p ? p + 3 : s;
+    size_t k = 0;
+    while (p[k] && p[k] != ':' && p[k] != '/' && p[k] != '?' && p[k] != '#') k++;
+    *h = p;
+    *n = k;
+}
+
+/* A browser Origin that may drive the API: this network, or the WebREPL.
+ * No Origin at all is a non-browser client (or a same-origin GET). */
+static bool origin_allowed(const char *origin) {
+    if (!origin || !origin[0]) return true;
+    if (strcmp(origin, WEBREPL_ORIGIN) == 0) return true;
+    if (strncmp(origin, "http://", 7) != 0 && strncmp(origin, "https://", 8) != 0) return false;
+    const char *h;
+    size_t n;
+    host_span(origin, &h, &n);
+    return private_host(h, n);
+}
+
+/* Compares a secret in time independent of where the strings differ */
+static bool secret_equal(const char *given, const char *secret) {
+    size_t gl = strlen(given), sl = strlen(secret);
+    volatile unsigned char diff = (unsigned char)(gl != sl);
+    for (size_t i = 0; i < sl; i++) {
+        unsigned char g = i < gl ? (unsigned char)given[i] : 0;
+        diff |= (unsigned char)(g ^ (unsigned char)secret[i]);
+    }
+    return diff == 0 && sl > 0;
+}
+
+static bool is_app_route(const char *uri) {
+    return strncmp(uri, "/api/app/call", 13) == 0 || strncmp(uri, "/api/app/file", 13) == 0;
+}
+
+/* The request's Origin header (false when there is none or it does not fit) */
+static bool http_origin(httpd_req_t *req, char *out, size_t cap) {
+    out[0] = '\0';
+    size_t n = httpd_req_get_hdr_value_len(req, "Origin");
+    if (n == 0 || n >= cap) return false;
+    return httpd_req_get_hdr_value_str(req, "Origin", out, cap) == ESP_OK;
+}
+
 static void http_cors(httpd_req_t *req) {
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range");
-    httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth");
-    /* Chrome Private Network Access preflight */
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
-    httpd_resp_set_hdr(req, "Access-Control-Max-Age", "86400");
+    /* Only an allowed origin is named (never "*"); "null" only on the app
+     * routes, which http_guard has already checked for this board's /app */
+    char origin[96];
+    bool named = http_origin(req, origin, sizeof(origin));
+    bool ok = named && origin_allowed(origin);
+    bool app_null = named && strcmp(origin, "null") == 0 && is_app_route(req->uri);
+    if (ok || app_null) {
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", ok ? WEBREPL_ORIGIN : "null");
+        if (ok && strcmp(origin, WEBREPL_ORIGIN) != 0) {
+            /* echo this network's origin: the header value must outlive this call */
+            static char s_cors_origin[96];
+            snprintf(s_cors_origin, sizeof(s_cors_origin), "%s", origin);
+            httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", s_cors_origin);
+        }
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range");
+        httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range");
+        /* Chrome Private Network Access preflight: for the allowed origins only */
+        if (ok) httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+        httpd_resp_set_hdr(req, "Access-Control-Max-Age", "600");
+    }
+    httpd_resp_set_hdr(req, "Vary", "Origin");
 }
 
 static esp_err_t http_send_json(httpd_req_t *req, const char *json) {
@@ -1698,6 +1790,9 @@ static bool sta_status(char *ssid, size_t ssid_cap, char *ip, size_t ip_cap, int
 }
 
 static void setup_channel(const char *cfg);
+/* Set by the HTTP task when [channel] settings change; the main loop applies
+ * them (the channel is in use there: it must not be freed under a request) */
+static volatile bool s_channel_dirty = false;
 
 /* GET /api/settings: what the settings page shows (never the password) */
 static esp_err_t http_settings_get(httpd_req_t *req) {
@@ -1841,8 +1936,9 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
     if (req->content_len > 2048) return http_error(req, "body too large");
     char *body = (char *)http_read_body(req, &len, &err);
     if (!body) return http_error(req, err);
-    char wifi_ssid[33] = "", wifi_pass[65] = "";
+    char wifi_ssid[33] = "", wifi_pass[65] = "", hw_password[65] = "";
     bool wifi = false, have_pass = false, buttons = false, backlight_upd = false, channel_upd = false;
+    bool have_hw_password = false;
     int saved = 0;
     for (char *field = strtok(body, "&"); field; field = strtok(NULL, "&")) {
         char *eq = strchr(field, '=');
@@ -1862,8 +1958,9 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
             free(body);
             return http_error(req, "section and key: a-z, 0-9, _");
         }
-        if (strcmp(key, "wifi_password") == 0 || strcmp(key, "hardware_password") == 0 ||
-            strcmp(key, "http_password") == 0 || strcmp(key, "password") == 0) {
+        bool device_password = strcmp(key, "hardware_password") == 0 || strcmp(key, "http_password") == 0 ||
+                               (strcmp(key, "password") == 0 && strcmp(section, "http") == 0);
+        if (device_password) {
             if (value[0] != '\0' && is_weak_password(value)) {
                 free(body);
                 return http_error(req, "weak password: must be at least 6 characters and cannot use sequential or repeated digits");
@@ -1875,6 +1972,15 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
             return http_error(req, "cannot write /spiffs/config.ini");
         }
         saved++;
+        if (device_password) {
+            /* the API is guarded from the next request on (the page asks for it on 401) */
+            if (strcmp(key, "hardware_password") == 0) {
+                snprintf(hw_password, sizeof(hw_password), "%s", value);
+                have_hw_password = true;
+            } else {
+                snprintf(s_http_password, sizeof(s_http_password), "%s", value);
+            }
+        }
         if (strcmp(key, "wifi_ssid") == 0) { snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", value); wifi = true; }
         if (strcmp(key, "wifi_password") == 0) { snprintf(wifi_pass, sizeof(wifi_pass), "%s", value); have_pass = true; wifi = true; }
         if (strncmp(key, "button_", 7) == 0) buttons = true;
@@ -1884,11 +1990,21 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
     free(body);
+    if (have_hw_password) {
+        /* the hardware password guards the API unless [http] http_password names another one */
+        char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+        char http_pw[65] = "";
+        if (cfg) {
+            mini_device_config_value(cfg, "http_password", http_pw, sizeof(http_pw));
+            free(cfg);
+        }
+        if (!http_pw[0]) snprintf(s_http_password, sizeof(s_http_password), "%s", hw_password);
+    }
     if (buttons || backlight_upd || channel_upd) {
         char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
         if (cfg) {
             if (buttons) mini_device_button_config(cfg);
-            if (channel_upd) setup_channel(cfg);
+            if (channel_upd) s_channel_dirty = true;
             if (backlight_upd) {
                 char vbuf[16];
                 int cur_off = mini_backlight_get_offset();
@@ -1973,40 +2089,6 @@ static esp_err_t http_market(httpd_req_t *req) {
     return r;
 }
 
-/* ---- Who may call the API -------------------------------------------------------
- * Every /api route goes through http_guard:
- *  - a browser page of another origin may call it only from this network
- *    (localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, *.local): a page on the
- *    internet cannot reach the board through the visitor's browser;
- *  - "Origin: null" is an app's own page (sandboxed by /app's CSP): it may
- *    call /api/app/call, its app's hook, and nothing else;
- *  - the board itself (an app's JSON feed aimed at its own address) gets
- *    nothing: the API is not for the apps. */
-static bool private_host(const char *h, size_t n) {
-    char host[64];
-    if (n == 0 || n >= sizeof(host)) return false;
-    memcpy(host, h, n);
-    host[n] = '\0';
-    if (strcmp(host, "localhost") == 0 || (n > 6 && strcmp(host + n - 6, ".local") == 0)) return true;
-    unsigned a, b, c, d;
-    if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
-    return a == 127 || a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
-}
-
-static bool origin_allowed(const char *origin) {
-    if (!origin || !origin[0]) return true;
-    const char *h = strstr(origin, "://");
-    if (h) {
-        h += 3;
-        size_t n = 0;
-        while (h[n] && h[n] != ':' && h[n] != '/') n++;
-        if (private_host(h, n)) return true;
-    }
-    /* WebREPL (GitHub Pages, local proxy, etc.) is allowed; security is enforced
-     * by s_http_password authentication, Chrome PNA, and network boundary */
-    return true;
-}
-
 /* The request comes from this board (127.0.0.1 or one of its addresses) */
 static bool from_this_board(httpd_req_t *req) {
     struct sockaddr_storage peer;
@@ -2032,53 +2114,65 @@ static bool from_this_board(httpd_req_t *req) {
 }
 
 typedef esp_err_t (*HttpHandler)(httpd_req_t *req);
-static char s_http_password[65] = "";
+
+/* A request header into out; false when missing or longer than cap */
+static bool http_header(httpd_req_t *req, const char *name, char *out, size_t cap) {
+    out[0] = '\0';
+    size_t n = httpd_req_get_hdr_value_len(req, name);
+    if (n == 0 || n >= cap) return false;
+    return httpd_req_get_hdr_value_str(req, name, out, cap) == ESP_OK;
+}
+
+/* The Referer names this board (the same host as the Host header): the
+ * request comes from one of the board's own pages */
+static bool referer_is_board(httpd_req_t *req) {
+    char ref[128], host[64];
+    if (!http_header(req, "Referer", ref, sizeof(ref)) || !http_header(req, "Host", host, sizeof(host))) return false;
+    const char *rh, *hh;
+    size_t rn, hn;
+    host_span(ref, &rh, &rn);
+    host_span(host, &hh, &hn);
+    return rn > 0 && rn == hn && strncasecmp(rh, hh, rn) == 0;
+}
+
+/* The password given with the request (X-MiniScheme-Auth, or ?auth=) is right */
+static bool http_authed(httpd_req_t *req) {
+    char given[96];
+    if (http_header(req, "X-MiniScheme-Auth", given, sizeof(given)) && secret_equal(given, s_http_password)) return true;
+    return http_query(req, "auth", given, sizeof(given)) && secret_equal(given, s_http_password);
+}
+
+static esp_err_t http_refuse(httpd_req_t *req, const char *status, const char *why, bool auth_required) {
+    ESP_LOGW(TAG, "Refused %s: %s", req->uri, why);
+    httpd_resp_set_status(req, status);
+    http_cors(req);
+    httpd_resp_set_type(req, "application/json");
+    char out[200];
+    snprintf(out, sizeof(out), "{\"success\":false,\"error\":\"%s\"%s}", why,
+             auth_required ? ",\"auth_required\":true" : "");
+    return httpd_resp_sendstr(req, out);
+}
 
 static esp_err_t http_guard(httpd_req_t *req) {
-    bool app_call = strncmp(req->uri, "/api/app/call", 13) == 0 || strncmp(req->uri, "/api/app/file", 13) == 0;
+    bool app_route = is_app_route(req->uri);
     char origin[96];
-    const char *why = NULL;
-    if (httpd_req_get_hdr_value_len(req, "Origin") > 0) {
-        if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) != ESP_OK) {
-            why = "origin not allowed";
-        } else if (strcmp(origin, "null") == 0 ? !app_call : !origin_allowed(origin)) {
-            why = "origin not allowed (an app's page may only call /api/app/call and /api/app/file)";
+    bool has_origin = httpd_req_get_hdr_value_len(req, "Origin") > 0;
+    bool null_origin = false;
+    if (has_origin) {
+        if (!http_origin(req, origin, sizeof(origin))) return http_refuse(req, "403 Forbidden", "origin not allowed", false);
+        null_origin = strcmp(origin, "null") == 0;
+        if (null_origin ? !app_route : !origin_allowed(origin)) {
+            return http_refuse(req, "403 Forbidden",
+                               "origin not allowed (an app's page may only call /api/app/call and /api/app/file)", false);
         }
     }
-    if (!why && from_this_board(req)) why = "not for requests from the board itself";
-    if (why) {
-        ESP_LOGW(TAG, "Refused %s: %s", req->uri, why);
-        httpd_resp_set_status(req, "403 Forbidden");
-        http_cors(req);
-        httpd_resp_set_type(req, "application/json");
-        char out[160];
-        snprintf(out, sizeof(out), "{\"success\":false,\"error\":\"%s\"}", why);
-        return httpd_resp_sendstr(req, out);
-    }
-    /* Password protection for HTTP API if configured */
-    if (s_http_password[0] != '\0' && !app_call) {
-        char auth_buf[96] = "";
-        bool authed = false;
-        if (httpd_req_get_hdr_value_len(req, "X-MiniScheme-Auth") > 0) {
-            if (httpd_req_get_hdr_value_str(req, "X-MiniScheme-Auth", auth_buf, sizeof(auth_buf)) == ESP_OK) {
-                if (strcmp(auth_buf, s_http_password) == 0) authed = true;
-            }
-        }
-        if (!authed && httpd_req_get_url_query_len(req) > 0) {
-            char query[128];
-            if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-                if (httpd_query_key_value(query, "token", auth_buf, sizeof(auth_buf)) == ESP_OK ||
-                    httpd_query_key_value(query, "auth", auth_buf, sizeof(auth_buf)) == ESP_OK) {
-                    if (strcmp(auth_buf, s_http_password) == 0) authed = true;
-                }
-            }
-        }
-        if (!authed) {
-            ESP_LOGW(TAG, "Unauthorized access to %s (password required)", req->uri);
-            httpd_resp_set_status(req, "401 Unauthorized");
-            http_cors(req);
-            httpd_resp_set_type(req, "application/json");
-            return httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"unauthorized\",\"auth_required\":true}");
+    if (from_this_board(req)) return http_refuse(req, "403 Forbidden", "not for requests from the board itself", false);
+    if (s_http_password[0] != '\0') {
+        /* an app's own page on this board cannot know the password: its two
+         * routes stay open to it, and only to it */
+        bool own_app_page = app_route && null_origin && referer_is_board(req);
+        if (!own_app_page && !http_authed(req)) {
+            return http_refuse(req, "401 Unauthorized", "unauthorized", true);
         }
     }
     return ((HttpHandler)req->user_ctx)(req);
@@ -2745,6 +2839,9 @@ static void mirror_stream_task(void *pvParameters) {
 
         int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+        /* a viewer that vanished while the screen stood still is noticed */
+        int keepalive = 1;
+        setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
 
         /* Send timeout: 3 seconds */
         struct timeval tv_send = { .tv_sec = 3, .tv_usec = 0 };
@@ -2754,8 +2851,16 @@ static void mirror_stream_task(void *pvParameters) {
         struct timeval tv_handshake = { .tv_sec = 3, .tv_usec = 0 };
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv_handshake, sizeof(tv_handshake));
 
-        char rx_buf[512];
-        int rx_len = recv(client_fd, rx_buf, sizeof(rx_buf) - 1, 0);
+        /* The handshake: one AUTH line, or a whole HTTP request head */
+        char rx_buf[768];
+        int rx_len = 0;
+        while (rx_len < (int)sizeof(rx_buf) - 1) {
+            int r = recv(client_fd, rx_buf + rx_len, sizeof(rx_buf) - 1 - (size_t)rx_len, 0);
+            if (r <= 0) break;
+            rx_len += r;
+            rx_buf[rx_len] = '\0';
+            if (strncmp(rx_buf, "AUTH", 4) == 0 ? strchr(rx_buf, '\n') != NULL : strstr(rx_buf, "\r\n\r\n") != NULL) break;
+        }
         if (rx_len <= 0) {
             close(client_fd);
             continue;
@@ -2778,7 +2883,7 @@ static void mirror_stream_task(void *pvParameters) {
                     req_pass[pi++] = *p++;
                 }
                 req_pass[pi] = '\0';
-                if (strcmp(req_pass, s_http_password) == 0) authed = true;
+                authed = secret_equal(req_pass, s_http_password);
             }
 
             const char *since_ptr = strstr(rx_buf, "since=");
@@ -2798,17 +2903,20 @@ static void mirror_stream_task(void *pvParameters) {
             if (s_http_password[0] == '\0') {
                 authed = true;
             } else {
-                char auth_token[65] = {0};
-                const char *tok = strstr(rx_buf, "auth=");
-                if (!tok) tok = strstr(rx_buf, "token=");
-                if (tok) {
-                    tok = strchr(tok, '=') + 1;
+                /* "GET /?auth=<percent-encoded password> HTTP/1.1" */
+                char auth_token[200] = {0};
+                const char *line_end = strstr(rx_buf, "\r\n");
+                const char *tok = strstr(rx_buf, "?auth=");
+                if (!tok) tok = strstr(rx_buf, "&auth=");
+                if (tok && (!line_end || tok < line_end)) {
+                    tok += 6;
                     int ti = 0;
                     while (*tok && *tok != '&' && *tok != ' ' && *tok != '\r' && *tok != '\n' && ti < (int)sizeof(auth_token) - 1) {
                         auth_token[ti++] = *tok++;
                     }
                     auth_token[ti] = '\0';
-                    if (strcmp(auth_token, s_http_password) == 0) authed = true;
+                    url_decode(auth_token);
+                    authed = secret_equal(auth_token, s_http_password);
                 }
             }
 
@@ -2819,8 +2927,10 @@ static void mirror_stream_task(void *pvParameters) {
                 continue;
             }
 
-            const char *key_hdr = strstr(rx_buf, "Sec-WebSocket-Key:");
-            if (!key_hdr) key_hdr = strstr(rx_buf, "sec-websocket-key:");
+            const char *key_hdr = NULL;
+            for (const char *h = rx_buf; h && *h; h = strstr(h, "\r\n") ? strstr(h, "\r\n") + 2 : NULL) {
+                if (strncasecmp(h, "Sec-WebSocket-Key:", 18) == 0) { key_hdr = h; break; }
+            }
             if (!key_hdr) {
                 close(client_fd);
                 continue;
@@ -2943,12 +3053,21 @@ static void mirror_stream_task(void *pvParameters) {
             }
 
             if (is_ws) {
+                /* RFC 6455 binary frame: payloads under 126 bytes carry their
+                 * length in the second byte, longer ones (up to the 3 KB chunk)
+                 * in a 16-bit extended length */
                 uint8_t ws_hdr[4];
+                size_t hdr_len = 2;
                 ws_hdr[0] = 0x82;
-                ws_hdr[1] = 126;
-                ws_hdr[2] = (uint8_t)(job.out_len >> 8);
-                ws_hdr[3] = (uint8_t)(job.out_len & 0xFF);
-                if (send(client_fd, ws_hdr, 4, 0) < 0 ||
+                if (job.out_len < 126) {
+                    ws_hdr[1] = (uint8_t)job.out_len;
+                } else {
+                    ws_hdr[1] = 126;
+                    ws_hdr[2] = (uint8_t)(job.out_len >> 8);
+                    ws_hdr[3] = (uint8_t)(job.out_len & 0xFF);
+                    hdr_len = 4;
+                }
+                if (send(client_fd, ws_hdr, hdr_len, 0) < 0 ||
                     send(client_fd, chunk_buf, job.out_len, 0) < 0) {
                     break;
                 }
@@ -3025,7 +3144,8 @@ typedef struct {
     char wifi_ssid[33];
     char wifi_pass[65];
     /* [http] */
-    char http_password[65];
+    char http_password[65];        /* [http] http_password: the web page / HTTP API password */
+    char hardware_password[65];    /* [server] hardware_password: the API password when http_password is empty */
     /* [debug] */
     bool stack_trace;              /* capture stack trace on errors (default false on hardware) */
 } SystemConfig;
@@ -3065,6 +3185,7 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->wifi_ssid[0] = '\0';   /* no network until the settings page sets one */
     cfg->wifi_pass[0] = '\0';
     cfg->http_password[0] = '\0';
+    cfg->hardware_password[0] = '\0';
 }
 
 
@@ -3076,9 +3197,19 @@ static bool parse_long(const char *val, long lo, long hi, long *out) {
     return true;
 }
 
-/* Applies one key; returns false for an unknown key or an invalid value */
-static bool config_apply(SystemConfig *cfg, const char *key, const char *val, int *version) {
+/* Applies one key of [section] ("" before the first section); returns
+ * false for an unknown key or an invalid value. A few short names mean
+ * something only in their own section: [wifi] ssid / password / wifi_pass
+ * are the network's, [http] password is the API's; elsewhere they are unknown. */
+static bool config_apply(SystemConfig *cfg, const char *section, const char *key, const char *val, int *version) {
     long v;
+    if (strcasecmp(section, "wifi") == 0) {
+        if (strcasecmp(key, "ssid") == 0) key = "wifi_ssid";
+        else if (strcasecmp(key, "password") == 0 || strcasecmp(key, "wifi_pass") == 0) key = "wifi_password";
+    } else if (strcasecmp(key, "password") == 0) {
+        if (strcasecmp(section, "http") != 0) return false;
+        key = "http_password";
+    }
     if (strcasecmp(key, "config_version") == 0) {
         if (!parse_long(val, 0, 1000, &v)) return false;
         *version = (int)v;
@@ -3177,16 +3308,24 @@ static bool config_apply(SystemConfig *cfg, const char *key, const char *val, in
     } else if (strcasecmp(key, "wifi_password") == 0) {
         if (strlen(val) >= sizeof(cfg->wifi_pass)) return false;
         snprintf(cfg->wifi_pass, sizeof(cfg->wifi_pass), "%s", val);
-    } else if (strcasecmp(key, "http_password") == 0 || strcasecmp(key, "password") == 0) {
+    } else if (strcasecmp(key, "http_password") == 0) {
         if (strlen(val) >= sizeof(cfg->http_password)) return false;
         snprintf(cfg->http_password, sizeof(cfg->http_password), "%s", val);
-        snprintf(s_http_password, sizeof(s_http_password), "%s", val);
+    } else if (strcasecmp(key, "hardware_password") == 0) {
+        if (strlen(val) >= sizeof(cfg->hardware_password)) return false;
+        snprintf(cfg->hardware_password, sizeof(cfg->hardware_password), "%s", val);
+    } else if (strcasecmp(key, "proxy_url") == 0 || strcasecmp(key, "converter_url") == 0) {
+        /* [server] written by the WebREPL setup: the same URLs as [app] proxy / https_proxy */
     } else if (strcasecmp(key, "proxy") == 0 || strcasecmp(key, "https_proxy") == 0 || strncasecmp(key, "app_", 4) == 0 ||
                strncasecmp(key, "pcmon_", 6) == 0) {
         /* [app] keys belong to Scheme apps: read with (config-get key) */
     } else if (strncasecmp(key, "channel_", 8) == 0 || strcasecmp(key, "proxy_via_channel") == 0 ||
                strcasecmp(key, "market_via_channel") == 0) {
         /* [channel]: applied by setup_channel at boot */
+    } else if (strncasecmp(key, "carousel", 8) == 0 || strstr(key, "marquee") != NULL ||
+               strncasecmp(key, "market_", 7) == 0 || strcasecmp(key, "rom_build_heap") == 0) {
+        /* [app] carousel*, [text] *marquee*, [market]: read where they are used
+         * (applib, the GUI's text settings, the market); rom_build_heap: retired */
     } else if (strncasecmp(key, "font_", 5) == 0) {
         /* [fonts]: applied by apply_font_config once the font ROM is mapped */
     } else if (strcasecmp(key, "http_stack") == 0) {
@@ -3242,13 +3381,21 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
     SystemConfig parsed;
     config_defaults(&parsed);
     int version = 0;
-    char line[192];
+    char line[192], section[24] = "";
     while (fgets(line, sizeof(line), fp)) {
         char *p = line;
         char *comment = strpbrk(p, ";#");
         if (comment) *comment = '\0';
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-        if (*p == '\0' || *p == '[') continue;
+        if (*p == '[') {
+            char *close = strchr(p, ']');
+            size_t n = close ? (size_t)(close - p - 1) : 0;
+            if (n >= sizeof(section)) n = 0;
+            memcpy(section, p + 1, n);
+            section[n] = '\0';
+            continue;
+        }
+        if (*p == '\0') continue;
         char *eq = strchr(p, '=');
         if (!eq) continue;
         *eq = '\0';
@@ -3262,11 +3409,16 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
             *v_end = '\0';
             v_end--;
         }
-        if (!config_apply(&parsed, key, val, &version)) {
-            ESP_LOGW(TAG, "config.ini: ignoring '%s = %s'", key, val);
+        if (!config_apply(&parsed, section, key, val, &version)) {
+            ESP_LOGW(TAG, "config.ini: ignoring [%s] %s", section, key);
         }
     }
     fclose(fp);
+    /* the password set up by the WebREPL ([server] hardware_password) also
+     * guards the web page and the HTTP API unless [http] names another one */
+    if (!parsed.http_password[0] && parsed.hardware_password[0]) {
+        snprintf(parsed.http_password, sizeof(parsed.http_password), "%s", parsed.hardware_password);
+    }
 
     if (version < CONFIG_VERSION) {
         /* Files written by older firmware carry stale defaults (20-line RGB666
@@ -4714,6 +4866,7 @@ void app_main(void) {
     s_job_lock = xSemaphoreCreateMutex();
     s_job_done = xSemaphoreCreateBinary();
 #if MINISCHEME_FW_HTTP
+    snprintf(s_http_password, sizeof(s_http_password), "%s", s_sys_cfg.http_password);
     /* [system] web_in_app = 0: no web page while an app runs (its RAM goes
      * to the app's VM); the system settings always have it */
     if (s_sys_cfg.web_in_app || s_settings_boot == SETTINGS_BOOT_MAGIC) {
@@ -4970,6 +5123,14 @@ void app_main(void) {
         /* Remote requests */
         serial_poll();
         service_pending_job();
+#if MINISCHEME_FW_HTTP
+        if (s_channel_dirty) {
+            s_channel_dirty = false;
+            char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+            setup_channel(cfg);
+            free(cfg);
+        }
+#endif
 
         /* Physical button (GPIO 18), or the WebREPL's: short, long and mid
          * press for the app, the hold the hardware pages, a mid press there
