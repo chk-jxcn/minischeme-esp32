@@ -136,6 +136,7 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 | `storage` | `0x290000` | 1472 KB | **LittleFS**, mounted at `/spiffs` (the name is historical; the partition subtype is still `spiffs`) |
 
 - Firmware builds use **ESP-IDF 6.1** (locally and in CI, Docker image `espressif/idf:v6.1`).
+- `firmware/fontrom.bin` (optional in the manifest, `0x190000`): the font ROM with simsun-16, all of GB2312; `[fonts] font_override` empty means `system_16:simsun-16` (built-in font when absent, `none` to keep it).
 - `firmware/firmware-manifest.json` lists the three images with offset, size and SHA-256; the WebREPL flasher takes the manifest and all three images from one source and refuses files whose SHA-256 differs, and esptool-js verifies each region's MD5 after writing.
 - The ILI9488 8080 bus runs on I2S DMA; the WR clock starts at `lcd_clock_hz` (20 MHz) and is verified at boot by reading pixels back, stepping down until the writes land.
 

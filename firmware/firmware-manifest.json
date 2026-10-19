@@ -1,5 +1,5 @@
 {
-  "version": "1.0.54",
+  "version": "1.0.55",
   "chip": "ESP32",
   "idf": "6.1",
   "files": [
@@ -21,8 +21,17 @@
       "name": "minischeme_esp32.bin",
       "address": "0x10000",
       "offset": 65536,
-      "size": 1400864,
-      "sha256": "3bd99e40fd8964bae98b1611b6c5240aeb1c9000c4e9ca9bd2587bd1e91d62e3"
+      "size": 1401392,
+      "sha256": "40bbb5722541b554f7f2e6530cca8e68b28d381f4f89b39ce33a6cda8f1b3b70"
+    },
+    {
+      "name": "fontrom.bin",
+      "address": "0x190000",
+      "offset": 1638400,
+      "size": 307200,
+      "sha256": "30e88d7e9e38cff666c891c4c603e9d9a5d6b6f9ddd729d8b57195bc62833c09",
+      "optional": true,
+      "description": "system font ROM: simsun-16, GB2312 levels 1 and 2"
     }
   ]
 }

@@ -36,7 +36,14 @@ python -m esptool --chip esp32 -p COM42 -b 460800 --before default_reset --after
 ```
 
 ### Prebuilt images
-`firmware/` holds the images of the latest release (built with IDF 6.1) and `firmware-manifest.json` with each file's offset, size and SHA-256 (`tools/make_manifest.py`). The GitHub Release of each tag carries the same files, built by CI from that tag. The WebREPL flasher checks every file against the manifest before writing.
+`firmware/` holds the images of the latest release (built with IDF 6.1) and `firmware-manifest.json` with each file's offset, size and SHA-256 (`tools/make_manifest.py`). The GitHub Release of each tag carries the same files. The WebREPL flasher checks every file against the manifest before writing.
+
+### System font (Chinese text without generating fonts)
+`firmware/fontrom.bin` is a ready font ROM image with **simsun-16** (Song 16 px, all of GB2312: levels 1 and 2, 7539 glyphs, 300 KB). Write it once to the `fontrom` partition; the WebREPL flasher does it by default ("写入系统字库"):
+```bash
+python -m esptool --chip esp32 -p COM42 write-flash 0x190000 firmware/fontrom.bin
+```
+It replaces the whole font ROM (fonts installed earlier with the font manager are removed; add them again afterwards). With `[fonts] font_override` empty the firmware draws all 16 px system and app text with simsun-16 when the font ROM has it, else with the built-in font (~700 characters); `font_override = none` keeps the built-in font. The image is made with `tools/make_fontrom.py` from `minischeme-webrepl/fonts/simsun-16.mfnt`.
 
 ## Configuration (`/spiffs/config.ini`)
 The firmware writes a commented default file on first boot; the WebREPL's setup dialog and the device web page edit it. Main keys:

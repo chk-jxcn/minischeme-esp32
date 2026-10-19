@@ -39,9 +39,9 @@ jobs:
       run: |
         python3 tools/check_manifest.py firmware "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}"
         mkdir -p release_bins
-        cp firmware/bootloader.bin firmware/partition-table.bin firmware/minischeme_esp32.bin firmware/firmware-manifest.json release_bins/
+        cp firmware/bootloader.bin firmware/partition-table.bin firmware/minischeme_esp32.bin firmware/fontrom.bin firmware/firmware-manifest.json release_bins/
         cd release_bins
-        zip -r ../minischeme-esp32-binaries.zip bootloader.bin partition-table.bin minischeme_esp32.bin firmware-manifest.json
+        zip -r ../minischeme-esp32-binaries.zip bootloader.bin partition-table.bin minischeme_esp32.bin fontrom.bin firmware-manifest.json
         cd ..
 
     - name: Upload Binary Artifacts
@@ -54,6 +54,7 @@ jobs:
           release_bins/bootloader.bin
           release_bins/partition-table.bin
           release_bins/minischeme_esp32.bin
+          release_bins/fontrom.bin
           release_bins/firmware-manifest.json
 
     - name: Publish Release Assets (Source & Binaries Separated)
@@ -70,6 +71,7 @@ jobs:
           release_bins/bootloader.bin
           release_bins/partition-table.bin
           release_bins/minischeme_esp32.bin
+          release_bins/fontrom.bin
           release_bins/firmware-manifest.json
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

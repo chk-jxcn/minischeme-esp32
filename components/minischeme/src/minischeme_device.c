@@ -1137,7 +1137,10 @@ const char mini_device_config_template[] =
     ";   fontrom  system font ROM (flash partition), font named <face>-<size>\n"
     ";   spiffs   /spiffs/fonts/<face>-<size>.mfnt\n"
     "; e.g. 'fontrom, app': a font ROM font of the same name comes before the app's own\n"
-    "font_override =        ; replace fonts by name: name:replacement, comma separated, e.g.\n"
+    "font_override =        ; replace fonts by name: name:replacement, comma separated. Empty:\n"
+    ";                        system_16:simsun-16 (the font ROM's full GB2312 Song 16 px, shipped\n"
+    ";                        with the firmware; the built-in font when it is absent); none: no\n"
+    ";                        replacement. Examples:\n"
     ";   system_16:simsun-16  built-in 16 px font (0) drawn with simsun-16\n"
     ";   clock_32:digit-32    built-in clock font (1)\n"
     ";   simhei-24:kaiti-24   an app's simhei-24 replaced by kaiti-24\n"
@@ -1211,7 +1214,10 @@ const char mini_device_config_fonts_section[] =
     ";   fontrom  system font ROM (flash partition), font named <face>-<size>\n"
     ";   spiffs   /spiffs/fonts/<face>-<size>.mfnt\n"
     "; e.g. 'fontrom, app': a font ROM font of the same name comes before the app's own\n"
-    "font_override =        ; replace fonts by name: name:replacement, comma separated, e.g.\n"
+    "font_override =        ; replace fonts by name: name:replacement, comma separated. Empty:\n"
+    ";                        system_16:simsun-16 (the font ROM's full GB2312 Song 16 px, shipped\n"
+    ";                        with the firmware; the built-in font when it is absent); none: no\n"
+    ";                        replacement. Examples:\n"
     ";   system_16:simsun-16  built-in 16 px font (0) drawn with simsun-16\n"
     ";   clock_32:digit-32    built-in clock font (1)\n"
     ";   simhei-24:kaiti-24   an app's simhei-24 replaced by kaiti-24\n";
@@ -1284,11 +1290,22 @@ void mini_device_apply_text_config(const char *ini) {
     apply_marquee(ini, MINI_GUI_TEXT_WRAP, "wrap_", MINI_GUI_MARQUEE_LINE, 5, 1);
 }
 
+/* With font_override empty or missing the system 16 px font is drawn with
+ * simsun-16 (full GB2312) when the font ROM has it: the firmware's font ROM
+ * image carries it, and the built-in font keeps only ~700 characters. A
+ * missing simsun-16 leaves the built-in font in place. "none" turns it off. */
+#define DEFAULT_FONT_OVERRIDE "system_16:simsun-16"
+
 const char *mini_device_apply_font_config(const char *ini) {
     char order[160], overrides[400];
     bool has_order = ini && mini_device_config_value(ini, "font_order", order, sizeof(order));
     bool has_over = ini && mini_device_config_value(ini, "font_override", overrides, sizeof(overrides));
-    return mini_font_configure(has_order ? order : NULL, has_over ? overrides : NULL);
+    if (!has_over || overrides[0] == '\0') {
+        snprintf(overrides, sizeof(overrides), "%s", DEFAULT_FONT_OVERRIDE);
+    } else if (strcmp(overrides, "none") == 0) {
+        overrides[0] = '\0';
+    }
+    return mini_font_configure(has_order ? order : NULL, overrides);
 }
 
 static bool key_equals(const char *p, size_t n, const char *key) {
