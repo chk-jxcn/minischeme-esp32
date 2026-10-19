@@ -1,21 +1,28 @@
 {
-  "version": "1.0.39",
+  "version": "1.0.53",
   "chip": "ESP32",
+  "idf": "6.1",
   "files": [
     {
       "name": "bootloader.bin",
       "address": "0x1000",
-      "offset": 4096
+      "offset": 4096,
+      "size": 26128,
+      "sha256": "6c02cb2a9bbecf232afdb2b5094c44a2d846a5ab1d3c6c34b1c2b636b63c240c"
     },
     {
       "name": "partition-table.bin",
       "address": "0x8000",
-      "offset": 32768
+      "offset": 32768,
+      "size": 3072,
+      "sha256": "d156016affc7b1a7c75175e1df07e0eadb354dcc62dcf44239b07f9e1a0065bf"
     },
     {
       "name": "minischeme_esp32.bin",
       "address": "0x10000",
-      "offset": 65536
+      "offset": 65536,
+      "size": 1400656,
+      "sha256": "fcbeac855f7e7f4670b2444d5e90f1f79d2672990e46214a5a188d169bd5b977"
     }
   ]
 }
