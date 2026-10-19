@@ -219,6 +219,7 @@ bool mini_gui_take_invalidated(int *out_y0, int *out_y1);
  * Returns the number of render-procedure calls that raised an error. */
 int  mini_gui_band_render(MiniVM *vm, int y0, int y1, MiniBandEmitFn emit, void *userdata);
 const char *mini_gui_band_last_error(void);
+const char *mini_gui_band_last_error_detail(void);
 /* Rows [y0, y1) as currently shown, delivered through emit without touching
  * the panel (screen mirroring): BAND re-rasterizes whole bands, FULL reads
  * the frame. Returns false in DIRECT mode, which keeps no pixels. */

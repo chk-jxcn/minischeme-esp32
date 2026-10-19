@@ -1595,6 +1595,7 @@ static int  s_inval_y0[GUI_MAX_INVAL_SPANS];
 static int  s_inval_y1[GUI_MAX_INVAL_SPANS];
 static int  s_inval_count = 0;
 static char s_band_error[160] = {0};
+static char s_band_error_detail[1536] = {0};
 
 /* True when the band-aligned extents of two spans touch or overlap */
 static bool inval_spans_touch(int a0, int a1, int b0, int b1) {
@@ -1668,6 +1669,10 @@ bool mini_gui_take_invalidated(int *out_y0, int *out_y1) {
 
 const char *mini_gui_band_last_error(void) {
     return s_band_error;
+}
+
+const char *mini_gui_band_last_error_detail(void) {
+    return s_band_error_detail;
 }
 
 static Value gui_lookup_render_proc(MiniVM *vm) {
@@ -1798,6 +1803,9 @@ static int gui_call_render(MiniVM *vm, int band_y) {
     mini_call(vm, fn, 0, NULL);
     if (!mini_get_error(vm)) return 0;
     snprintf(s_band_error, sizeof(s_band_error), "band y=%d: %s", band_y, mini_get_error(vm));
+    const char *tr = mini_get_error_trace(vm);
+    snprintf(s_band_error_detail, sizeof(s_band_error_detail),
+             "band y=%d: %s\n%s", band_y, mini_get_error(vm), tr ? tr : "  (no trace)");
     mini_clear_error(vm);
     return 1;
 }
@@ -1899,6 +1907,7 @@ int mini_gui_band_render(MiniVM *vm, int y0, int y1, MiniBandEmitFn emit, void *
     if (y0 >= y1) return 0;
     int errors = 0;
     s_band_error[0] = '\0';
+    s_band_error_detail[0] = '\0';
     s_active_sub_buffer = NULL;
     s_target_pixels = NULL;
     s_frame_ms = s_now_ms;  /* every band of this frame scrolls to the same offset */

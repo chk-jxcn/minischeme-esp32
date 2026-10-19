@@ -150,9 +150,25 @@ static Value prim_cons(MiniVM *vm, int argc, Value *argv) {
     return mini_make_cons(vm, argv[0], argv[1]);
 }
 
+static const char *mini_describe_type(Value v) {
+    if (mini_is_false(v)) return "#f";
+    if (mini_is_true(v)) return "#t";
+    if (mini_is_nil(v)) return "()";
+    if (mini_is_void(v)) return "#<void>";
+    if (mini_is_fixnum(v)) return "fixnum";
+    if (mini_is_flonum(v)) return "flonum";
+    if (mini_is_symbol(v)) return "symbol";
+    if (mini_is_string(v)) return "string";
+    if (mini_is_vector(v)) return "vector";
+    if (mini_is_closure(v)) return "procedure";
+    if (mini_is_cfunc(v)) return "c-procedure";
+    if (mini_is_continuation(v)) return "continuation";
+    return "non-pair";
+}
+
 static Value prim_car(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "car: requires a pair");
+        vm_error(vm, "car: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     return mini_car(argv[0]);
@@ -160,7 +176,7 @@ static Value prim_car(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_cdr(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "cdr: requires a pair");
+        vm_error(vm, "cdr: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     return mini_cdr(argv[0]);
@@ -205,7 +221,7 @@ static Value prim_vm_stats(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_set_car(MiniVM *vm, int argc, Value *argv) {
     if (argc != 2 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "set-car!: requires a pair");
+        vm_error(vm, "set-car!: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     if (mini_rom_contains(vm, argv[0])) {
@@ -219,7 +235,7 @@ static Value prim_set_car(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_set_cdr(MiniVM *vm, int argc, Value *argv) {
     if (argc != 2 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "set-cdr!: requires a pair");
+        vm_error(vm, "set-cdr!: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     if (mini_rom_contains(vm, argv[0])) {
@@ -243,12 +259,12 @@ static Value prim_list(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_caar(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "caar: requires a pair");
+        vm_error(vm, "caar: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     Value a = mini_car(argv[0]);
     if (!mini_is_pair(a)) {
-        vm_error(vm, "caar: requires a pair in car");
+        vm_error(vm, "caar: requires a pair in car (got %s)", mini_describe_type(a));
         return mini_void();
     }
     return mini_car(a);
@@ -256,12 +272,12 @@ static Value prim_caar(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_cadr(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "cadr: requires a pair");
+        vm_error(vm, "cadr: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     Value d = mini_cdr(argv[0]);
     if (!mini_is_pair(d)) {
-        vm_error(vm, "cadr: requires a pair in cdr");
+        vm_error(vm, "cadr: requires a pair in cdr (got %s)", mini_describe_type(d));
         return mini_void();
     }
     return mini_car(d);
@@ -269,12 +285,12 @@ static Value prim_cadr(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_cdar(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "cdar: requires a pair");
+        vm_error(vm, "cdar: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     Value a = mini_car(argv[0]);
     if (!mini_is_pair(a)) {
-        vm_error(vm, "cdar: requires a pair in car");
+        vm_error(vm, "cdar: requires a pair in car (got %s)", mini_describe_type(a));
         return mini_void();
     }
     return mini_cdr(a);
@@ -282,7 +298,7 @@ static Value prim_cdar(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_cddr(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
-        vm_error(vm, "cddr: requires a pair");
+        vm_error(vm, "cddr: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
     }
     Value d = mini_cdr(argv[0]);

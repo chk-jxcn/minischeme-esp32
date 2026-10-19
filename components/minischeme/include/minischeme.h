@@ -501,6 +501,11 @@ size_t mini_format_string_literal(char *buf, size_t cap, Value str);
 const char *mini_get_error(const MiniVM *vm);
 
 /**
+ * @brief Retrieve the call stack trace of the last error, if available.
+ */
+const char *mini_get_error_trace(const MiniVM *vm);
+
+/**
  * @brief Clear any pending error state.
  */
 void mini_clear_error(MiniVM *vm);

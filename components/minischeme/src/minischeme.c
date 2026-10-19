@@ -39,21 +39,67 @@ char *vm_strdup(const char *s) {
     return res;
 }
 
+static const char *resolve_frame_name(MiniVM *vm, CallFrame *f) {
+    if (!vm || !f) return NULL;
+    for (Value curr = mini_cdr(vm->global_env); mini_is_pair(curr); curr = mini_cdr(curr)) {
+        Value b = mini_car(curr);
+        if (mini_is_pair(b)) {
+            Value sym = mini_car(b);
+            Value val = mini_cdr(b);
+            if (mini_is_closure(val)) {
+                ClosureObj *cl = (ClosureObj *)UNTAG_PTR(val);
+                if (cl == f->closure || (f->code && (CodeObj *)UNTAG_PTR(cl->code) == f->code)) {
+                    return mini_symbol_name(sym);
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+size_t mini_capture_stack_trace(MiniVM *vm, char *buf, size_t max_len) {
+    if (!vm || !buf || max_len == 0) return 0;
+    size_t pos = 0;
+    buf[0] = '\0';
+    int n = vm->call_frame_count;
+    if (n <= 0) {
+        return (size_t)snprintf(buf, max_len, "  (toplevel / no call frames)\n");
+    }
+    pos += snprintf(buf + pos, max_len - pos, "Call stack (most recent first):\n");
+    for (int i = n - 1; i >= 0 && pos < max_len - 1; i--) {
+        CallFrame *f = &vm->call_frames[i];
+        const char *name = resolve_frame_name(vm, f);
+        ptrdiff_t pc_off = (f->pc && f->code) ? (f->pc - CODE_BYTES(f->code)) : 0;
+        if (name) {
+            pos += snprintf(buf + pos, max_len - pos, "  #%d: (%s) [pc=%td]\n", (n - 1 - i), name, pc_off);
+        } else {
+            pos += snprintf(buf + pos, max_len - pos, "  #%d: <procedure> [pc=%td]\n", (n - 1 - i), pc_off);
+        }
+    }
+    return pos;
+}
+
 void vm_error(MiniVM *vm, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(vm->error_buf, MAX_ERROR_LEN, fmt, ap);
     va_end(ap);
     vm->has_error = true;
+    mini_capture_stack_trace(vm, vm->trace_buf, sizeof(vm->trace_buf));
 }
 
 const char *mini_get_error(const MiniVM *vm) {
     return vm->has_error ? vm->error_buf : NULL;
 }
 
+const char *mini_get_error_trace(const MiniVM *vm) {
+    return (vm && vm->has_error && vm->trace_buf[0]) ? vm->trace_buf : NULL;
+}
+
 void mini_clear_error(MiniVM *vm) {
     vm->has_error = false;
     vm->error_buf[0] = '\0';
+    vm->trace_buf[0] = '\0';
     vm->sp = vm->stack;
     vm->call_frame_count = 0;
 }
