@@ -153,7 +153,7 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 
 ### 6.2 Plain endpoints and safety rules
 - `/app/<name>` (weather, news, stocks, crypto, futures, calendar, usage), `/market/<file>` (only files inside `apps/`), `/fetch?url=` (internet hosts only, every redirect re-checked; a local server also reaches its own network for clients on that network).
-- Market data is real or absent: e.g. `/app/crypto` uses OKX with Huobi as a fallback and answers 502 (the device keeps its last data) when neither answers; it never returns invented prices.
+- Market data is real or absent: e.g. `/app/crypto` takes the first of OKX, Binance (`data-api.binance.vision`, reachable from mainland China) and Huobi that answers (a failing source is skipped for 5 minutes) and answers 502 (the device keeps its last data) when none does; it never returns invented prices.
 - CORS answers go only to the WebREPL, this network's pages and the server itself.
 - `X-Forwarded-For` is believed only from a reverse proxy on the same machine.
 - Admin portal: password from `config.ini [security] admin_password` (or `MINISCHEME_ADMIN_PASSWORD`); a public server never runs without one; a local server without one lets only this machine's own browser in.
