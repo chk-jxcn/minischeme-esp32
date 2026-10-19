@@ -1,80 +1,90 @@
 # MiniScheme Agent Development & Debugging Guide
 
-This document is specifically crafted for Autonomous AI Agents and Software Engineers developing, debugging, extending, and maintaining the MiniScheme ecosystem.
+This document is for AI agents and engineers developing, debugging and maintaining the MiniScheme ecosystem. It describes what the code does today; when the two disagree, the code wins and this guide must be fixed.
 
 ---
 
-## 1. System Ecosystem & Repository Topology
+## 1. Repositories
 
-The MiniScheme project consists of five decoupled, collaborative repositories:
+The project is split into five repositories (github.com/chk-jxcn/&lt;name&gt;, branch `main`):
 
 ```
-minischeme-gemini/repos/
-├── minischeme/          # Core ISO C99 compiler, bytecode interpreter, Cheney GC VM
-├── minischeme-esp32/    # ESP-IDF v5.x firmware with zero-RAM XIP & band rendering
-├── minischeme-apps/     # Standard Scheme application suites (Calendar, Weather, etc.)
-├── minischeme-proxy/    # AES-GCM encrypted application proxy & protocol converter
-└── minischeme-webrepl/  # Web IDE, WASM compiler, Web Serial flasher & console
+repos/
+├── minischeme/          # C99 core: reader, compiler, bytecode VM, generational GC, bigints
+├── minischeme-esp32/    # ESP-IDF 6.1 firmware: ILI9488 display, band rendering, XIP app ROM, HTTP API
+├── minischeme-apps/     # The Scheme apps (calendar, weather, ...), applib, build tool, market index
+├── minischeme-proxy/    # App proxy and protocol converter (Python, SQLite), public deployment
+└── minischeme-webrepl/  # Web IDE, WASM simulator, Web Serial flasher, local server (tray exe)
 ```
+
+Code that exists in more than one repository (update every copy and release each repository):
+
+| Code | Copies |
+|------|--------|
+| C core | `minischeme/src`, `minischeme-esp32/components/minischeme/src` (plus the device/GUI sources), compiled into `minischeme-webrepl/wasm/minischeme_vm.wasm` |
+| Proxy | `minischeme-proxy/{server.py,proxy/}` and `minischeme-webrepl/{server.py,proxy/}` (identical files) |
+| App images | `minischeme-apps/dist`, `minischeme-esp32/main/app_*_msbc.h`, `minischeme-webrepl/apps` (`python tools/build_apps.py --sync`) |
 
 ---
 
-## 2. Core VM Architecture & Memory Model
+## 2. Core VM and memory
 
-### 2.1 ISO C99 & Cross-Platform Target
-- **Strict Compliance**: ISO C99 with `-Wall -Wextra` and zero compiler warnings.
-- **Portability**: Native compilation on MinGW/Linux/macOS, bare-metal microcontrollers (ESP32/ESP8266/STM32/RP2040), and WebAssembly (`wasm32-unknown-unknown`).
+### 2.1 Language standard and targets
+- ISO C99, zero warnings under `-Wall -Wextra -pedantic` (the core's CI builds with `-Werror`, gcc, clang and `-m32`).
+- Targets: MinGW, Linux, macOS, ESP32 (ESP-IDF 6.1) and `wasm32` (clang, no libc: `minischeme-webrepl/wasm/wasm_libc.c`).
 
-### 2.2 Memory Optimization & Flash ROM Execution (XIP)
-- **Execute-In-Place (XIP)**: Bytecode images (`.msbc`) are 8-byte aligned and executed directly from Flash ROM memory without copying into RAM.
-- **Zero-RAM Constants**: Literals, symbols, and constant vectors are referenced directly in ROM.
-- **Garbage Collector**: Semispace Cheney copying collector.
-  - Semi-space heap (e.g. 108 KB on ESP32, 64 KB default on WASM).
-  - All temporary pointer allocations in C functions **must** be safely registered with GC roots:
-    ```c
-    mini_push_root(vm, &my_val);
-    // ... code that might trigger allocation or GC ...
-    mini_pop_root(vm);
-    ```
+### 2.2 Garbage collector (`minischeme_gc.c`)
+Generational, two kinds of collection:
+- **Minor**: the 4 KB Eden (nursery) is copied (Cheney) into the tenured heap when it fills.
+- **Full**: the tenured heap is compacted in place (sliding mark-compact). There is no second semispace, so the whole heap is usable.
+- A full collection runs when tenured use + the request + Eden exceeds 80 % of the tenured capacity.
+- On the ESP32 the VM heap is measured at every boot once WiFi has joined: `min(free - reserved_heap, largest block - 8 KB)`, about **102 KB** with the default 64 KB `reserved_heap` (`/api/hardware` shows the boot's probe). The WASM simulator uses the same 4 KB Eden.
+- Measured pauses on the board (240 MHz, 104 KB heap): minor 0.13-0.25 ms; full about 2 ms + 0.03 ms per KB of live data. Keep live data under about 60 % of the heap.
+
+### 2.3 GC roots in C
+Any allocation may move objects. A `Value` held in a C local across an allocation must be registered, and pointers re-derived from it afterwards:
+```c
+mini_push_root(vm, &my_val);
+/* ... code that may allocate ... */
+mini_pop_root(vm);
+```
+Pointers into an object (e.g. a bigint's digits) never survive an allocation.
+
+### 2.4 Flash execution (XIP)
+- App images (`.msbc`) are 8-byte aligned and run in place from the `approm` flash partition; bytecode, constants and symbols are not copied to RAM.
+
+### 2.5 Stack traces
+- `MiniConfig.enable_stack_trace` / `mini_set_stack_trace_enabled`: when on, a 1 KB buffer is allocated and the call stack is recorded at each error (`mini_get_error_trace`); when off nothing is allocated.
+- The ESP32 has it off (`[debug] stack_trace = 0` in config.ini); the WASM simulator has it on (`wasm_set_stack_trace` toggles it).
 
 ---
 
-## 3. MSBC Binary Format & Metadata Trailer (`MSMD`)
+## 3. MSBC images and the metadata trailer (`MSMD`)
 
-Each compiled application image ends with an `MSMD` binary trailer that allows the firmware, WebREPL, and file manager to identify, introspect, and configure apps without running them:
+Each app image ends with a trailer that the firmware, the WebREPL and the market read without running the app:
 
 ```
-+-------------------------------------------------------------+
-| MSBC Bytecode Payload (Compiled Scheme Image)              |
-+-------------------------------------------------------------+
-| (Optional Icon / Bitmap Data)                               |
-+-------------------------------------------------------------+
-| UTF-8 Metadata INI Text (Contains [app] and [config])       |
-+-------------------------------------------------------------+
-| 4-byte Little-Endian uint32: Metadata Length (Bytes)        |
-+-------------------------------------------------------------+
-| 4-byte Little-Endian uint32: FNV-1a Checksum of Metadata   |
-+-------------------------------------------------------------+
-| 4-byte Magic ASCII: "MSMD" (0x4D, 0x53, 0x4D, 0x44)         |
-+-------------------------------------------------------------+
+| MSBC bytecode (the compiled app)                          |
+| UTF-8 meta.ini text ([app], [fields], [config])           |
+| u32 LE: length of the meta.ini text                       |
+| u32 LE: FNV-1a 32 of the meta.ini text                    |
+| "MSMD"                                                    |
 ```
 
-### 3.1 Metadata INI Structure
 ```ini
 [app]
-id = calendar
-name = 万年历
-description = 农历廿四节气黄历时钟
-version = 1.0.0
-pages = 2
-api = 1.5
+id = weather
+name = 天气
+version = 1.2
+pages = 5
+api = 1.0
 
 [config]
-proxy_url = http://proxy.local:8087
-converter_url = http://converter.local:8087
+; empty values: the system config.ini's value is used
+proxy_url =
+carousel =
 ```
 
-### 3.2 FNV-1a Checksum Algorithm
 ```python
 def fnv1a(data: bytes) -> int:
     h = 2166136261
@@ -85,111 +95,98 @@ def fnv1a(data: bytes) -> int:
 
 ---
 
-## 4. Hardware Interfaces & Communication Protocols
+## 4. Talking to the device
 
-### 4.1 Web Serial UART Protocol
-Every line sent to the device begins with `@` and is answered by `@OK {json}` or `@ERR {json}`:
+### 4.1 Serial protocol (115200 baud)
+Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {json}`:
+`@INFO`, `@EXEC <base64>`, `@BEGIN <size> [path]` / `@DATA <base64>` / `@END run|save`, `@LS`, `@APPS`, `@READ <offset> <path>`, `@RM <path>`, `@MV <from> <to>`, `@RESET`.
 
-- `@INFO`: Return device info (MAC, version, free heap, display mode, compiler availability).
-- `@EXEC <base64>`: Execute inline base64 MSBC bytecode.
-- `@BEGIN <size> [path]`: Begin multi-chunk upload.
-- `@DATA <base64>`: Chunk payload (default 768 bytes raw / 1024 base64 chars).
-- `@END run|save`: Finish upload and either execute or write to SPIFFS.
-- `@LS`: List files in `/spiffs`.
-- `@APPS`: List all installed apps in `/spiffs/apps`.
-- `@READ <offset> <path>`: Read file chunk.
-- `@RM <path>`: Delete file.
-- `@MV <from> <to>`: Rename file.
-- `@RESET`: Hard reboot the microcontroller.
+### 4.2 HTTP API
+`GET /api/info`, `POST /api/exec` (MSBC body), `POST /api/eval` (when the firmware has a compiler), `POST /api/upload?path=&run=`, `GET /api/fs/list`, `GET /api/fs/read?path=`, `GET /api/screen` (mirror rows), `GET /api/stats`, `GET|POST /api/settings`, `GET /api/apps`, `GET /api/hardware`, ...
 
-### 4.2 HTTP REST API & Authentication
-When connected over WiFi HTTP:
-- `GET /api/info`: Device status and capabilities.
-- `POST /api/exec`: Execute MSBC bytecode sent in body (`Content-Type: text/plain`).
-- `POST /api/eval`: Compile and evaluate Scheme source directly if firmware compiler is enabled.
-- `POST /api/upload?path=<path>&run=<0|1>`: Upload binary file directly to SPIFFS.
-- `GET /api/fs/list`: Return directory file list as JSON.
-- `GET /api/fs/read?path=<path>`: Stream file bytes.
-- `GET /api/screen`: Fetch current display framebuffer mirror.
-- `GET /api/stats`: Fetch real-time hardware memory and telemetry figures.
+**Password** (`config.ini [http] http_password`; when that is empty, `[server] hardware_password` written by the WebREPL setup is used):
+- Sent in the `X-MiniScheme-Auth` header (the WebREPL does this), or as `?auth=<percent-encoded password>` where a header is impossible (the mirror WebSocket, a link to the device page).
+- With a password set every `/api/` route needs it, except `/api/app/call` and `/api/app/file` when called by the board's own `/app` page.
+- Compared in constant time; a wrong or missing password answers `401` with `"auth_required": true`.
+- `POST /api/settings` with `http.http_password` (or `server.hardware_password`) applies the new password at once.
 
-#### Authentication Mechanism
-To ensure zero CPU overhead on microcontrollers while preventing unauthorized HTTP operations:
-- The device checks the header `X-MiniScheme-Auth: <password>` or query parameter `?auth=<password>`.
-- The device performs a constant-time string match against `config.ini [device] password`.
-- If authentication fails, the device responds with `HTTP 401 Unauthorized`.
+**Browser origins** (CORS): only pages on this network (localhost, 10.x, 172.16-31.x, 192.168.x, *.local) and the published WebREPL (`https://chk-jxcn.github.io`) get CORS answers; other origins are refused with 403.
+
+### 4.3 config.ini
+- Keys are read per section: `[wifi] ssid / password` (or `wifi_ssid / wifi_password`) are the network's, `[http] password` (or `http_password`) the API's.
+- `config_version = 3`; a file with an older or missing version is replaced by the firmware's defaults at boot (so tools that write config.ini must keep `config_version`).
+- A key left empty in an app's own ini takes the system config.ini's value.
+
+### 4.4 Screen mirror stream (TCP 8088)
+- Raw TCP: `AUTH <password> [since=N]\n` then frames of `u32 LE length + MSCR rows`; commands `FULL`, `PING`, `QUIT`.
+- WebSocket: `GET /?auth=<password>` (RFC 6455 binary frames).
+- Only changed rows are sent; nothing is sent while the screen is still.
 
 ---
 
-## 5. ESP32 Flash Memory Layout & Firmware Flashing
+## 5. ESP32 flash layout and flashing
 
-### 5.1 Flash Address Offsets
-| Partition | Offset | File Name | Description |
-|-----------|--------|-----------|-------------|
-| **Bootloader** | `0x1000` | `bootloader.bin` | ESP32 Second Stage Bootloader |
-| **Partition Table** | `0x8000` | `partition-table.bin` | CSV Partition Table binary |
-| **Main App Firmware** | `0x10000` | `minischeme_esp32.bin` | MiniScheme ESP-IDF system image |
-| **SPIFFS Storage** | `0x180000` | N/A | User apps (`/spiffs/apps/<id>/app.msbc`) & config |
+| Region | Offset | Size | Content |
+|--------|--------|------|---------|
+| Bootloader | `0x1000` | | `bootloader.bin` |
+| Partition table | `0x8000` | | `partition-table.bin` |
+| `factory` (app) | `0x10000` | 1536 KB | `minischeme_esp32.bin` |
+| `fontrom` | `0x190000` | 768 KB | system font ROM |
+| `approm` | `0x250000` | 256 KB | the running app's image (XIP) |
+| `storage` | `0x290000` | 1472 KB | **LittleFS**, mounted at `/spiffs` (the name is historical; the partition subtype is still `spiffs`) |
 
-### 5.2 Web Serial Firmware Flasher (`esptool-js`)
-- Handshake at `115200` baud with standard RTS/DTR reset sequence.
-- Accelerate to `460800` or `921600` baud during block flashing.
-- SLIP frame deflate compression for fast flashing.
-- Hard reset after flashing via RTS pin toggle.
-
----
-
-## 6. External App Proxy & Protocol Converter Specification
-
-The external service acts as a secure, caching intermediary between MiniScheme devices and external internet APIs (Weather, Stocks, News, Feeds).
-
-### 6.1 Cryptographic Protocol
-- **Transport**: Standard HTTP with **AES-GCM-256** payload encryption.
-- **Key Derivation**:
-  1. Primary Master Key ($K_{master1}$) on server.
-  2. Device registers with hardware password hash ($K_{hw\_hash}$).
-  3. Server derives Secondary Master Key ($K_{master2} = \text{HKDF}(K_{master1}, K_{hw\_hash}, \text{MAC})$).
-  4. Per-request dynamic subkey: $K_{session} = \text{HKDF}(K_{master2}, \text{timestamp} \parallel \text{nonce})$.
-- **Factory Reset Re-authentication**:
-  - If a device reconnects after factory reset, the server issues a challenge nonce.
-  - Device verifies ownership by replying with $\text{HMAC}(K_{hw\_hash}, \text{nonce})$.
-- **Replay Protection**:
-  - Timestamps must fall within $\pm 300$ seconds of server time.
-  - Nonces are recorded and rejected if duplicated within the validity window.
-
-### 6.2 SQLite Persistence Schema
-- `devices`: `mac_address`, `hw_hash`, `master2_key`, `created_at`, `last_login`, `total_bytes`
-- `access_logs`: `id`, `mac_address`, `app_id`, `endpoint`, `client_ip`, `status_code`, `timestamp`
-- `app_cache`: `cache_key`, `app_id`, `encrypted_data`, `expires_at`
+- Firmware builds use **ESP-IDF 6.1** (locally and in CI, Docker image `espressif/idf:v6.1`).
+- `firmware/firmware-manifest.json` lists the three images with offset, size and SHA-256; the WebREPL flasher takes the manifest and all three images from one source and refuses files whose SHA-256 differs, and esptool-js verifies each region's MD5 after writing.
+- The ILI9488 8080 bus runs on I2S DMA; the WR clock starts at `lcd_clock_hz` (20 MHz) and is verified at boot by reading pixels back, stepping down until the writes land.
 
 ---
 
-## 7. Development & Debugging Quick Reference
+## 6. App proxy and protocol converter (minischeme-proxy)
 
-### 7.1 Running WebREPL Locally
+### 6.1 Encrypted channel (MSC1, `minischeme_channel.h`)
+- The device holds a 32-byte key (`config.ini [channel] channel_key`). The converter keeps it per device: at registration (`POST /channel/auth` with the MAC and the hardware password, sent once in the clear by design) it derives `master_key_2 = HKDF(hardware hash key, master_key_1, MAC)` and returns it; the WebREPL setup writes it to `channel_key`.
+- A registered device is never re-keyed: registering again only returns its key when the password (its hash key) matches; otherwise 403.
+- Each request: 16 random nonce bytes; `HKDF-SHA256(salt = nonce, ikm = device key, info = "msc1 request keys")` gives the request and response keys (used once), AES-256-GCM with a zero IV.
+- Request: `"MSC1" | u8 id length | id | nonce | u32 n | ciphertext | tag`; plaintext `u32 time | method | url | body`. Response: records of at most 1024 bytes.
+- The converter refuses a nonce it saw in the last 10 minutes; the device's clock is not enforced (a board before NTP sends time 0).
+- URLs: the proxy's own `/app/...`, `/market/...` are answered in-process; any other `http(s)` URL is fetched (GET), from internet hosts only on a public server.
+
+### 6.2 Plain endpoints and safety rules
+- `/app/<name>` (weather, news, stocks, crypto, futures, calendar, usage), `/market/<file>` (only files inside `apps/`), `/fetch?url=` (internet hosts only, every redirect re-checked; a local server also reaches its own network for clients on that network).
+- Market data is real or absent: e.g. `/app/crypto` uses OKX with Huobi as a fallback and answers 502 (the device keeps its last data) when neither answers; it never returns invented prices.
+- CORS answers go only to the WebREPL, this network's pages and the server itself.
+- `X-Forwarded-For` is believed only from a reverse proxy on the same machine.
+- Admin portal: password from `config.ini [security] admin_password` (or `MINISCHEME_ADMIN_PASSWORD`); a public server never runs without one; a local server without one lets only this machine's own browser in.
+- Logs and the access log mask secret query values (`token`, `key`, `auth`, ...).
+
+### 6.3 SQLite
+- `devices` (`mac`, `hardware_hash_key`, `master_key_2`, `created_at`, `last_seen_at`, `last_ip`, `status`), `app_data`, `access_logs`. The database file is created with mode 0600.
+
+---
+
+## 7. Quick reference
+
 ```bash
-python server.py --port 8080
-```
-With co-located App Proxy:
-```bash
-python server.py --port 8080 --with-proxy
+# core: build, generate the MSBC test images, run the three suites
+cd repos/minischeme && make test            # MinGW: mingw32-make SHELL=sh CC=gcc test
+
+# firmware (ESP-IDF 6.1 environment)
+cd repos/minischeme-esp32 && idf.py build
+python tools/make_manifest.py <dir with the 3 images> <version> 6.1
+
+# apps: compile to dist/, update index.json; --sync also updates the firmware and WebREPL copies
+cd repos/minischeme-apps && python tools/build_apps.py --sync
+
+# proxy
+cd repos/minischeme-proxy && python app_proxy.py --mode local --port 8087 && python -m pytest tests
+
+# WebREPL with the local server (proxy built in)
+cd repos/minischeme-webrepl && python server.py --port 8087 && python -m pytest tests
 ```
 
-### 7.2 Running Proxy Service & Tests
-```bash
-cd repos/minischeme-proxy
-python app_proxy.py --mode local --port 8087
-pytest tests/ -v
-```
-
-### 7.3 Building Apps to MSBC
-```bash
-cd repos/minischeme-apps
-python tools/build_apps.py
-```
-
-### 7.4 Coding Guidelines for Agents
-1. **Language Strictness**: All code, identifiers, commit messages, and comments MUST be 100% in English.
-2. **Zero Compiler Warnings**: Strict ISO C99 with `-Wall -Wextra`.
-3. **No Fake Progress / Mocking**: All Web Serial flashing and compilation logic must be genuine.
-4. **Security**: Never commit or hardcode actual credentials, tokens, passwords, or personal IPs.
+### Rules for agents
+1. All code, identifiers, comments and commit messages in English (conventional commits).
+2. Zero compiler warnings (C99, `-Wall -Wextra`).
+3. No fake data and no fake progress: flashing, compiling and market data must be real.
+4. Never commit credentials, tokens, keys, passwords or personal addresses.
+5. Releases: commit, push `main`, then tag `v1.0.X` and push the tag (CI publishes the Release only from a tag).

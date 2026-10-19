@@ -1,40 +1,33 @@
 # MiniScheme ESP32 Firmware
 
-MiniScheme ESP32 is a complete firmware environment running the MiniScheme bytecode virtual machine on ESP32-D0WDQ6 microcontrollers, driving a 3.5" ILI9488 8080-8bit parallel display (320x480 resolution) with band rendering, hardware peripherals, and remote management.
+MiniScheme ESP32 runs the MiniScheme bytecode VM on an ESP32-D0WDQ6 driving a 3.5" ILI9488 320x480 display (8080 8-bit parallel bus), with band rendering, hardware peripherals, a web page and an HTTP API for remote management.
 
-## Hardware Support
-- **Microcontroller**: ESP32-D0WDQ6 (240 MHz dual-core, 320 KB SRAM, 4 MB SPI Flash)
-- **Display**: ILI9488 3.5-inch 320x480 LCD (8-bit 8080 parallel bus via I2S DMA or GPIO bit-bang)
-- **Peripherals**:
-  - GPIO 22: Backlight brightness control (LEDC PWM)
-  - GPIO 35: Ambient light sensor (ADC1 Channel 7)
-  - GPIO 21: WS2812 RGB LED (single-wire bit-bang)
-  - GPIO 18: User button (short press, long press, mid press, hold gestures)
-- **Storage**: LittleFS partition (`/spiffs`, 1.4 MB) for apps, configs, and snapshots.
+## Hardware
+- **Microcontroller**: ESP32-D0WDQ6 (240 MHz dual core, 320 KB SRAM, 4 MB flash).
+- **Display**: ILI9488 3.5" 320x480 on the 8080 bus through I2S DMA (GPIO bit-bang as a fallback). The WR clock starts at 20 MHz (`lcd_clock_hz`) and is verified at boot by reading pixels back; it is lowered only when the writes do not land.
+- **Peripherals**: GPIO 22 backlight (LEDC PWM), GPIO 35 light sensor (ADC1 channel 7), GPIO 21 WS2812 LED, GPIO 18 button (short, long, mid press and hold).
+- **Storage**: a LittleFS partition of 1472 KB mounted at `/spiffs` (the mount point keeps its old name) for apps, configuration and snapshots.
 
-## Key Features
-- **Band Rendering Pipeline**: 13 to 20 lines slice buffer, requiring only 8 KB to 25 KB RAM instead of 76 KB to 300 KB for full framebuffers.
-- **Adaptive Memory Probing**: Measures available physical heap after WiFi/lwIP initialization and sizes the Scheme VM heap (typically 102 KB) safely.
-- **Password-Protected HTTP API**: Optional password authentication via `X-MiniScheme-Auth` header or `?token=` query parameter using lightweight string matching.
-- **Encrypted Channel Client**: Native AES-256-GCM encrypted transport to proxy/protocol converter without mbedTLS heap overhead.
-- **Dynamic Application Loader**: Executes MSBC bytecode images directly from Flash ROM.
+## Features
+- **Band rendering**: the screen is drawn 13 rows at a time (8.3 KB) instead of a 300 KB frame buffer.
+- **Measured VM heap**: after WiFi joins, the firmware measures free RAM and gives the VM `min(free - reserved_heap, largest block - 8 KB)`, about 102 KB.
+- **Apps from flash**: MSBC images run in place from the `approm` partition.
+- **HTTP API with a password**: `config.ini [http] http_password` (or the WebREPL's `[server] hardware_password`), sent in the `X-MiniScheme-Auth` header or as `?auth=` (percent-encoded); every API route needs it once set, compared in constant time. Browser pages may call the API only from this network or from the published WebREPL.
+- **Encrypted channel**: AES-256-GCM requests to the protocol converter ([minischeme-proxy](https://github.com/chk-jxcn/minischeme-proxy)) instead of TLS.
+- **Screen mirror**: changed rows streamed on TCP port 8088 (raw TCP or WebSocket).
+- **Stack traces**: off on the board (`[debug] stack_trace = 0`, no memory used); the WebREPL simulator has them on.
 
-## Building & Flashing
+## Building and flashing
 
 ### Prerequisites
-- ESP-IDF v5.x or v6.x
+- **ESP-IDF 6.1** (the CI uses the `espressif/idf:v6.1` image too)
 - Python 3.10+
 
-### Build Firmware
 ```bash
 idf.py build
-```
-
-### Flash to ESP32
-```bash
 idf.py -p COM42 -b 460800 flash
 ```
-Or via `esptool`:
+or with esptool:
 ```bash
 python -m esptool --chip esp32 -p COM42 -b 460800 --before default_reset --after hard_reset write_flash \
   0x1000 build/bootloader/bootloader.bin \
@@ -42,29 +35,36 @@ python -m esptool --chip esp32 -p COM42 -b 460800 --before default_reset --after
   0x10000 build/minischeme_esp32.bin
 ```
 
-## Documentation
-- [API Overview](docs/api/README.md)
-- [Application Library (applib)](docs/api/applib.md)
-- [API Specification v1.5.0](docs/api/v1.5.0.md)
-- [Agent & Developer Guidelines](AGENTS.md)
+### Prebuilt images
+`firmware/` holds the images of the latest release (built with IDF 6.1) and `firmware-manifest.json` with each file's offset, size and SHA-256 (`tools/make_manifest.py`). The GitHub Release of each tag carries the same files, built by CI from that tag. The WebREPL flasher checks every file against the manifest before writing.
 
-## Configuration Template (`config.ini`)
+## Configuration (`/spiffs/config.ini`)
+The firmware writes a commented default file on first boot; the WebREPL's setup dialog and the device web page edit it. Main keys:
 ```ini
+config_version = 3          ; keep it: an older or missing version is replaced by the defaults
+
 [system]
-device_name = MiniScheme-Card
-boot_app = apps/calendar/app.msbc
+boot_app =                  ; empty: the built-in settings
 
 [wifi]
 wifi_ssid = your-wifi-ssid
 wifi_password = your-wifi-password
 
 [http]
-password = your-secure-http-password
+http_password =             ; the web page / HTTP API password (empty: open)
 
 [app]
-proxy = http://proxy.local:8087
-https_proxy = http://proxy.local:8087
+proxy =                     ; the app proxy, e.g. http://<pc-ip>:8087
+https_proxy =               ; protocol converter for https:// data (empty: proxy)
+carousel = 1                ; apps turn their pages by themselves (an app's own ini may override)
+
+[debug]
+stack_trace = 0
 ```
+
+## Documentation
+- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.5.0](docs/api/v1.5.0.md)
+- [Development guide](AGENT_DEVELOPMENT_GUIDE.md)
 
 ## License
 MIT License
