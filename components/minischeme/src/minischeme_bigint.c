@@ -398,9 +398,13 @@ Value bigint_mul(MiniVM *vm, Value a, Value b) {
         int64_t na = mini_to_fixnum(a);
         int64_t nb = mini_to_fixnum(b);
         if (na == 0 || nb == 0) return mini_make_fixnum(0);
-        int64_t prod = na * nb;
-        if (prod / na == nb && prod >= MINI_FIXNUM_MIN && prod <= MINI_FIXNUM_MAX) {
-            return mini_make_fixnum(prod);
+        /* Decide on the magnitudes before multiplying: a signed product that
+         * overflows is undefined, and an optimizer may drop a check made
+         * after it (64-bit hosts: 62-bit fixnums, (expt 2 64) gave 0) */
+        uint64_t ua = na < 0 ? (uint64_t)0 - (uint64_t)na : (uint64_t)na;
+        uint64_t ub = nb < 0 ? (uint64_t)0 - (uint64_t)nb : (uint64_t)nb;
+        if (ua <= (uint64_t)MINI_FIXNUM_MAX / ub) {
+            return mini_make_fixnum(na * nb);   /* |product| <= MINI_FIXNUM_MAX */
         }
     }
 
@@ -573,7 +577,7 @@ bool bigint_div_rem(MiniVM *vm, Value a, Value b, Value *out_quot, Value *out_re
     if (out_quot) {
         int32_t sq = (ql == 0) ? 1 : (sa * sb);
         quot = bigint_alloc(vm, sq, ql);
-        if (!mini_is_void(quot)) {
+        if (!mini_is_void(quot) && ql > 0) {
             BigIntObj *qb = (BigIntObj *)UNTAG_PTR(quot);
             memcpy(qb->digits, q_limbs, ql * sizeof(Limb));
             quot = bigint_normalize(vm, quot);
@@ -583,7 +587,7 @@ bool bigint_div_rem(MiniVM *vm, Value a, Value b, Value *out_quot, Value *out_re
     if (out_rem) {
         int32_t sr = (rl == 0) ? 1 : sa; /* Scheme remainder has sign of dividend */
         rem = bigint_alloc(vm, sr, rl);
-        if (!mini_is_void(rem)) {
+        if (!mini_is_void(rem) && rl > 0) {
             BigIntObj *rb = (BigIntObj *)UNTAG_PTR(rem);
             memcpy(rb->digits, r_limbs, rl * sizeof(Limb));
             rem = bigint_normalize(vm, rem);

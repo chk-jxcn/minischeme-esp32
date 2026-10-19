@@ -1,5 +1,5 @@
 {
-  "version": "1.0.53",
+  "version": "1.0.54",
   "chip": "ESP32",
   "idf": "6.1",
   "files": [
@@ -21,8 +21,8 @@
       "name": "minischeme_esp32.bin",
       "address": "0x10000",
       "offset": 65536,
-      "size": 1400656,
-      "sha256": "fcbeac855f7e7f4670b2444d5e90f1f79d2672990e46214a5a188d169bd5b977"
+      "size": 1400864,
+      "sha256": "3bd99e40fd8964bae98b1611b6c5240aeb1c9000c4e9ca9bd2587bd1e91d62e3"
     }
   ]
 }
