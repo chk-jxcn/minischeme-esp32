@@ -365,6 +365,8 @@ static int hex_val(char c) {
     return -1;
 }
 
+/* src as JSON string contents in dst; a string too long for cap is cut on a
+ * whole UTF-8 character (the reply stays valid UTF-8) */
 static size_t json_escape(const char *src, char *dst, size_t cap) {
     size_t n = 0;
     for (const unsigned char *p = (const unsigned char *)src; *p && n + 7 < cap; p++) {
@@ -373,6 +375,14 @@ static size_t json_escape(const char *src, char *dst, size_t cap) {
         else if (*p == '\r') { dst[n++] = '\\'; dst[n++] = 'r'; }
         else if (*p == '\t') { dst[n++] = '\\'; dst[n++] = 't'; }
         else if (*p < 0x20) { n += (size_t)snprintf(dst + n, cap - n, "\\u%04x", *p); }
+        else if (*p >= 0xC0) {   /* a multi-byte character: all of it or none */
+            size_t len = *p >= 0xF0 ? 4 : (*p >= 0xE0 ? 3 : 2), k = 1;
+            while (k < len && (p[k] & 0xC0) == 0x80) k++;
+            if (n + k + 7 >= cap) break;
+            memcpy(dst + n, p, k);
+            n += k;
+            p += k - 1;
+        }
         else dst[n++] = (char)*p;
     }
     dst[n] = '\0';

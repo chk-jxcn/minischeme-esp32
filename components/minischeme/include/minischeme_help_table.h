@@ -386,7 +386,7 @@
     { "json-feed-selector", "(json-feed-selector i)", "Network / JSON feed", "Index of the selector that row i matched." }, \
     { "json-feed-field", "(json-feed-field i k)", "Network / JSON feed", "Captured value of key k (an index into keys, or since 1.2.0 a key name) for row i, as a string, or #f." }, \
     { "json-feed-url", "(json-feed-url)", "Network / JSON feed", "The URL being polled, or #f." }, \
-    { "json-feed-status", "(json-feed-status)", "Network / JSON feed", "Feed state as an alist: state, error, fetches, failures, bytes, fetch-ms, age-ms, objects, truncated, memory." }, \
+    { "json-feed-status", "(json-feed-status)", "Network / JSON feed", "Feed state as an alist: state, error, fetches, failures, bytes, fetch-ms, age-ms, objects, truncated, memory; on the ESP32 also step (none, clock: waiting for the network time, register: registering with step-server) and step-server." }, \
     { "json-feed-dump", "(json-feed-dump)", "Network / JSON feed", "Every object of a document with captured keys, values joined by TAB, one per line." }, \
     { "fs-read", "(fs-read path)", "Storage / File system", "Read a whole file as a string." }, \
     { "fs-write", "(fs-write path str)", "Storage / File system", "Create or replace a file with the bytes of a string." }, \

@@ -114,6 +114,13 @@ void mini_chan_servers_end(void);
 /** @brief The converter for https:// URLs (a config value, key allowed). */
 void mini_chan_set_https(const char *value);
 void mini_chan_set_saver(MiniChanSaver fn);
+/** @brief What a fetch waits for now: MINI_CHAN_STEP_CLOCK (the network
+ *         time, the converter checks it) or MINI_CHAN_STEP_REGISTER (a
+ *         registration), with the server into server; MINI_CHAN_STEP_NONE. */
+#define MINI_CHAN_STEP_NONE     0
+#define MINI_CHAN_STEP_CLOCK    1
+#define MINI_CHAN_STEP_REGISTER 2
+int mini_chan_step(char *server, size_t cap);
 /** @brief Registers with every server not tried yet (blocks, the HTTP task). */
 void mini_chan_register_all(int timeout_ms);
 /** @brief The servers' states as a JSON array: server, state (ready, plain,
@@ -126,8 +133,9 @@ size_t mini_chan_status_json(char *out, size_t cap);
 typedef struct MiniFetch MiniFetch;
 #define MINI_FETCH_REDIRECTS 1      /* follow HTTP redirects (plain HTTP only) */
 #define MINI_FETCH_BIG       2      /* 1 KB receive buffer instead of 512 B */
+#define MINI_FETCH_WAIT      (-2)   /* *status of a NULL open: not ready yet (the clock), try again */
 /** @brief Opens url: *status (HTTP status), *length (-1 unknown); NULL with
- *         err set when it cannot. */
+ *         err set when it cannot (*status MINI_FETCH_WAIT: try again soon). */
 MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *status, int64_t *length,
                            char *err, size_t err_cap);
 /** @brief > 0 bytes, 0 at the end, < 0 an error. */

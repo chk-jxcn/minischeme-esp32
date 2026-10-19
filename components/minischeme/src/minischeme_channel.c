@@ -254,6 +254,8 @@ static bool s_has_pass;
 static char s_https[128];
 static MiniChanSaver s_saver;
 static SemaphoreHandle_t s_lock, s_reg_lock;   /* the table; one registration at a time */
+static int s_step = MINI_CHAN_STEP_NONE;        /* what a fetch waits for now (mini_chan_step) */
+static char s_step_server[96];
 
 static void chan_lock(void) {
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
@@ -262,6 +264,31 @@ static void chan_lock(void) {
 
 static void chan_unlock(void) {
     if (s_lock) xSemaphoreGive(s_lock);
+}
+
+static void set_step(int step, const char *server) {
+    chan_lock();
+    s_step = step;
+    snprintf(s_step_server, sizeof(s_step_server), "%s", server ? server : "");
+    chan_unlock();
+}
+
+/* The step ends unless another one (a registration by another task) replaced it */
+static void end_step(int step) {
+    chan_lock();
+    if (s_step == step) {
+        s_step = MINI_CHAN_STEP_NONE;
+        s_step_server[0] = '\0';
+    }
+    chan_unlock();
+}
+
+int mini_chan_step(char *server, size_t cap) {
+    chan_lock();
+    int step = s_step;
+    if (cap) snprintf(server, cap, "%s", s_step_server);
+    chan_unlock();
+    return step;
 }
 
 static ChanServer *find_server(const char *origin) {
@@ -552,7 +579,9 @@ static bool chan_ready(const char *origin, int timeout_ms, uint8_t key[32]) {
             r.reason = "tcp";
             snprintf(r.error, sizeof(r.error), "a tcp:// converter needs a key: register over http:// first");
         } else {
+            set_step(MINI_CHAN_STEP_REGISTER, origin);
             reg_exchange(origin, id, hash_key, timeout_ms < 4000 ? 4000 : timeout_ms, &r);
+            end_step(MINI_CHAN_STEP_REGISTER);
         }
         chan_lock();
         s = find_server(origin);
@@ -819,12 +848,21 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
         return f;
     }
 
-    /* through the converter */
+    /* through the converter: it checks the time, so the clock waits for NTP
+     * (up to the timeout, then MINI_FETCH_WAIT: not an error, try again) */
     time_t now = time(NULL);
-    if (now < 1600000000) {   /* the converter checks the time: wait for NTP */
-        mini_wipe(key, sizeof(key));
-        snprintf(err, err_cap, "converter: the clock is not set yet");
-        goto fail;
+    if (now < 1600000000) {
+        set_step(MINI_CHAN_STEP_CLOCK, origin);
+        for (int waited = 0; (now = time(NULL)) < 1600000000 && waited < timeout_ms; waited += 250) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+        if (now < 1600000000) {
+            mini_wipe(key, sizeof(key));
+            *status = MINI_FETCH_WAIT;
+            snprintf(err, err_cap, "waiting for the network time (NTP)");
+            goto fail;
+        }
+        end_step(MINI_CHAN_STEP_CLOCK);
     }
     f->r = (MiniChanReader *)malloc(sizeof(MiniChanReader));
     uint8_t nonce[16];

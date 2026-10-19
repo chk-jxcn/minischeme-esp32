@@ -1317,6 +1317,8 @@ bool mini_device_config_value(const char *text, const char *key, char *out, size
                 while (v < v_end && (*v == ' ' || *v == '\t')) v++;
                 while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t' || v_end[-1] == '\r')) v_end--;
                 size_t n = (size_t)(v_end - v) < cap - 1 ? (size_t)(v_end - v) : cap - 1;
+                /* a value cut short ends on a whole UTF-8 character */
+                while (n > 0 && v + n < v_end && ((unsigned char)v[n] & 0xC0) == 0x80) n--;
                 memcpy(out, v, n);
                 out[n] = '\0';
                 return true;

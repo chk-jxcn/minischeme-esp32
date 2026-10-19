@@ -707,6 +707,13 @@ static void jf_task(void *arg) {
         int64_t length = -1;
         mini_json_feed_begin();
         MiniFetch *h = mini_fetch_open(url, timeout, 0, &status, &length, err, sizeof(err));
+        if (!h && status == MINI_FETCH_WAIT) {
+            /* not ready yet (the network time): still connecting, not a failure;
+             * json-feed-status says what it waits for */
+            free(url);
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+            continue;
+        }
         if (h) {
             if (status == 200) {
                 int n;
@@ -1075,6 +1082,15 @@ static Value prim_json_feed_status(MiniVM *vm, int argc, Value *argv) {
     alist_push(vm, &lst, "failures", mini_make_fixnum(failures));
     alist_push(vm, &lst, "fetches", mini_make_fixnum(fetches));
     alist_push(vm, &lst, "error", mini_make_string(vm, err));
+#if defined(ESP_PLATFORM)
+    {   /* what the fetch waits for now: the network time, a registration (and its server) */
+        static const char *const steps[] = { "none", "clock", "register" };
+        char server[96];
+        int step = mini_chan_step(server, sizeof(server));
+        alist_push(vm, &lst, "step-server", mini_make_string(vm, server));
+        alist_push(vm, &lst, "step", mini_make_symbol(vm, steps[step >= 0 && step <= 2 ? step : 0]));
+    }
+#endif
     alist_push(vm, &lst, "state", mini_make_symbol(vm, states[state]));
     mini_pop_root(vm);
     return lst;
