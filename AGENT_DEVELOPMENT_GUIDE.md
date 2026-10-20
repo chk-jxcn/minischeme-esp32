@@ -139,6 +139,8 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 - `firmware/fontrom.bin` (optional in the manifest, `0x190000`): the font ROM with simsun-16, all of GB2312; `[fonts] font_override` empty means `system_16:simsun-16` (built-in font when absent, `none` to keep it).
 - `firmware/firmware-manifest.json` lists the three images with offset, size and SHA-256; the WebREPL flasher takes the manifest and all three images from one source and refuses files whose SHA-256 differs, and esptool-js verifies each region's MD5 after writing.
 - The ILI9488 8080 bus runs on I2S DMA; the WR clock starts at `lcd_clock_hz` (20 MHz) and is verified at boot by reading pixels back, stepping down until the writes land.
+- `[display] panel = ips | tft` (default ips): an IPS panel needs the driver's display inversion (INVON), a TFT one not. It is set before the panel init and changed at once from the settings page, `(config-set! "display" "panel" ...)` and the system settings menu ("屏幕类型", long press); `/api/hardware` reports it as `display.panel`.
+- The settings web page `main/setup_page.html` is gzip-embedded at build time (`tools/embed_page.py`, run by main/CMakeLists.txt into the build folder); no header is committed, so the page in the firmware is always the one in the repository.
 
 ---
 

@@ -1097,6 +1097,8 @@ const char mini_device_config_template[] =
     "palette = color        ; color scheme: color, gray, eink, green, amber, cyan, gameboy, invert\n"
     "auto_backlight = 1     ; 1: brightness follows the light sensor; 0: the fixed backlight below\n"
     "backlight = 220        ; 0..255 while auto_backlight = 0 ((backlight-set n) sets both)\n"
+    "panel = ips            ; screen type: ips (colors inverted in the driver) or tft (not inverted);\n"
+    "                       ; colors like a photo negative: the other type. Also in the system settings\n"
     "color_format = rgb565  ; panel bus format: rgb565 (2 B/pixel) or rgb666 (3 B/pixel)\n"
     "width = 320\n"
     "height = 480\n"

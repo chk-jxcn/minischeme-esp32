@@ -236,6 +236,8 @@ static void setAddrWindow(int32_t x0, int32_t y0, int32_t w, int32_t h) {
 }
 
 static uint8_t s_current_rotation = 0;
+static bool s_invert = true;        /* display inversion: on for IPS panels ([display] panel) */
+static bool s_panel_ready = false;  /* tft_init done: a change is sent at once */
 static int     s_ili9488_width = ESP32_TFT_WIDTH;
 static int     s_ili9488_height = ESP32_TFT_HEIGHT;
 
@@ -250,6 +252,18 @@ static uint8_t madctl_for_rotation(uint8_t r) {
 
 bool esp32_ili9488_dma_active(void);
 bool esp32_ili9488_dma_madctl(uint8_t v);
+bool esp32_ili9488_dma_cmd(uint8_t cmd);
+
+void esp32_ili9488_set_inversion(bool on) {
+    s_invert = on;
+    if (!s_panel_ready) return;   /* tft_init sends it */
+    if (esp32_ili9488_dma_cmd(on ? TFT_INVON : TFT_INVOFF)) return;
+    begin_tft_write();
+    writecommand(on ? TFT_INVON : TFT_INVOFF);
+    end_tft_write();
+}
+
+bool esp32_ili9488_get_inversion(void) { return s_invert; }
 
 void esp32_ili9488_set_rotation(uint8_t m) {
     s_current_rotation = m % 4;
@@ -407,7 +421,8 @@ static void tft_init(void) {
     writecommand(TFT_DISPON);  /* Display on */
     delay(25);
 
-    writecommand(TFT_INVON);   /* Display Inversion ON (IPS panel) */
+    /* an IPS panel shows the right colors with inversion on, a TFT one with it off */
+    writecommand(s_invert ? TFT_INVON : TFT_INVOFF);
 
     end_tft_write();
 
@@ -470,6 +485,7 @@ static void read_cmd(uint8_t cmd, uint8_t *out_bytes, int count, bool dummy_read
 void esp32_ili9488_init(void) {
     tft_initBus();
     tft_init();
+    s_panel_ready = true;
 
     /* Read ILI9488 Diagnostic Registers */
     uint8_t id_d3[4] = {0};
@@ -778,6 +794,13 @@ bool esp32_ili9488_dma_madctl(uint8_t v) {
     esp_lcd_panel_io_tx_param(s_i80_io, TFT_MADCTL, &v, 1);
     return true;
 }
+
+/* A command without parameters on the DMA bus (after the queued color data) */
+bool esp32_ili9488_dma_cmd(uint8_t cmd) {
+    if (!s_i80_io) return false;
+    esp_lcd_panel_io_tx_param(s_i80_io, cmd, NULL, 0);
+    return true;
+}
 #else
 bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool rgb666) {
     (void)max_transfer_bytes; (void)pclk_hz; (void)rgb666;
@@ -786,6 +809,7 @@ bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool r
 bool esp32_ili9488_dma_active(void) { return false; }
 size_t esp32_ili9488_dma_ram_bytes(void) { return 0; }
 bool esp32_ili9488_dma_madctl(uint8_t v) { (void)v; return false; }
+bool esp32_ili9488_dma_cmd(uint8_t cmd) { (void)cmd; return false; }
 #endif
 
 #define TFT_RAMWRC  0x3C /* memory write continue */
@@ -1270,6 +1294,9 @@ void esp32_ws2812_set(uint8_t r, uint8_t g, uint8_t b) {
 
 /* Simulation / Host Stubs for Native Compilation & Unit Tests */
 void esp32_ili9488_init(void) {}
+static bool s_invert_stub = true;
+void esp32_ili9488_set_inversion(bool on) { s_invert_stub = on; }
+bool esp32_ili9488_get_inversion(void) { return s_invert_stub; }
 void esp32_ili9488_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     (void)x0; (void)y0; (void)x1; (void)y1;
 }

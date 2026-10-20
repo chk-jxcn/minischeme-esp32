@@ -53,6 +53,10 @@ extern "C" {
 /* Driver Initialization, Rotation & Flushing */
 void esp32_ili9488_init(void);
 void esp32_ili9488_set_rotation(uint8_t m);
+/* Display inversion: on for an IPS panel (the default), off for a TFT one; set
+ * before esp32_ili9488_init, or later (sent at once) */
+void esp32_ili9488_set_inversion(bool on);
+bool esp32_ili9488_get_inversion(void);
 uint8_t esp32_ili9488_get_rotation(void);
 int  esp32_ili9488_get_width(void);
 int  esp32_ili9488_get_height(void);

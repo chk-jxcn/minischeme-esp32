@@ -124,6 +124,8 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
 <label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
 <label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
+<label for="panel">屏幕类型（保存后立即生效；颜色像底片一样反了就换另一种）</label>
+<select id="panel"><option value="ips">IPS（默认，驱动中设置反色）</option><option value="tft">TFT（不反色）</option></select>
 <div class="desc" style="margin-top:10px">屏幕亮度与光感调节（保存后立即生效）：</div>
 <label><input type="checkbox" id="blfixed"> 固定亮度模式（勾选后使用下方固定亮度值；不勾选则根据光感自动平滑调节）</label>
 <div class="row">
@@ -407,6 +409,7 @@ async function refresh() {
   if (document.activeElement !== $('mauto')) $('mauto').checked = on(state.market_auto_update);
   if (document.activeElement !== $('frkey')) $('frkey').checked = !/^(0|false|no|off)$/i.test(state.factory_reset_key || '');
   if (document.activeElement !== $('blfixed')) $('blfixed').checked = /^(0|false|no|off)$/i.test(state.auto_backlight || '1');
+  keep('panel', /^tft$/i.test(state.panel || '') ? 'tft' : 'ips');
   keep('blval', state.backlight || '220');
   keep('bloff', state.backlight_offset || '0');
   keep('blmin', state.backlight_min || '30');
@@ -779,6 +782,7 @@ async function saveCommon(andRestart) {
                 'market.market_auto_update': $('mauto').checked ? '1' : '0',
                 'system.web_in_app': $('webapp').checked ? '1' : '0',
                 'system.factory_reset_key': $('frkey').checked ? '1' : '0',
+                'display.panel': $('panel').value,
                 'display.auto_backlight': $('blfixed').checked ? '0' : '1',
                 'display.backlight': blval,
                 'display.backlight_offset': bloff,

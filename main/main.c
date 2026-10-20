@@ -191,6 +191,17 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 
 static const char *TAG = "MiniScheme_ESP32";
 
+/* [display] panel: "ips" -> 1, "tft" -> 0, anything else -> -1. An IPS panel
+ * needs the driver's display inversion for the right colors, a TFT one not. */
+static int panel_is_ips(const char *v) {
+    if (strcasecmp(v, "ips") == 0) return 1;
+    if (strcasecmp(v, "tft") == 0) return 0;
+    return -1;
+}
+
+static volatile int s_panel_request = -1;   /* from the settings page: 1 ips, 0 tft (main loop applies) */
+static void apply_panel(bool ips);
+
 static MiniVM *s_vm = NULL;
 static bool s_has_compiler = false;
 
@@ -670,13 +681,13 @@ static void job_reply_hardware(RemoteJob *job) {
     json_escape(mini_is_string(model) ? mini_string_data(model) : "", esc, sizeof(esc));
     hw_put(job, &n, "]},\"display\":{\"model\":\"%s\",\"width\":%d,\"height\":%d,\"mode\":\"%s\",\"band_lines\":%d,"
            "\"color_bits\":%d,\"scheme\":\"%s\",\"buffer\":%u,\"dma\":%u,\"fps\":%d.%d,\"busy_pct\":%d,\"backlight\":%u,"
-           "\"dl_cmds\":%d,\"dl_cap\":%d,\"dl_heap\":%u}",
+           "\"dl_cmds\":%d,\"dl_cap\":%d,\"dl_heap\":%u,\"panel\":\"%s\"}",
            esc, mini_gui_get_width(), mini_gui_get_height(), gui_mode_name(mini_gui_get_mode()),
            mini_gui_get_band_lines(), mini_gui_get_color_bits(), mini_gui_scheme_name(mini_gui_get_scheme()),
            (unsigned)mini_gui_get_fb_ram(), (unsigned)esp32_ili9488_dma_ram_bytes(),
            s_loop.fps_x10 / 10, s_loop.fps_x10 % 10, s_loop.busy_pct, (unsigned)mini_backlight_get(),
            mini_gui_display_list_size(), mini_gui_display_list_capacity(),
-           (unsigned)mini_gui_display_list_heap_bytes());
+           (unsigned)mini_gui_display_list_heap_bytes(), esp32_ili9488_get_inversion() ? "ips" : "tft");
     char ssid[33], ip[16];
     int rssi;
     bool sta = sta_status(ssid, sizeof(ssid), ip, sizeof(ip), &rssi);
@@ -1848,7 +1859,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     static const char *const keys[] = { "device_name", "boot_app", "wifi_ssid", "proxy", "market_url",
                                         "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                        "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
+                                        "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
+                                        "panel" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
     char (*vals)[200] = (char (*)[200])malloc(NKEYS * 200);
     if (!cfg || !out || !esc || !vals) {
@@ -1870,7 +1882,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     static const char *const names[] = { "device_name", "boot", "wifi_ssid", "proxy", "market_url",
                                          "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
-                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max" };
+                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
+                                         "panel" };
     /* the converters this device uses and whether it is registered there */
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
     n += mini_chan_status_json(out + n, 1100);
@@ -2011,6 +2024,11 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
                 return http_error(req, "weak password: must be at least 6 characters and cannot use sequential or repeated digits");
             }
         }
+        int panel_ips = strcmp(key, "panel") == 0 ? panel_is_ips(value) : -2;
+        if (panel_ips == -1) {
+            free(body);
+            return http_error(req, "panel: ips or tft");
+        }
         char keyed[200];
         const char *v = keep_server_key(key, value, keyed, sizeof(keyed));
         bool saved_ok = config_save(section, &key, &v, 1);
@@ -2033,6 +2051,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strcmp(key, "wifi_password") == 0) { snprintf(wifi_pass, sizeof(wifi_pass), "%s", value); have_pass = true; wifi = true; }
         if (strncmp(key, "button_", 7) == 0) buttons = true;
         if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
+        if (panel_ips >= 0) s_panel_request = panel_ips;   /* the main loop owns the LCD bus */
         if (is_server_key(key) || strcmp(key, "hardware_password") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
@@ -3334,6 +3353,7 @@ typedef struct {
     int width;
     int height;
     bool lcd_dma;                  /* I2S DMA bus (false: GPIO bit-bang) */
+    bool panel_ips;                /* [display] panel: ips (inversion on, the default) or tft */
     int lcd_dma_lines;             /* rows per DMA transfer, 0 = whole band */
     uint32_t lcd_clock_hz;         /* requested WR clock */
     /* [memory] */
@@ -3363,10 +3383,18 @@ typedef struct {
 
 static SystemConfig s_sys_cfg;
 
+/* Main task (it owns the LCD bus): the screen type at once */
+static void apply_panel(bool ips) {
+    s_sys_cfg.panel_ips = ips;
+    esp32_ili9488_set_inversion(ips);
+    ESP_LOGI(TAG, "Display: %s panel (inversion %s)", ips ? "IPS" : "TFT", ips ? "on" : "off");
+}
+
 static void config_defaults(SystemConfig *cfg) {
     cfg->mode = MINI_GUI_MODE_BAND;
     cfg->band_lines = DEF_BAND_LINES;
     cfg->color_fmt = MINI_GUI_COLOR_RGB565;
+    cfg->panel_ips = true;
     cfg->color_bits = 16;
     cfg->scheme = MINI_GUI_SCHEME_COLOR;
     cfg->auto_backlight = true;
@@ -3437,6 +3465,10 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
         else if (strcasecmp(val, "rgb565") == 0 || strcmp(val, "16") == 0) cfg->color_fmt = MINI_GUI_COLOR_RGB565;
         else if (strcasecmp(val, "4bpp") == 0 || strcmp(val, "4") == 0) cfg->color_bits = 4; /* legacy */
         else return false;
+    } else if (strcasecmp(key, "panel") == 0) {
+        int ips = panel_is_ips(val);
+        if (ips < 0) return false;
+        cfg->panel_ips = ips == 1;
     } else if (strcasecmp(key, "color_bits") == 0) {
         if (!parse_long(val, 1, 16, &v) || (v != 1 && v != 2 && v != 4 && v != 8 && v != 16)) return false;
         cfg->color_bits = (int)v;
@@ -4027,7 +4059,14 @@ static Value prim_config_set(MiniVM *vm, int argc, Value *argv) {
         vm_error(vm, "config-set!: weak password rejected (sequential or repeated numbers)");
         return mini_void();
     }
-    return config_save(mini_string_data(argv[0]), &key, &value, 1) ? mini_true() : mini_false();
+    int panel_ips = strcasecmp(key, "panel") == 0 ? panel_is_ips(value) : -2;
+    if (panel_ips == -1) {
+        vm_error(vm, "config-set!: panel is ips or tft");
+        return mini_void();
+    }
+    if (!config_save(mini_string_data(argv[0]), &key, &value, 1)) return mini_false();
+    if (panel_ips >= 0) apply_panel(panel_ips == 1);   /* the screen type takes effect at once */
+    return mini_true();
 }
 
 /* ========================================================================= */
@@ -5042,6 +5081,7 @@ void app_main(void) {
 
     /* Panel init (bit-banged), then hand the bus to I2S DMA while the heap is
      * still unfragmented: its DMA copy buffer must be internal and contiguous */
+    esp32_ili9488_set_inversion(s_sys_cfg.panel_ips);   /* IPS: colors inverted in the driver */
     esp32_ili9488_init();
     esp32_ili9488_set_pixel_format(0x55);
     /* DIRECT mode sends thousands of small fills: a DMA transaction costs far
@@ -5331,6 +5371,10 @@ void app_main(void) {
         serial_poll();
         service_pending_job();
 #if MINISCHEME_FW_HTTP
+        if (s_panel_request >= 0) {   /* [display] panel from the settings page */
+            apply_panel(s_panel_request == 1);
+            s_panel_request = -1;
+        }
         if (s_channel_dirty) {
             s_channel_dirty = false;
             char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
