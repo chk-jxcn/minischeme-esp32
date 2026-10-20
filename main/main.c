@@ -681,13 +681,13 @@ static void job_reply_hardware(RemoteJob *job) {
     json_escape(mini_is_string(model) ? mini_string_data(model) : "", esc, sizeof(esc));
     hw_put(job, &n, "]},\"display\":{\"model\":\"%s\",\"width\":%d,\"height\":%d,\"mode\":\"%s\",\"band_lines\":%d,"
            "\"color_bits\":%d,\"scheme\":\"%s\",\"buffer\":%u,\"dma\":%u,\"fps\":%d.%d,\"busy_pct\":%d,\"backlight\":%u,"
-           "\"dl_cmds\":%d,\"dl_cap\":%d,\"dl_heap\":%u,\"panel\":\"%s\"}",
+           "\"dl_cmds\":%d,\"dl_cap\":%d,\"dl_heap\":%u,\"panel\":\"%s\",\"controller\":\"%s\"}",
            esc, mini_gui_get_width(), mini_gui_get_height(), gui_mode_name(mini_gui_get_mode()),
            mini_gui_get_band_lines(), mini_gui_get_color_bits(), mini_gui_scheme_name(mini_gui_get_scheme()),
            (unsigned)mini_gui_get_fb_ram(), (unsigned)esp32_ili9488_dma_ram_bytes(),
            s_loop.fps_x10 / 10, s_loop.fps_x10 % 10, s_loop.busy_pct, (unsigned)mini_backlight_get(),
            mini_gui_display_list_size(), mini_gui_display_list_capacity(),
-           (unsigned)mini_gui_display_list_heap_bytes(), esp32_ili9488_get_inversion() ? "ips" : "tft");
+           (unsigned)mini_gui_display_list_heap_bytes(), esp32_ili9488_get_inversion() ? "ips" : "tft", esp32_ili9488_controller());
     char ssid[33], ip[16];
     int rssi;
     bool sta = sta_status(ssid, sizeof(ssid), ip, sizeof(ip), &rssi);

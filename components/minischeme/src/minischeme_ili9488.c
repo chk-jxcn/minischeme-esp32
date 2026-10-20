@@ -238,6 +238,7 @@ static void setAddrWindow(int32_t x0, int32_t y0, int32_t w, int32_t h) {
 static uint8_t s_current_rotation = 0;
 static bool s_invert = true;        /* display inversion: on for IPS panels ([display] panel) */
 static bool s_panel_ready = false;  /* tft_init done: a change is sent at once */
+static const char *s_controller = "unknown";   /* from the 0xD3 ID read at init: ILI9488 or ST7796 */
 static int     s_ili9488_width = ESP32_TFT_WIDTH;
 static int     s_ili9488_height = ESP32_TFT_HEIGHT;
 
@@ -264,6 +265,8 @@ void esp32_ili9488_set_inversion(bool on) {
 }
 
 bool esp32_ili9488_get_inversion(void) { return s_invert; }
+
+const char *esp32_ili9488_controller(void) { return s_controller; }
 
 void esp32_ili9488_set_rotation(uint8_t m) {
     s_current_rotation = m % 4;
@@ -500,8 +503,10 @@ void esp32_ili9488_init(void) {
     read_cmd(0x0B, mad_0b, 1, false);
     read_cmd(0x0C, pix_0c, 1, false);
 
-    printf("[ILI9488 DIAG] 0xD3 Device ID: 0x%02X 0x%02X 0x%02X 0x%02X (Expected: xx xx 94 88)\n",
+    printf("[ILI9488 DIAG] 0xD3 Device ID: 0x%02X 0x%02X 0x%02X 0x%02X (ILI9488: xx xx 94 88, ST7796: xx xx 77 96)\n",
            id_d3[0], id_d3[1], id_d3[2], id_d3[3]);
+    s_controller = (id_d3[2] == 0x94 && id_d3[3] == 0x88) ? "ILI9488"
+                 : (id_d3[2] == 0x77 && id_d3[3] == 0x96) ? "ST7796" : "unknown";
     printf("[ILI9488 DIAG] 0x04 Display ID: 0x%02X 0x%02X 0x%02X 0x%02X\n",
            id_04[0], id_04[1], id_04[2], id_04[3]);
     printf("[ILI9488 DIAG] 0x0A Power Mode: 0x%02X | 0x0B MADCTL: 0x%02X | 0x0C PixFmt: 0x%02X\n",
@@ -675,7 +680,8 @@ static void i80_close(void) {
 }
 
 /* Frame memory read: ILI9488 returns 3 bytes (R, G, B; 6 MSBs valid) per
- * pixel whatever the write format. RAMRD needs a slow (>= 355 ns) strobe. */
+ * pixel whatever the write format; ST7796 in 16-bit mode returns the RGB565
+ * words (2 bytes per pixel). RAMRD needs a slow (>= 355 ns) strobe. */
 static void read_ram(int x, int y, int n, uint8_t *out) {
     startWrite();
     DC_C; tft_Write_8(TFT_CASET); DC_D; tft_Write_32C(x, x + n - 1);
@@ -695,27 +701,35 @@ static void read_ram(int x, int y, int n, uint8_t *out) {
 }
 
 #define PROBE_PIXELS 12
+#define UNVERIFIED_DMA_HZ 10000000u   /* the WR clock when the panel cannot be read back */
 static const uint16_t s_probe[PROBE_PIXELS] = {
     0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000, 0xA554,
     0x52AA, 0x1234, 0xEDCB, 0x8410, 0x0821, 0x7BEF
 };
 
-/* Counts probe pixels found in panel RAM at row 0 (R/B order either way) */
+/* Counts probe pixels found in panel RAM at row 0 (R/B order either way),
+ * read as ILI9488 RGB666 triplets or as ST7796 RGB565 words, whichever fits */
 static int probe_matches(void) {
     uint8_t rgb[PROBE_PIXELS * 3];
     read_ram(0, 0, PROBE_PIXELS, rgb);
-    int ok_rgb = 0, ok_bgr = 0;
+    int ok_rgb = 0, ok_bgr = 0, ok_565 = 0, ok_565_swap = 0;
     for (int i = 0; i < PROBE_PIXELS; i++) {
         unsigned r5 = s_probe[i] >> 11, g6 = (s_probe[i] >> 5) & 63, b5 = s_probe[i] & 31;
         unsigned a = rgb[i * 3] >> 3, g = rgb[i * 3 + 1] >> 2, c = rgb[i * 3 + 2] >> 3;
         if (g == g6 && a == r5 && c == b5) ok_rgb++;
         if (g == g6 && a == b5 && c == r5) ok_bgr++;
+        unsigned w = (unsigned)rgb[i * 2] << 8 | rgb[i * 2 + 1];
+        if (w == s_probe[i]) ok_565++;
+        if (w == (b5 << 11 | g6 << 5 | r5)) ok_565_swap++;
     }
-    if (ok_rgb + ok_bgr < PROBE_PIXELS) {
+    int best = ok_rgb > ok_bgr ? ok_rgb : ok_bgr;
+    if (ok_565 > best) best = ok_565;
+    if (ok_565_swap > best) best = ok_565_swap;
+    if (best < PROBE_PIXELS) {
         ESP_LOGI("ILI9488", "probe read: %02X %02X %02X  %02X %02X %02X  %02X %02X %02X",
                  rgb[0], rgb[1], rgb[2], rgb[3], rgb[4], rgb[5], rgb[6], rgb[7], rgb[8]);
     }
-    return ok_rgb > ok_bgr ? ok_rgb : ok_bgr;
+    return best;
 }
 
 bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool rgb666) {
@@ -738,11 +752,16 @@ bool esp32_ili9488_start_dma(size_t max_transfer_bytes, uint32_t pclk_hz, bool r
         setAddrWindow(0, 0, PROBE_PIXELS, 1);
         for (int i = 0; i < PROBE_PIXELS; i++) { tft_Write_16(0x39E7); }
         endWrite();
-        if (!i80_open(max_transfer_bytes, hz, true)) return false;
         if (!can_verify) {
-            ESP_LOGW("ILI9488", "panel readback unusable, trusting DMA at %u Hz unverified", (unsigned)hz);
+            /* no way to check the writes: a clock most panels take (20 MHz
+             * left an ST7796 on its boot color bars before its readback was
+             * understood) */
+            if (hz > UNVERIFIED_DMA_HZ) continue;
+            if (!i80_open(max_transfer_bytes, hz, !rgb666)) return false;
+            ESP_LOGW("ILI9488", "panel readback unusable, DMA at %u Hz unverified", (unsigned)hz);
             return true;
         }
+        if (!i80_open(max_transfer_bytes, hz, true)) return false;
         i80_set_window(0, 0, PROBE_PIXELS, 1);
         esp_err_t err = esp_lcd_panel_io_tx_color(s_i80_io, TFT_RAMWR, s_probe, sizeof(s_probe));
         esp_lcd_panel_io_tx_param(s_i80_io, TFT_NOP, NULL, 0); /* waits for the color transfer */
@@ -1295,6 +1314,7 @@ void esp32_ws2812_set(uint8_t r, uint8_t g, uint8_t b) {
 /* Simulation / Host Stubs for Native Compilation & Unit Tests */
 void esp32_ili9488_init(void) {}
 static bool s_invert_stub = true;
+const char *esp32_ili9488_controller(void) { return "none"; }
 void esp32_ili9488_set_inversion(bool on) { s_invert_stub = on; }
 bool esp32_ili9488_get_inversion(void) { return s_invert_stub; }
 void esp32_ili9488_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {

@@ -57,6 +57,8 @@ void esp32_ili9488_set_rotation(uint8_t m);
  * before esp32_ili9488_init, or later (sent at once) */
 void esp32_ili9488_set_inversion(bool on);
 bool esp32_ili9488_get_inversion(void);
+/* The panel controller read at init (0xD3): "ILI9488", "ST7796" or "unknown" */
+const char *esp32_ili9488_controller(void);
 uint8_t esp32_ili9488_get_rotation(void);
 int  esp32_ili9488_get_width(void);
 int  esp32_ili9488_get_height(void);
