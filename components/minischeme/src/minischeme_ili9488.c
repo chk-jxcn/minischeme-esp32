@@ -239,6 +239,40 @@ static uint8_t s_current_rotation = 0;
 static bool s_invert = true;        /* display inversion: on for IPS panels ([display] panel) */
 static bool s_panel_ready = false;  /* tft_init done: a change is sent at once */
 static const char *s_controller = "unknown";   /* from the 0xD3 ID read at init: ILI9488 or ST7796 */
+
+/* [display] lcd_gamma / lcd_gamma_pos / lcd_gamma_neg / lcd_vcom (set before init) */
+static int s_gamma_mode = ESP32_LCD_GAMMA_CHIP;
+static uint8_t s_gamma_pos[16], s_gamma_neg[16], s_vcom[4];
+static size_t s_gamma_pos_n, s_gamma_neg_n, s_vcom_n;
+
+void esp32_ili9488_set_tuning(int gamma_mode, const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg,
+                              const uint8_t *vcom, size_t nvcom) {
+    s_gamma_mode = gamma_mode;
+    s_gamma_pos_n = npos > sizeof(s_gamma_pos) ? sizeof(s_gamma_pos) : npos;
+    s_gamma_neg_n = nneg > sizeof(s_gamma_neg) ? sizeof(s_gamma_neg) : nneg;
+    s_vcom_n = nvcom > sizeof(s_vcom) ? sizeof(s_vcom) : nvcom;
+    if (s_gamma_pos_n) memcpy(s_gamma_pos, pos, s_gamma_pos_n);
+    if (s_gamma_neg_n) memcpy(s_gamma_neg, neg, s_gamma_neg_n);
+    if (s_vcom_n) memcpy(s_vcom, vcom, s_vcom_n);
+}
+
+static void write_bytes(uint8_t cmd, const uint8_t *d, size_t n) {
+    writecommand(cmd);
+    for (size_t i = 0; i < n; i++) writedata(d[i]);
+}
+
+/* The gamma tables per lcd_gamma: the driver's (given), none (the
+ * controller's own curve after the reset), or the configured ones */
+static void write_gamma(const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg) {
+    if (s_gamma_mode == ESP32_LCD_GAMMA_CHIP) return;
+    if (s_gamma_mode == ESP32_LCD_GAMMA_CUSTOM) {
+        if (s_gamma_pos_n) write_bytes(0xE0, s_gamma_pos, s_gamma_pos_n);
+        if (s_gamma_neg_n) write_bytes(0xE1, s_gamma_neg, s_gamma_neg_n);
+        return;
+    }
+    write_bytes(0xE0, pos, npos);
+    write_bytes(0xE1, neg, nneg);
+}
 static int     s_ili9488_width = ESP32_TFT_WIDTH;
 static int     s_ili9488_height = ESP32_TFT_HEIGHT;
 
@@ -362,20 +396,12 @@ static void tft_init(void) {
 
     begin_tft_write();
 
-    /* ILI9488 Init Sequence from ILI9488_Init.h */
-    writecommand(0xE0); /* Positive Gamma Control */
-    writedata(0x00); writedata(0x03); writedata(0x09);
-    writedata(0x08); writedata(0x16); writedata(0x0A);
-    writedata(0x3F); writedata(0x78); writedata(0x4C);
-    writedata(0x09); writedata(0x0A); writedata(0x08);
-    writedata(0x16); writedata(0x1A); writedata(0x0F);
-
-    writecommand(0xE1); /* Negative Gamma Control */
-    writedata(0x00); writedata(0x16); writedata(0x19);
-    writedata(0x03); writedata(0x0F); writedata(0x05);
-    writedata(0x32); writedata(0x45); writedata(0x46);
-    writedata(0x04); writedata(0x0E); writedata(0x0D);
-    writedata(0x35); writedata(0x37); writedata(0x0F);
+    /* ILI9488 Init Sequence from ILI9488_Init.h; gamma per [display] lcd_gamma */
+    static const uint8_t ili_gamma_pos[] = { 0x00, 0x03, 0x09, 0x08, 0x16, 0x0A, 0x3F, 0x78,
+                                             0x4C, 0x09, 0x0A, 0x08, 0x16, 0x1A, 0x0F };
+    static const uint8_t ili_gamma_neg[] = { 0x00, 0x16, 0x19, 0x03, 0x0F, 0x05, 0x32, 0x45,
+                                             0x46, 0x04, 0x0E, 0x0D, 0x35, 0x37, 0x0F };
+    write_gamma(ili_gamma_pos, sizeof(ili_gamma_pos), ili_gamma_neg, sizeof(ili_gamma_neg));
 
     writecommand(0xC0); /* Power Control 1 */
     writedata(0x17);
@@ -384,10 +410,14 @@ static void tft_init(void) {
     writecommand(0xC1); /* Power Control 2 */
     writedata(0x41);
 
-    writecommand(0xC5); /* VCOM Control */
-    writedata(0x00);
-    writedata(0x12);
-    writedata(0x80);
+    if (s_vcom_n) {            /* VCOM Control: [display] lcd_vcom */
+        write_bytes(0xC5, s_vcom, s_vcom_n);
+    } else {
+        writecommand(0xC5);
+        writedata(0x00);
+        writedata(0x12);
+        writedata(0x80);
+    }
 
     writecommand(TFT_MADCTL); /* Memory Access Control */
     writedata(0x48);          /* MX, BGR */
@@ -430,6 +460,47 @@ static void tft_init(void) {
     end_tft_write();
 
     esp32_ili9488_set_rotation(0); /* Portrait (320x480) */
+}
+
+/* ST7796 (the same 320x480 8080 board with another controller): its own
+ * power, VCOM, gamma and output timing (TFT_eSPI's ST7796 sequence). Its
+ * extension registers only take writes between F0 C3 / F0 96 and F0 3C /
+ * F0 69, so the ILI9488 values sent by tft_init never reached them and the
+ * panel ran on its power-on defaults (a dim, low-contrast picture). */
+static void st7796_init(void) {
+    static const uint8_t gamma_pos[] = { 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B };
+    static const uint8_t gamma_neg[] = { 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B };
+    static const uint8_t output_adj[] = { 0x40, 0x8A, 0x00, 0x00, 0x29, 0x19, 0xA5, 0x33 };
+    begin_tft_write();
+    writecommand(0x01);        /* software reset */
+    delay(120);
+    writecommand(TFT_SLPOUT);
+    delay(120);
+    writecommand(0xF0); writedata(0xC3);   /* command set: extension part I on */
+    writecommand(0xF0); writedata(0x96);   /* part II on */
+    writecommand(TFT_MADCTL); writedata(0x48);
+    writecommand(0x3A); writedata(0x55);   /* 16-bit pixels */
+    writecommand(0xB4); writedata(0x01);   /* 1-dot inversion */
+    writecommand(0xB6); writedata(0x80); writedata(0x02); writedata(0x3B);   /* display function control */
+    writecommand(0xE8);                    /* display output control adjust */
+    for (size_t i = 0; i < sizeof(output_adj); i++) writedata(output_adj[i]);
+    writecommand(0xC1); writedata(0x06);   /* power control 2: VAP/VAN 3.85 V + VCOM */
+    writecommand(0xC2); writedata(0xA7);   /* power control 3: gamma driving current high */
+    if (s_vcom_n) {
+        write_bytes(0xC5, s_vcom, s_vcom_n);   /* [display] lcd_vcom */
+    } else {
+        writecommand(0xC5); writedata(0x18);   /* VCOM 0.9 V */
+    }
+    delay(120);
+    write_gamma(gamma_pos, sizeof(gamma_pos), gamma_neg, sizeof(gamma_neg));
+    delay(120);
+    writecommand(0xF0); writedata(0x3C);   /* extension part I off */
+    writecommand(0xF0); writedata(0x69);   /* part II off */
+    delay(120);
+    writecommand(TFT_DISPON);
+    delay(25);
+    writecommand(s_invert ? TFT_INVON : TFT_INVOFF);
+    end_tft_write();
 }
 
 static uint8_t read_bus(void) {
@@ -507,6 +578,11 @@ void esp32_ili9488_init(void) {
            id_d3[0], id_d3[1], id_d3[2], id_d3[3]);
     s_controller = (id_d3[2] == 0x94 && id_d3[3] == 0x88) ? "ILI9488"
                  : (id_d3[2] == 0x77 && id_d3[3] == 0x96) ? "ST7796" : "unknown";
+    if (id_d3[2] == 0x77 && id_d3[3] == 0x96) {
+        st7796_init();   /* its own sequence: the ILI9488 one left it dim */
+        esp32_ili9488_set_rotation(s_current_rotation);
+        printf("[ILI9488 DIAG] ST7796 controller: its own init sequence applied\n");
+    }
     printf("[ILI9488 DIAG] 0x04 Display ID: 0x%02X 0x%02X 0x%02X 0x%02X\n",
            id_04[0], id_04[1], id_04[2], id_04[3]);
     printf("[ILI9488 DIAG] 0x0A Power Mode: 0x%02X | 0x0B MADCTL: 0x%02X | 0x0C PixFmt: 0x%02X\n",
@@ -1314,6 +1390,10 @@ void esp32_ws2812_set(uint8_t r, uint8_t g, uint8_t b) {
 /* Simulation / Host Stubs for Native Compilation & Unit Tests */
 void esp32_ili9488_init(void) {}
 static bool s_invert_stub = true;
+void esp32_ili9488_set_tuning(int gamma_mode, const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg,
+                              const uint8_t *vcom, size_t nvcom) {
+    (void)gamma_mode; (void)pos; (void)npos; (void)neg; (void)nneg; (void)vcom; (void)nvcom;
+}
 const char *esp32_ili9488_controller(void) { return "none"; }
 void esp32_ili9488_set_inversion(bool on) { s_invert_stub = on; }
 bool esp32_ili9488_get_inversion(void) { return s_invert_stub; }

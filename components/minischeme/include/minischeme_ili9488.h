@@ -59,6 +59,15 @@ void esp32_ili9488_set_inversion(bool on);
 bool esp32_ili9488_get_inversion(void);
 /* The panel controller read at init (0xD3): "ILI9488", "ST7796" or "unknown" */
 const char *esp32_ili9488_controller(void);
+/* Panel tuning ([display] lcd_gamma, lcd_gamma_pos / lcd_gamma_neg, lcd_vcom),
+ * set before esp32_ili9488_init: the gamma tables (E0 / E1) are the driver's,
+ * none (the controller's own curve after the hardware reset) or the given
+ * bytes; vcom (C5) replaces the driver's VCOM bytes when not empty */
+#define ESP32_LCD_GAMMA_DRIVER 0
+#define ESP32_LCD_GAMMA_CHIP   1
+#define ESP32_LCD_GAMMA_CUSTOM 2
+void esp32_ili9488_set_tuning(int gamma_mode, const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg,
+                              const uint8_t *vcom, size_t nvcom);
 uint8_t esp32_ili9488_get_rotation(void);
 int  esp32_ili9488_get_width(void);
 int  esp32_ili9488_get_height(void);

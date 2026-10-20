@@ -200,6 +200,27 @@ static int panel_is_ips(const char *v) {
 }
 
 static volatile int s_panel_request = -1;   /* from the settings page: 1 ips, 0 tft (main loop applies) */
+
+/* "00 03 09 ..." or "00,03,09" (hex bytes) into out; the count, -1 when not hex or too many */
+static int parse_hex_bytes(const char *s, uint8_t *out, size_t cap) {
+    size_t n = 0;
+    while (*s) {
+        while (*s == ' ' || *s == ',' || *s == '\t') s++;
+        if (!*s) break;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+        int v = 0, digits = 0;
+        for (; digits < 2; s++, digits++) {
+            char c = *s;
+            int d = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (d < 0) break;
+            v = v * 16 + d;
+        }
+        if (digits == 0 || (*s && *s != ' ' && *s != ',' && *s != '\t') || n >= cap) return -1;
+        out[n++] = (uint8_t)v;
+    }
+    return (int)n;
+}
 static void apply_panel(bool ips);
 
 static MiniVM *s_vm = NULL;
@@ -3354,6 +3375,9 @@ typedef struct {
     int height;
     bool lcd_dma;                  /* I2S DMA bus (false: GPIO bit-bang) */
     bool panel_ips;                /* [display] panel: ips (inversion on, the default) or tft */
+    int lcd_gamma;                 /* [display] lcd_gamma: ESP32_LCD_GAMMA_* */
+    uint8_t gamma_pos[16], gamma_neg[16], vcom[4];   /* lcd_gamma_pos / _neg, lcd_vcom (hex bytes) */
+    size_t gamma_pos_n, gamma_neg_n, vcom_n;
     int lcd_dma_lines;             /* rows per DMA transfer, 0 = whole band */
     uint32_t lcd_clock_hz;         /* requested WR clock */
     /* [memory] */
@@ -3395,6 +3419,8 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->band_lines = DEF_BAND_LINES;
     cfg->color_fmt = MINI_GUI_COLOR_RGB565;
     cfg->panel_ips = true;
+    cfg->lcd_gamma = ESP32_LCD_GAMMA_CHIP;
+    cfg->gamma_pos_n = cfg->gamma_neg_n = cfg->vcom_n = 0;
     cfg->color_bits = 16;
     cfg->scheme = MINI_GUI_SCHEME_COLOR;
     cfg->auto_backlight = true;
@@ -3465,6 +3491,21 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
         else if (strcasecmp(val, "rgb565") == 0 || strcmp(val, "16") == 0) cfg->color_fmt = MINI_GUI_COLOR_RGB565;
         else if (strcasecmp(val, "4bpp") == 0 || strcmp(val, "4") == 0) cfg->color_bits = 4; /* legacy */
         else return false;
+    } else if (strcasecmp(key, "lcd_gamma") == 0) {
+        if (strcasecmp(val, "driver") == 0) cfg->lcd_gamma = ESP32_LCD_GAMMA_DRIVER;
+        else if (strcasecmp(val, "chip") == 0 || !val[0]) cfg->lcd_gamma = ESP32_LCD_GAMMA_CHIP;
+        else if (strcasecmp(val, "custom") == 0) cfg->lcd_gamma = ESP32_LCD_GAMMA_CUSTOM;
+        else return false;
+    } else if (strcasecmp(key, "lcd_gamma_pos") == 0 || strcasecmp(key, "lcd_gamma_neg") == 0 ||
+               strcasecmp(key, "lcd_vcom") == 0) {
+        bool pos = strcasecmp(key, "lcd_gamma_pos") == 0, neg = strcasecmp(key, "lcd_gamma_neg") == 0;
+        uint8_t *out = pos ? cfg->gamma_pos : neg ? cfg->gamma_neg : cfg->vcom;
+        size_t cap = pos ? sizeof(cfg->gamma_pos) : neg ? sizeof(cfg->gamma_neg) : sizeof(cfg->vcom);
+        int n = parse_hex_bytes(val, out, cap);
+        if (n < 0) return false;
+        if (pos) cfg->gamma_pos_n = (size_t)n;
+        else if (neg) cfg->gamma_neg_n = (size_t)n;
+        else cfg->vcom_n = (size_t)n;
     } else if (strcasecmp(key, "panel") == 0) {
         int ips = panel_is_ips(val);
         if (ips < 0) return false;
@@ -3684,6 +3725,11 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
              gui_mode_name(cfg->mode), cfg->band_lines, cfg->color_bits, mini_gui_scheme_name(cfg->scheme),
              cfg->color_fmt == MINI_GUI_COLOR_RGB666 ? "rgb666" : "rgb565",
              cfg->width, cfg->height, cfg->lcd_dma, cfg->lcd_dma_lines, (unsigned)cfg->lcd_clock_hz);
+    if (cfg->lcd_gamma != ESP32_LCD_GAMMA_CHIP || cfg->vcom_n) {
+        ESP_LOGI(TAG, "Config: lcd_gamma=%s (pos %u, neg %u bytes) lcd_vcom %u bytes",
+                 cfg->lcd_gamma == ESP32_LCD_GAMMA_CHIP ? "chip" : cfg->lcd_gamma == ESP32_LCD_GAMMA_CUSTOM ? "custom" : "driver",
+                 (unsigned)cfg->gamma_pos_n, (unsigned)cfg->gamma_neg_n, (unsigned)cfg->vcom_n);
+    }
     ESP_LOGI(TAG, "Config: reserved_heap=%u max_heap=%u eden=%u stack=%u frames=%u xip=%d http_stack=%u",
              (unsigned)cfg->reserved_heap, (unsigned)cfg->max_heap, (unsigned)cfg->vm_eden, (unsigned)cfg->vm_stack,
              (unsigned)cfg->vm_frames, cfg->app_xip, (unsigned)cfg->http_stack);
@@ -5082,6 +5128,8 @@ void app_main(void) {
     /* Panel init (bit-banged), then hand the bus to I2S DMA while the heap is
      * still unfragmented: its DMA copy buffer must be internal and contiguous */
     esp32_ili9488_set_inversion(s_sys_cfg.panel_ips);   /* IPS: colors inverted in the driver */
+    esp32_ili9488_set_tuning(s_sys_cfg.lcd_gamma, s_sys_cfg.gamma_pos, s_sys_cfg.gamma_pos_n,
+                             s_sys_cfg.gamma_neg, s_sys_cfg.gamma_neg_n, s_sys_cfg.vcom, s_sys_cfg.vcom_n);
     esp32_ili9488_init();
     esp32_ili9488_set_pixel_format(0x55);
     /* DIRECT mode sends thousands of small fills: a DMA transaction costs far
