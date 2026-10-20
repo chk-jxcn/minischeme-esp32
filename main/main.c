@@ -6,7 +6,8 @@
  * - UART0 line protocol: "@INFO", "@EXEC <base64 msbc>", "@BEGIN <size> [path]",
  *   "@DATA <base64>", "@END [run|save]", "@EVAL <base64 source>", "@RESET",
  *   and the file manager: "@LS", "@APPS", "@READ <offset> <path>", "@RM <path>",
- *   "@MV <from> <to>". Every reply is a single "@OK {json}" or "@ERR {json}"
+ *   "@MV <from> <to>"; the WebREPL's KEY 18 and screenshot: "@INPUT button=1|0
+ *   [light=<n>|off]", "@SCREEN <from>". Every reply is a single "@OK {json}" or "@ERR {json}"
  *   line. Other lines form a text REPL.
  * - HTTP (port 80): GET /api/info, POST /api/exec (raw MSBC),
  *   POST /api/execute_bytecode ({"bytecode_hex": ...}), POST /api/eval,
@@ -472,6 +473,7 @@ static volatile int s_light_override = -1;   /* -1: the real sensor */
 static volatile bool s_light_dirty = false;
 
 static void job_display(RemoteJob *job);
+static void remote_input(const char *button, const char *light, char *out, size_t cap);
 
 /* Load figures of the main loop, refreshed every second */
 typedef struct {
@@ -1036,6 +1038,47 @@ static void serial_fs_read(const char *path, long offset) {
     printf("@OK {\"success\":true,\"size\":%ld,\"offset\":%ld,\"data\":\"%s\"}\r\n", size, offset, b64);
 }
 
+/* @INPUT button=1|0 light=<n>|off (either may be left out), as POST /api/input */
+static void serial_input(char *arg) {
+    const char *button = NULL, *light = NULL;
+    for (char *tok = strtok(arg, " "); tok; tok = strtok(NULL, " ")) {
+        if (strncmp(tok, "button=", 7) == 0) button = tok + 7;
+        else if (strncmp(tok, "light=", 6) == 0) light = tok + 6;
+    }
+    char out[96];
+    remote_input(button, light, out, sizeof(out));
+    serial_reply(out);
+}
+
+/* @SCREEN <from>: the whole screen from row `from` down, packed as GET
+ * /api/screen (minischeme_mirror.h), base64: {"success":true,"data":...}.
+ * A screen takes several requests (MORE in the flags: from = the last row
+ * sent + 1). The reply goes out in one write, so no log line from another
+ * task lands inside it. */
+#define SERIAL_SCREEN_BYTES 3072
+static void serial_screen(const char *arg) {
+    size_t cap = MINI_MIRROR_HEADER + mini_mirror_row_max(mini_gui_get_width());
+    if (cap < SERIAL_SCREEN_BYTES) cap = SERIAL_SCREEN_BYTES;
+    size_t line_cap = (cap + 2) / 3 * 4 + 48;
+    uint8_t *raw = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) > cap + line_cap + 8 * 1024
+                       ? (uint8_t *)malloc(cap) : NULL;
+    char *line = raw ? (char *)malloc(line_cap) : NULL;
+    if (!line) {
+        free(raw);
+        serial_reply_error("out of memory for the screen buffer");
+        return;
+    }
+    RemoteJob job = { .kind = JOB_SCREEN, .out = (char *)raw, .out_cap = cap, .since_set = true,
+                      .since = 0, .from = (int)strtol(arg, NULL, 10) };
+    run_job(&job);
+    int n = snprintf(line, line_cap, "@OK {\"success\":true,\"data\":\"");
+    n += (int)b64_encode(raw, job.out_len, line + n);
+    snprintf(line + n, line_cap - (size_t)n, "\"}\r\n");
+    fputs(line, stdout);
+    free(line);
+    free(raw);
+}
+
 static void handle_frame(char *line) {
     char *cmd = line + 1;
     char *arg = strchr(cmd, ' ');
@@ -1116,6 +1159,10 @@ static void handle_frame(char *line) {
         const char *err = cmd[0] == 'R' ? fs_remove(arg) : fs_rename(arg, to ? to : "");
         if (err) serial_reply_error(err);
         else serial_reply("{\"success\":true}");
+    } else if (strcmp(cmd, "INPUT") == 0) {
+        serial_input(arg);
+    } else if (strcmp(cmd, "SCREEN") == 0) {
+        serial_screen(arg);
     } else if (strcmp(cmd, "RESET") == 0) {
         printf("@OK {\"success\":true}\r\n");
         fflush(stdout);
@@ -1201,6 +1248,31 @@ static void serial_poll(void) {
             }
         }
     }
+}
+
+/* The WebREPL's KEY 18 (renewed with "1" while held) and simulated light
+ * sensor (0..4095 or "off"); NULL leaves one as it is. out: the JSON reply. */
+static void remote_input(const char *button, const char *light, char *out, size_t cap) {
+    if (button) {
+        if (button[0] == '1') {
+            if (!s_remote_btn || esp_timer_get_time() >= s_remote_btn_until) s_remote_presses++;
+            s_remote_btn_until = esp_timer_get_time() + REMOTE_BUTTON_HOLD_US;
+            s_remote_btn = true;
+        } else {
+            s_remote_btn = false;
+        }
+    }
+    if (light) {
+        if (strcmp(light, "off") == 0) {
+            s_light_override = -1;
+        } else {
+            long n = strtol(light, NULL, 10);
+            s_light_override = n < 0 ? 0 : (n > 4095 ? 4095 : (int)n);
+        }
+        s_light_dirty = true;
+    }
+    snprintf(out, cap, "{\"success\":true,\"button\":%s,\"light_remote\":%s}",
+             s_remote_btn ? "true" : "false", s_light_override >= 0 ? "true" : "false");
 }
 
 #if MINISCHEME_FW_HTTP
@@ -1716,31 +1788,11 @@ static esp_err_t http_display(httpd_req_t *req) {
     return http_send_json(req, out);
 }
 
-/* POST /api/input?button=1|0 and/or light=<0..4095>|off: the WebREPL's KEY 18
- * (renewed with button=1 while held) and simulated light sensor */
+/* POST /api/input?button=1|0 and/or light=<0..4095>|off */
 static esp_err_t http_input(httpd_req_t *req) {
-    char v[12];
-    if (http_query(req, "button", v, sizeof(v))) {
-        if (v[0] == '1') {
-            if (!s_remote_btn || esp_timer_get_time() >= s_remote_btn_until) s_remote_presses++;
-            s_remote_btn_until = esp_timer_get_time() + REMOTE_BUTTON_HOLD_US;
-            s_remote_btn = true;
-        } else {
-            s_remote_btn = false;
-        }
-    }
-    if (http_query(req, "light", v, sizeof(v))) {
-        if (strcmp(v, "off") == 0) {
-            s_light_override = -1;
-        } else {
-            long n = strtol(v, NULL, 10);
-            s_light_override = n < 0 ? 0 : (n > 4095 ? 4095 : (int)n);
-        }
-        s_light_dirty = true;
-    }
-    char out[96];
-    snprintf(out, sizeof(out), "{\"success\":true,\"button\":%s,\"light_remote\":%s}",
-             s_remote_btn ? "true" : "false", s_light_override >= 0 ? "true" : "false");
+    char b[4], l[12], out[96];
+    bool has_b = http_query(req, "button", b, sizeof(b)), has_l = http_query(req, "light", l, sizeof(l));
+    remote_input(has_b ? b : NULL, has_l ? l : NULL, out, sizeof(out));
     return http_send_json(req, out);
 }
 
