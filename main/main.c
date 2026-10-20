@@ -3765,6 +3765,26 @@ static bool app_member_ok(const char *id) {
     return false;
 }
 
+/* A member's own config.ini (apps/<id>/, else user/<id>/) into out; whether it exists */
+static bool member_ini_path(const char *id, char *out, size_t cap) {
+    struct stat st;
+    snprintf(out, cap, APPS_DIR "/%s/config.ini", id);
+    if (stat(out, &st) == 0) return true;
+    snprintf(out, cap, "/spiffs/user/%s/config.ini", id);
+    return stat(out, &st) == 0;
+}
+
+/* (app-has-config? app-id) => whether that member of the running combined
+ * app has its own config.ini (it ran on its own once, or was set up) */
+static Value prim_app_has_config(MiniVM *vm, int argc, Value *argv) {
+    if (argc < 1 || !mini_is_string(argv[0]) || !app_member_ok(mini_string_data(argv[0]))) {
+        vm_error(vm, "app-has-config?: expected a member of this combined app");
+        return mini_void();
+    }
+    char path[80];
+    return member_ini_path(mini_string_data(argv[0]), path, sizeof(path)) ? mini_true() : mini_false();
+}
+
 /* (config-get key [app-id]): app-id, a member of the running combined app,
  * reads that app's own config.ini (apps/<id>/, else user/<id>/) instead */
 static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
@@ -3782,9 +3802,7 @@ static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
             vm_error(vm, "config-get: %s is not a member of this combined app", id);
             return mini_void();
         }
-        snprintf(member_ini, sizeof(member_ini), APPS_DIR "/%s/config.ini", id);
-        struct stat st;
-        if (stat(member_ini, &st) != 0) snprintf(member_ini, sizeof(member_ini), "/spiffs/user/%s/config.ini", id);
+        member_ini_path(id, member_ini, sizeof(member_ini));
         ini = member_ini;
     }
     if ((ini_file_value(ini, key, val, sizeof(val)) && val[0]) ||
@@ -4839,6 +4857,7 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_device_lib(vm);
     mini_register_json_feed_lib(vm);
     mini_register_c_func(vm, "config-get", prim_config_get);
+    mini_register_c_func(vm, "app-has-config?", prim_app_has_config);
     mini_register_c_func(vm, "config-set!", prim_config_set);
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
