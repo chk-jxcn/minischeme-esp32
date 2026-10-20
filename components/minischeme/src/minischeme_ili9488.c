@@ -241,7 +241,7 @@ static bool s_panel_ready = false;  /* tft_init done: a change is sent at once *
 static const char *s_controller = "unknown";   /* from the 0xD3 ID read at init: ILI9488 or ST7796 */
 
 /* [display] lcd_gamma / lcd_gamma_pos / lcd_gamma_neg / lcd_vcom (set before init) */
-static int s_gamma_mode = ESP32_LCD_GAMMA_CHIP;
+static int s_gamma_mode = ESP32_LCD_GAMMA_DRIVER;
 static uint8_t s_gamma_pos[16], s_gamma_neg[16], s_vcom[4];
 static size_t s_gamma_pos_n, s_gamma_neg_n, s_vcom_n;
 
@@ -261,17 +261,45 @@ static void write_bytes(uint8_t cmd, const uint8_t *d, size_t n) {
     for (size_t i = 0; i < n; i++) writedata(d[i]);
 }
 
-/* The gamma tables per lcd_gamma: the driver's (given), none (the
- * controller's own curve after the reset), or the configured ones */
-static void write_gamma(const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg) {
-    if (s_gamma_mode == ESP32_LCD_GAMMA_CHIP) return;
-    if (s_gamma_mode == ESP32_LCD_GAMMA_CUSTOM) {
-        if (s_gamma_pos_n) write_bytes(0xE0, s_gamma_pos, s_gamma_pos_n);
-        if (s_gamma_neg_n) write_bytes(0xE1, s_gamma_neg, s_gamma_neg_n);
+/* The tables the last init sequence wrote, printed once the controller is known */
+static uint8_t s_gamma_used[2][16];
+static size_t s_gamma_used_n[2];
+
+static void print_gamma(void) {
+    static const char *const modes[] = { "driver", "chip", "custom" };
+    const char *mode = s_gamma_mode >= 0 && s_gamma_mode <= 2 ? modes[s_gamma_mode] : "?";
+    if (s_gamma_mode == ESP32_LCD_GAMMA_CHIP) {
+        printf("[ILI9488 DIAG] %s gamma: the controller's own curve (lcd_gamma = chip)\n", s_controller);
         return;
     }
-    write_bytes(0xE0, pos, npos);
-    write_bytes(0xE1, neg, nneg);
+    for (int k = 0; k < 2; k++) {
+        printf("[ILI9488 DIAG] %s gamma %s %s:", s_controller, mode, k ? "E1" : "E0");
+        for (size_t i = 0; i < s_gamma_used_n[k]; i++) printf(" %02X", s_gamma_used[k][i]);
+        printf("\n");
+    }
+}
+
+/* The gamma tables per lcd_gamma: the driver's (given, the default), none
+ * (the controller's own curve after the reset), or custom: the driver's with
+ * lcd_gamma_pos / lcd_gamma_neg written over it from the first byte (bytes
+ * left out keep the driver's, extra ones are dropped) */
+static void write_gamma(const uint8_t *pos, size_t npos, const uint8_t *neg, size_t nneg) {
+    if (s_gamma_mode == ESP32_LCD_GAMMA_CHIP) return;
+    uint8_t p[16], n[16];
+    if (npos > sizeof(p)) npos = sizeof(p);
+    if (nneg > sizeof(n)) nneg = sizeof(n);
+    memcpy(p, pos, npos);
+    memcpy(n, neg, nneg);
+    if (s_gamma_mode == ESP32_LCD_GAMMA_CUSTOM) {
+        memcpy(p, s_gamma_pos, s_gamma_pos_n < npos ? s_gamma_pos_n : npos);
+        memcpy(n, s_gamma_neg, s_gamma_neg_n < nneg ? s_gamma_neg_n : nneg);
+    }
+    write_bytes(0xE0, p, npos);
+    write_bytes(0xE1, n, nneg);
+    memcpy(s_gamma_used[0], p, npos);
+    memcpy(s_gamma_used[1], n, nneg);
+    s_gamma_used_n[0] = npos;
+    s_gamma_used_n[1] = nneg;
 }
 static int     s_ili9488_width = ESP32_TFT_WIDTH;
 static int     s_ili9488_height = ESP32_TFT_HEIGHT;
@@ -583,6 +611,7 @@ void esp32_ili9488_init(void) {
         esp32_ili9488_set_rotation(s_current_rotation);
         printf("[ILI9488 DIAG] ST7796 controller: its own init sequence applied\n");
     }
+    print_gamma();
     printf("[ILI9488 DIAG] 0x04 Display ID: 0x%02X 0x%02X 0x%02X 0x%02X\n",
            id_04[0], id_04[1], id_04[2], id_04[3]);
     printf("[ILI9488 DIAG] 0x0A Power Mode: 0x%02X | 0x0B MADCTL: 0x%02X | 0x0C PixFmt: 0x%02X\n",

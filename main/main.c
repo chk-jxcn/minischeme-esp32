@@ -3472,7 +3472,7 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->band_lines = DEF_BAND_LINES;
     cfg->color_fmt = MINI_GUI_COLOR_RGB565;
     cfg->panel_ips = true;
-    cfg->lcd_gamma = ESP32_LCD_GAMMA_CHIP;
+    cfg->lcd_gamma = ESP32_LCD_GAMMA_DRIVER;
     cfg->gamma_pos_n = cfg->gamma_neg_n = cfg->vcom_n = 0;
     cfg->color_bits = 16;
     cfg->scheme = MINI_GUI_SCHEME_COLOR;
@@ -3545,8 +3545,8 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
         else if (strcasecmp(val, "4bpp") == 0 || strcmp(val, "4") == 0) cfg->color_bits = 4; /* legacy */
         else return false;
     } else if (strcasecmp(key, "lcd_gamma") == 0) {
-        if (strcasecmp(val, "driver") == 0) cfg->lcd_gamma = ESP32_LCD_GAMMA_DRIVER;
-        else if (strcasecmp(val, "chip") == 0 || !val[0]) cfg->lcd_gamma = ESP32_LCD_GAMMA_CHIP;
+        if (strcasecmp(val, "driver") == 0 || !val[0]) cfg->lcd_gamma = ESP32_LCD_GAMMA_DRIVER;
+        else if (strcasecmp(val, "chip") == 0) cfg->lcd_gamma = ESP32_LCD_GAMMA_CHIP;
         else if (strcasecmp(val, "custom") == 0) cfg->lcd_gamma = ESP32_LCD_GAMMA_CUSTOM;
         else return false;
     } else if (strcasecmp(key, "lcd_gamma_pos") == 0 || strcasecmp(key, "lcd_gamma_neg") == 0 ||
@@ -3778,7 +3778,7 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
              gui_mode_name(cfg->mode), cfg->band_lines, cfg->color_bits, mini_gui_scheme_name(cfg->scheme),
              cfg->color_fmt == MINI_GUI_COLOR_RGB666 ? "rgb666" : "rgb565",
              cfg->width, cfg->height, cfg->lcd_dma, cfg->lcd_dma_lines, (unsigned)cfg->lcd_clock_hz);
-    if (cfg->lcd_gamma != ESP32_LCD_GAMMA_CHIP || cfg->vcom_n) {
+    if (cfg->lcd_gamma != ESP32_LCD_GAMMA_DRIVER || cfg->vcom_n) {
         ESP_LOGI(TAG, "Config: lcd_gamma=%s (pos %u, neg %u bytes) lcd_vcom %u bytes",
                  cfg->lcd_gamma == ESP32_LCD_GAMMA_CHIP ? "chip" : cfg->lcd_gamma == ESP32_LCD_GAMMA_CUSTOM ? "custom" : "driver",
                  (unsigned)cfg->gamma_pos_n, (unsigned)cfg->gamma_neg_n, (unsigned)cfg->vcom_n);
