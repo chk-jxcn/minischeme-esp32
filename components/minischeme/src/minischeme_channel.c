@@ -7,6 +7,7 @@
  */
 
 #include "minischeme_channel.h"
+#include "minischeme_lib.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -852,17 +853,20 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
      * (up to the timeout, then MINI_FETCH_WAIT: not an error, try again) */
     time_t now = time(NULL);
     if (now < 1600000000) {
-        set_step(MINI_CHAN_STEP_CLOCK, origin);
+        /* without WiFi the footer says so, not "waiting for the time" */
+        int step = MINI_CHAN_STEP_NONE;
         for (int waited = 0; (now = time(NULL)) < 1600000000 && waited < timeout_ms; waited += 250) {
+            int want = esp32_wifi_connected() ? MINI_CHAN_STEP_CLOCK : MINI_CHAN_STEP_WIFI;
+            if (want != step) set_step(step = want, origin);
             vTaskDelay(pdMS_TO_TICKS(250));
         }
         if (now < 1600000000) {
             mini_wipe(key, sizeof(key));
             *status = MINI_FETCH_WAIT;
-            snprintf(err, err_cap, "waiting for the network time (NTP)");
+            snprintf(err, err_cap, step == MINI_CHAN_STEP_WIFI ? "waiting for WiFi" : "waiting for the network time (NTP)");
             goto fail;
         }
-        end_step(MINI_CHAN_STEP_CLOCK);
+        end_step(step);
     }
     f->r = (MiniChanReader *)malloc(sizeof(MiniChanReader));
     uint8_t nonce[16];

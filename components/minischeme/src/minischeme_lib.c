@@ -706,9 +706,52 @@ static void ip_geo_task(void *pvParameters) {
 }
 #endif
 
+/* A watchdog for the station: the reconnect chain above runs on the
+ * driver's events, and when none comes (an association that never gets an
+ * address, a connect call that failed without an event, a router still
+ * starting after a power cut) the attempt starts over. Connected with the
+ * clock still unset, SNTP asks again at once (its retry delay grew while
+ * offline). */
+#define ESP32_WIFI_STALL_US (45LL * 1000000)   /* no address and no driver event: connect again */
+#define ESP32_SNTP_KICK_US  (60LL * 1000000)   /* connected, clock unset: SNTP again */
+static int64_t s_esp32_wifi_last_us = 0;      /* the last connect attempt or driver event */
+static int64_t s_esp32_sntp_kick_us = 0;
+static uint32_t s_esp32_wifi_fails = 0;       /* failed attempts since the last connection */
+static esp_timer_handle_t s_esp32_wifi_watchdog_timer = NULL;
+
 static void esp32_wifi_retry(void *arg) {
     (void)arg;
-    if (s_esp32_wifi_auto && !s_esp32_wifi_connected) esp_wifi_connect();
+    if (s_esp32_wifi_auto && !s_esp32_wifi_connected) {
+        s_esp32_wifi_last_us = esp_timer_get_time();
+        esp_wifi_connect();
+    }
+}
+
+static void esp32_wifi_watchdog(void *arg) {
+    (void)arg;
+    int64_t now = esp_timer_get_time();
+    if (s_esp32_wifi_auto && !s_esp32_wifi_connected) {
+        if (now - s_esp32_wifi_last_us > ESP32_WIFI_STALL_US) {
+            ESP_LOGW("MiniScheme_WiFi", "No connection for %lld s: connecting again",
+                     (long long)((now - s_esp32_wifi_last_us) / 1000000));
+            s_esp32_wifi_last_us = now;
+            s_esp32_wifi_backoff_ms = 500;
+            esp_wifi_disconnect();
+            esp_wifi_connect();
+        }
+    } else if (s_esp32_wifi_connected && !hal_time_synced() && now - s_esp32_sntp_kick_us > ESP32_SNTP_KICK_US) {
+        s_esp32_sntp_kick_us = now;
+        ESP_LOGW("MiniScheme_SNTP", "Clock not set yet: asking the time servers again");
+        esp_sntp_restart();
+    }
+}
+
+static void esp32_wifi_watchdog_start(void) {
+    if (s_esp32_wifi_watchdog_timer) return;
+    const esp_timer_create_args_t args = { .callback = esp32_wifi_watchdog, .name = "wifi_watchdog" };
+    if (esp_timer_create(&args, &s_esp32_wifi_watchdog_timer) == ESP_OK) {
+        esp_timer_start_periodic(s_esp32_wifi_watchdog_timer, 10LL * 1000000);
+    }
 }
 
 static void esp32_wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -719,8 +762,13 @@ static void esp32_wifi_event_handler(void* arg, esp_event_base_t event_base,
         s_esp32_wifi_connected = false;
         strcpy(s_esp32_wifi_ip, "0.0.0.0");
         const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)event_data;
+        s_esp32_wifi_last_us = esp_timer_get_time();
         if (was_connected) {
+            s_esp32_wifi_fails = 0;
             ESP_LOGW("MiniScheme_WiFi", "WiFi disconnected (reason %d)", d ? (int)d->reason : -1);
+        } else if (++s_esp32_wifi_fails <= 3 || s_esp32_wifi_fails % 20 == 0) {
+            ESP_LOGW("MiniScheme_WiFi", "WiFi connect failed (reason %d, attempt %u)",
+                     d ? (int)d->reason : -1, (unsigned)s_esp32_wifi_fails);
         }
         if (s_esp32_wifi_auto) {
             if (!s_esp32_wifi_retry_timer) {
@@ -738,8 +786,13 @@ static void esp32_wifi_event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         esp_ip4addr_ntoa(&event->ip_info.ip, s_esp32_wifi_ip, sizeof(s_esp32_wifi_ip));
         s_esp32_wifi_connected = true;
+        s_esp32_wifi_fails = 0;
         ESP_LOGI("MiniScheme_WiFi", "WiFi connected, IP: %s", s_esp32_wifi_ip);
 #if defined(ESP_PLATFORM)
+        if (esp_sntp_enabled() && !hal_time_synced()) {   /* at once, not after the offline backoff */
+            s_esp32_sntp_kick_us = esp_timer_get_time();
+            esp_sntp_restart();
+        }
         esp32_sntp_init();
         xTaskCreate(ip_geo_task, "ip_geo_task", 3072, NULL, 3, NULL);
 #endif
@@ -791,6 +844,8 @@ bool hal_wifi_connect(const char *ssid, const char *pass) {
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     s_esp32_wifi_auto = true;
     s_esp32_wifi_backoff_ms = 500;
+    s_esp32_wifi_last_us = esp_timer_get_time();
+    esp32_wifi_watchdog_start();
     esp_wifi_connect();
     return true;
 }

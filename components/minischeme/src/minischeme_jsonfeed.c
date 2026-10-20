@@ -1084,11 +1084,11 @@ static Value prim_json_feed_status(MiniVM *vm, int argc, Value *argv) {
     alist_push(vm, &lst, "error", mini_make_string(vm, err));
 #if defined(ESP_PLATFORM)
     {   /* what the fetch waits for now: the network time, a registration (and its server) */
-        static const char *const steps[] = { "none", "clock", "register" };
+        static const char *const steps[] = { "none", "clock", "register", "wifi" };
         char server[96];
         int step = mini_chan_step(server, sizeof(server));
         alist_push(vm, &lst, "step-server", mini_make_string(vm, server));
-        alist_push(vm, &lst, "step", mini_make_symbol(vm, steps[step >= 0 && step <= 2 ? step : 0]));
+        alist_push(vm, &lst, "step", mini_make_symbol(vm, steps[step >= 0 && step <= 3 ? step : 0]));
     }
 #endif
     alist_push(vm, &lst, "state", mini_make_symbol(vm, states[state]));

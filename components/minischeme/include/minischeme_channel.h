@@ -115,11 +115,13 @@ void mini_chan_servers_end(void);
 void mini_chan_set_https(const char *value);
 void mini_chan_set_saver(MiniChanSaver fn);
 /** @brief What a fetch waits for now: MINI_CHAN_STEP_CLOCK (the network
- *         time, the converter checks it) or MINI_CHAN_STEP_REGISTER (a
- *         registration), with the server into server; MINI_CHAN_STEP_NONE. */
+ *         time, the converter checks it), MINI_CHAN_STEP_REGISTER (a
+ *         registration) or MINI_CHAN_STEP_WIFI (the clock, with no WiFi
+ *         connection yet), with the server into server; MINI_CHAN_STEP_NONE. */
 #define MINI_CHAN_STEP_NONE     0
 #define MINI_CHAN_STEP_CLOCK    1
 #define MINI_CHAN_STEP_REGISTER 2
+#define MINI_CHAN_STEP_WIFI     3
 int mini_chan_step(char *server, size_t cap);
 /** @brief Registers with every server not tried yet (blocks, the HTTP task). */
 void mini_chan_register_all(int timeout_ms);
