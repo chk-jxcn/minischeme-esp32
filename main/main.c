@@ -3843,9 +3843,6 @@ static bool ini_file_value(const char *path, const char *key, char *val, size_t 
     return found;
 }
 
-/* (config-get "key") => the value in the app's own config.ini (its folder),
- * else in /spiffs/config.ini, as a string; #f when neither has it. An app
- * gets no secrets of config.ini (Wi-Fi, *password*, ...: mini_app_config_key_ok). */
 /* id is one of the running combined app's members ([combo] members = a, b) */
 static bool app_member_ok(const char *id) {
     size_t n = strlen(id);
@@ -3883,8 +3880,11 @@ static Value prim_app_has_config(MiniVM *vm, int argc, Value *argv) {
     return member_ini_path(mini_string_data(argv[0]), path, sizeof(path)) ? mini_true() : mini_false();
 }
 
-/* (config-get key [app-id]): app-id, a member of the running combined app,
- * reads that app's own config.ini (apps/<id>/, else user/<id>/) instead */
+/* (config-get "key" [app-id]) => the value in the app's own config.ini (its
+ * folder), else in /spiffs/config.ini, as a string; #f when neither has it.
+ * An app gets no secrets of config.ini (Wi-Fi, *password*, ...:
+ * mini_app_config_key_ok). app-id, a member of the running combined app,
+ * reads that app's own config.ini (apps/<id>/, else user/<id>/) instead. */
 static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
     if (argc < 1 || !mini_is_string(argv[0])) {
         vm_error(vm, "config-get: expected a key string");

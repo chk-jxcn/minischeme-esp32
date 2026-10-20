@@ -4,9 +4,9 @@
 
 #include <stdint.h>
 
-#define MINI_API_VERSION       "1.5.0"
+#define MINI_API_VERSION       "1.6.0"
 #define MINI_API_VERSION_MAJOR 1
-#define MINI_API_VERSION_MINOR 5
+#define MINI_API_VERSION_MINOR 6
 #define MINI_API_VERSION_PATCH 0
 
 enum { MINI_API_STABLE, MINI_API_RESERVED, MINI_API_ALIAS };
@@ -84,7 +84,7 @@ typedef struct MiniApiEntry {
     uint8_t where;       /* MINI_API_ALL / _DEVICE / _PC */
 } MiniApiEntry;
 
-#define MINI_API_ENTRY_COUNT 429
+#define MINI_API_ENTRY_COUNT 430
 /* sorted by name (strcmp) for a binary search */
 static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "*", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -111,6 +111,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "api-list", 0x010000, -1, 11, MINI_API_STABLE, 0, MINI_API_ALL },
     { "api-version", 0x010000, -1, 11, MINI_API_STABLE, 0, MINI_API_ALL },
     { "app-config-set!", 0x010000, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
+    { "app-has-config?", 0x010600, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "app-info", 0x010000, -1, 17, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "app-last-stats", 0x010000, -1, 17, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "app-list", 0x010000, -1, 17, MINI_API_STABLE, 0, MINI_API_DEVICE },
