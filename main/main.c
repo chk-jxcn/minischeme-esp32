@@ -110,6 +110,7 @@
  * (app_settings_msbc.h, the bootstrap) when valid and at least as new */
 #define SETTINGS_APP_PATH    APPS_DIR "/settings/app.msbc"
 static char s_app_dir[64] = "";             /* the running app's folder (minischeme_device.h) */
+static char s_app_members[160] = "";        /* a combined app's meta [combo] members: their configs it may read */
 static const char *s_settings_from = "built-in";   /* which settings run: built-in or market */
 /* The running app's own web page (minischeme_device.h): offset and size of
  * its gzip'd bytes in the image file, 0 when it has none */
@@ -3845,6 +3846,45 @@ static bool ini_file_value(const char *path, const char *key, char *val, size_t 
 /* (config-get "key") => the value in the app's own config.ini (its folder),
  * else in /spiffs/config.ini, as a string; #f when neither has it. An app
  * gets no secrets of config.ini (Wi-Fi, *password*, ...: mini_app_config_key_ok). */
+/* id is one of the running combined app's members ([combo] members = a, b) */
+static bool app_member_ok(const char *id) {
+    size_t n = strlen(id);
+    if (n == 0 || n >= 32) return false;
+    for (const char *p = id; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) return false;
+    }
+    for (const char *p = s_app_members; *p; ) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *e = p;
+        while (*e && *e != ',' && *e != ' ') e++;
+        if ((size_t)(e - p) == n && strncmp(p, id, n) == 0) return true;
+        p = e;
+    }
+    return false;
+}
+
+/* A member's own config.ini (apps/<id>/, else user/<id>/) into out; whether it exists */
+static bool member_ini_path(const char *id, char *out, size_t cap) {
+    struct stat st;
+    snprintf(out, cap, APPS_DIR "/%s/config.ini", id);
+    if (stat(out, &st) == 0) return true;
+    snprintf(out, cap, "/spiffs/user/%s/config.ini", id);
+    return stat(out, &st) == 0;
+}
+
+/* (app-has-config? app-id) => whether that member of the running combined
+ * app has its own config.ini (it ran on its own once, or was set up) */
+static Value prim_app_has_config(MiniVM *vm, int argc, Value *argv) {
+    if (argc < 1 || !mini_is_string(argv[0]) || !app_member_ok(mini_string_data(argv[0]))) {
+        vm_error(vm, "app-has-config?: expected a member of this combined app");
+        return mini_void();
+    }
+    char path[80];
+    return member_ini_path(mini_string_data(argv[0]), path, sizeof(path)) ? mini_true() : mini_false();
+}
+
+/* (config-get key [app-id]): app-id, a member of the running combined app,
+ * reads that app's own config.ini (apps/<id>/, else user/<id>/) instead */
 static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
     if (argc < 1 || !mini_is_string(argv[0])) {
         vm_error(vm, "config-get: expected a key string");
@@ -3852,7 +3892,18 @@ static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
     }
     char val[200];
     const char *key = mini_string_data(argv[0]);
-    if ((ini_file_value(s_app_ini, key, val, sizeof(val)) && val[0]) ||
+    const char *ini = s_app_ini;
+    char member_ini[80];
+    if (argc >= 2 && mini_is_string(argv[1]) && strcmp(mini_string_data(argv[1]), s_app_id) != 0) {
+        const char *id = mini_string_data(argv[1]);
+        if (!app_member_ok(id)) {
+            vm_error(vm, "config-get: %s is not a member of this combined app", id);
+            return mini_void();
+        }
+        member_ini_path(id, member_ini, sizeof(member_ini));
+        ini = member_ini;
+    }
+    if ((ini_file_value(ini, key, val, sizeof(val)) && val[0]) ||
         (mini_app_config_key_ok(key) && ini_file_value("/spiffs/config.ini", key, val, sizeof(val)))) {
         Value s = mini_make_string(vm, mini_chan_url_of(val));   /* proxy = <key>@http://...: the address */
         mini_wipe(val, sizeof(val));
@@ -4389,6 +4440,7 @@ static void select_boot_app(void) {
         }
     }
     char *meta = mini_app_meta_read_file(s_app_path);
+    if (!meta || !mini_device_config_value(meta, "members", s_app_members, sizeof(s_app_members))) s_app_members[0] = '\0';
     mini_app_id(s_app_path, meta, s_app_id, sizeof(s_app_id));
     {   /* [app] storage_kb: an app that keeps files (photos) may ask for more than app_storage_kb */
         char kb[12] = "";
@@ -4903,6 +4955,7 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_device_lib(vm);
     mini_register_json_feed_lib(vm);
     mini_register_c_func(vm, "config-get", prim_config_get);
+    mini_register_c_func(vm, "app-has-config?", prim_app_has_config);
     mini_register_c_func(vm, "config-set!", prim_config_set);
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
