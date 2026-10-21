@@ -1457,12 +1457,20 @@ typedef struct {
     uint32_t small_n, small_bytes, used_bytes, free_bytes, free_blocks, dropped;
 } HeapMap;
 
-/* Who holds a block: what the modules report, and the tasks' stacks and TCBs */
+static const char *const HEAPMAP_TASKS[] = {
+    "main", "IDLE0", "IDLE1", "ipc0", "ipc1", "esp_timer", "sys_evt", "tiT", "wifi", "httpd",
+    "jsonfeed", "market", "setup_dns", "ip_geo_task", "Tmr Svc",
+};
+#define HEAPMAP_NTASKS (sizeof(HEAPMAP_TASKS) / sizeof(HEAPMAP_TASKS[0]))
+
+/* Who holds a block: what the modules report, and the tasks' stacks and TCBs
+ * (their labels live here: allocated per request, not in static DRAM) */
 #define HEAPMAP_OWNERS 96
 typedef struct {
     int n;
     const void *ptr[HEAPMAP_OWNERS];
     const char *what[HEAPMAP_OWNERS];
+    char labels[2 * HEAPMAP_NTASKS][40];
 } HeapOwners;
 
 static void heapmap_owner(const void *block, const char *what, void *user) {
@@ -1473,12 +1481,6 @@ static void heapmap_owner(const void *block, const char *what, void *user) {
     }
 }
 
-static const char *const HEAPMAP_TASKS[] = {
-    "main", "IDLE0", "IDLE1", "ipc0", "ipc1", "esp_timer", "sys_evt", "tiT", "wifi", "httpd",
-    "jsonfeed", "market", "setup_dns", "ip_geo_task", "Tmr Svc",
-};
-static char s_heapmap_labels[2 * sizeof(HEAPMAP_TASKS) / sizeof(HEAPMAP_TASKS[0])][40];
-
 static void heapmap_owners(HeapOwners *o) {
     o->n = 0;
     mini_vm_mem_owners(s_vm, heapmap_owner, o);
@@ -1487,17 +1489,17 @@ static void heapmap_owners(HeapOwners *o) {
     mini_font_mem_owners(heapmap_owner, o);
     mini_mirror_mem_owners(heapmap_owner, o);
     heapmap_owner(s_line, "serial line", o);
-    for (size_t i = 0; i < sizeof(HEAPMAP_TASKS) / sizeof(HEAPMAP_TASKS[0]); i++) {
+    for (size_t i = 0; i < HEAPMAP_NTASKS; i++) {
         TaskHandle_t t = xTaskGetHandle(HEAPMAP_TASKS[i]);
         if (!t) continue;
         /* the least stack this task ever had left */
-        snprintf(s_heapmap_labels[2 * i], sizeof(s_heapmap_labels[0]), "stack %s (%u left)", HEAPMAP_TASKS[i],
+        snprintf(o->labels[2 * i], sizeof(o->labels[0]), "stack %s (%u left)", HEAPMAP_TASKS[i],
                  (unsigned)uxTaskGetStackHighWaterMark(t));
-        snprintf(s_heapmap_labels[2 * i + 1], sizeof(s_heapmap_labels[0]), "tcb %s", HEAPMAP_TASKS[i]);
+        snprintf(o->labels[2 * i + 1], sizeof(o->labels[0]), "tcb %s", HEAPMAP_TASKS[i]);
 #if (defined(INCLUDE_pxTaskGetStackStart) && INCLUDE_pxTaskGetStackStart == 1) || (defined(configUSE_TRACE_FACILITY) && configUSE_TRACE_FACILITY == 1)
-        heapmap_owner(pxTaskGetStackStart(t), s_heapmap_labels[2 * i], o);
+        heapmap_owner(pxTaskGetStackStart(t), o->labels[2 * i], o);
 #endif
-        heapmap_owner(t, s_heapmap_labels[2 * i + 1], o);
+        heapmap_owner(t, o->labels[2 * i + 1], o);
     }
 }
 
@@ -2832,28 +2834,40 @@ static void setup_channel(const char *cfg) {
     mini_wipe(v, sizeof(v));
 }
 
-/* Keys the converters gave (in the fetching tasks), written by the main loop */
+/* Keys the converters gave (in the fetching tasks), written by the main
+ * loop; the queue exists only while a save waits (registrations are rare,
+ * its 650 bytes stay with the VM heap) */
 typedef struct {
     char origin[96];
     char hex[65];
 } ChanSave;
 #define CHAN_SAVES 4
-static ChanSave s_chan_saves[CHAN_SAVES];
+static ChanSave *s_chan_saves = NULL;
 static volatile int s_chan_save_n = 0;
 static portMUX_TYPE s_chan_save_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void channel_saver(const char *origin, const char *key_hex) {
     size_t on = strlen(origin), kn = strlen(key_hex);
     if (on >= sizeof(s_chan_saves[0].origin) || kn >= sizeof(s_chan_saves[0].hex)) return;
+    /* allocated outside the critical section; a queue made meanwhile wins */
+    ChanSave *fresh = s_chan_saves ? NULL : (ChanSave *)calloc(CHAN_SAVES, sizeof(ChanSave));
     portENTER_CRITICAL(&s_chan_save_mux);
-    int i = 0;
-    while (i < s_chan_save_n && strcmp(s_chan_saves[i].origin, origin) != 0) i++;
-    if (i < CHAN_SAVES) {
-        memcpy(s_chan_saves[i].origin, origin, on + 1);
-        memcpy(s_chan_saves[i].hex, key_hex, kn + 1);
-        if (i == s_chan_save_n) s_chan_save_n++;
+    if (!s_chan_saves) {
+        s_chan_saves = fresh;
+        fresh = NULL;
+    }
+    if (s_chan_saves) {
+        int i = 0;
+        while (i < s_chan_save_n && strcmp(s_chan_saves[i].origin, origin) != 0) i++;
+        if (i < CHAN_SAVES) {
+            memcpy(s_chan_saves[i].origin, origin, on + 1);
+            memcpy(s_chan_saves[i].hex, key_hex, kn + 1);
+            if (i == s_chan_save_n) s_chan_save_n++;
+        }
     }
     portEXIT_CRITICAL(&s_chan_save_mux);
+    free(fresh);
+    if (!s_chan_saves) ESP_LOGW(TAG, "Out of memory: the key for %s is not saved", origin);
 }
 
 /* The key written into every value of path (among keys) naming the server */
@@ -2901,14 +2915,15 @@ static void ini_file_put_key(const char *path, const char *const *keys, size_t n
 /* Main loop: the keys registered since the last call, into the files */
 static void channel_save_pending(void) {
     if (s_chan_save_n == 0) return;
-    ChanSave saves[CHAN_SAVES];
+    ChanSave *saves;
     int n;
     portENTER_CRITICAL(&s_chan_save_mux);
     n = s_chan_save_n;
-    memcpy(saves, s_chan_saves, sizeof(saves));
-    memset(s_chan_saves, 0, sizeof(s_chan_saves));
+    saves = s_chan_saves;
+    s_chan_saves = NULL;
     s_chan_save_n = 0;
     portEXIT_CRITICAL(&s_chan_save_mux);
+    if (!saves) return;
     for (int i = 0; i < n; i++) {
         ini_file_put_key("/spiffs/config.ini", SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
                          saves[i].origin, saves[i].hex);
@@ -2917,7 +2932,8 @@ static void channel_save_pending(void) {
                              saves[i].origin, saves[i].hex);
         }
     }
-    mini_wipe(saves, sizeof(saves));
+    mini_wipe(saves, CHAN_SAVES * sizeof(ChanSave));
+    free(saves);
 }
 
 static size_t s_http_stack = DEF_HTTP_STACK; /* [memory] http_stack */
