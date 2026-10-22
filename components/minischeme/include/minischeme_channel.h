@@ -1,162 +1,94 @@
 /**
  * @file minischeme_channel.h
- * @brief The encrypted channel to a protocol converter (tools/app_proxy.py):
- *        AES-256-GCM with a key per device, over HTTP or plain TCP, instead
- *        of HTTPS (TLS needs 30-45 KB of RAM per connection on the board).
+ * @brief The device's requests to app servers and protocol converters
+ *        (tools/app_proxy.py, server.py): plain HTTP (no TLS, which needs
+ *        30-45 KB of RAM per connection on the board, and since firmware
+ *        1.0.69 no encryption either: it saves its RAM and code).
  *
- * Keys: the converter keeps one master key; a device's key is
- * HKDF-SHA256(salt hardware hash key, ikm master, info device id), made when
- * the device registers (below) and kept in the converter's device list.
- * Each request draws 16 random bytes (its nonce); HKDF-SHA256(salt nonce,
- * ikm device key, info "msc1 request keys") gives 64 bytes: the request key
- * and the response key. A key is used for one request only.
+ * Every request to a server named in config.ini carries
+ *   X-MiniScheme-Device    the device id (its WiFi MAC, 12 uppercase hex digits)
+ *   X-MiniScheme-Password  base64 of the app service password set for that
+ *                          server (<key>_password), when it has one
+ * The server registers the device with the password at its first request
+ * (keeping a hash of it) and refuses another password later (HTTP 403).
+ * Plain HTTP shows both headers to anyone on the way: base64 is no
+ * encryption.
  *
- * Request (device -> converter), integers big-endian:
- *   "MSC1" | u8 id length | id | nonce (16) | u32 n | ciphertext (n) | tag (16)
- *   AAD: everything before the ciphertext; GCM nonce: 12 zero bytes.
- *   Plaintext: u32 unix time | u8 m | method (m) | u16 u | url (u) | body
- *   The url is absolute: the converter answers it itself (its own /app/...,
- *   /market/...) or fetches it (an internet http(s) URL).
- * Response (converter -> device): records until one flagged final
- *   u16 n (<= 1024) | u8 flags (1: final) | ciphertext (n) | tag (16)
- *   AAD: the 3 header bytes; GCM nonce: 4 zero bytes | u64 record number.
- *   The first record's plaintext starts with u16 status | u32 body length
- *   (0xFFFFFFFF: unknown); the rest of the records is the body.
- * The converter refuses a request older or newer than 5 minutes (the
- * device's clock: NTP) and a nonce it has seen; a stream cut short or a
- * record that fails its tag is an error, never a short document.
- *
- * Transports: http://host:port posts the request to /channel and reads the
- * records as the reply's body; tcp://host:port sends the request on a TCP
- * connection and reads the records until the converter closes it.
+ * Config values written by older firmware carry a key for the encrypted
+ * channel: "proxy = <key>@http://host:port" ("[<key>]@..." too, the key
+ * 64 hex digits). The key is ignored: mini_chan_url_of gives the address.
  */
 
 #ifndef MINISCHEME_CHANNEL_H
 #define MINISCHEME_CHANNEL_H
 
-#include "minischeme_crypto.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define MINI_CHAN_RECORD     1024   /* largest record plaintext */
 #define MINI_CHAN_ID_MAX     64
-#define MINI_CHAN_LENGTH_UNKNOWN 0xFFFFFFFFu
+#define MINI_CHAN_PASSWORD_MAX 64   /* bytes of an app service password */
 
-#define MINI_CHAN_ECLOSED  (-1)     /* the stream ended before the final record */
-#define MINI_CHAN_EAUTH    (-2)     /* a record failed its tag */
-#define MINI_CHAN_EIO      (-3)     /* the transport failed */
-#define MINI_CHAN_EFORMAT  (-4)     /* a malformed record */
+/** @brief Overwrites n bytes at p with zeros (a password no longer needed);
+ *         the compiler may not drop it. */
+static inline void mini_wipe(void *p, size_t n) {
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
 
-/** @brief Reads up to n bytes: > 0 bytes read, 0 at the end, < 0 an error. */
-typedef int (*MiniChanRecv)(void *io, uint8_t *buf, int n);
-
-/** The response side of one request */
-typedef struct {
-    MiniGcm gcm;
-    uint64_t seq;            /* the next record's number */
-    bool done;               /* the final record was read */
-    int status;              /* from the first record */
-    uint32_t total;          /* body length, MINI_CHAN_LENGTH_UNKNOWN */
-    size_t len, pos;         /* plaintext in rec, handed out up to pos */
-    uint8_t rec[MINI_CHAN_RECORD + 16];
-} MiniChanReader;
-
-/** @brief The request message for method url (malloc'd, *out_len bytes);
- *         reader is set up for its response. NULL: out of memory or an
- *         id / url too long. */
-uint8_t *mini_chan_request(const uint8_t key[32], const char *id, const uint8_t nonce[16], uint32_t now,
-                           const char *method, const char *url, const uint8_t *body, size_t body_len,
-                           MiniChanReader *reader, size_t *out_len);
-/** @brief Reads the first record (status and length); 0 or an error. */
-int mini_chan_start(MiniChanReader *r, MiniChanRecv recv, void *io);
-/** @brief Body bytes into buf: > 0, 0 at the verified end, < 0 an error. */
-int mini_chan_read(MiniChanReader *r, MiniChanRecv recv, void *io, uint8_t *buf, int cap);
-void mini_chan_reader_free(MiniChanReader *r);
-const char *mini_chan_error(int code);
-/** @brief 64 hex digits -> 32 bytes. */
-bool mini_chan_parse_key(const char *hex, uint8_t key[32]);
-
-/* Server addresses in config.ini carry the device's key for that server:
- * "proxy = <key>@http://host:port" ("[<key>]@..." too), the key 64 hex
- * digits. A value without a key is a server the device has not registered
- * with yet. */
-/** @brief The URL part of a config value (the value itself without a key). */
+/** @brief The URL part of a config value (without an old channel key). */
 const char *mini_chan_url_of(const char *value);
-/** @brief The key part of a "key@url" value; false without one. */
-bool mini_chan_key_of(const char *value, uint8_t key[32]);
+/** @brief Whether value starts with an old channel key ("<key>@url"). */
+bool mini_chan_has_key(const char *value);
 /** @brief scheme://host[:port] of url, lowercase, into out. */
 void mini_chan_origin(const char *url, char *out, size_t cap);
 
 #if defined(ESP_PLATFORM)
-/* Servers and registration. The device id is its WiFi MAC (12 uppercase hex
- * digits); its hardware hash key is HKDF-SHA256(salt id, ikm the hardware
- * password, info "msc1_hw_hash"), the password itself never leaves it. The
- * first request to a server without a key registers there (POST
- * <server>/channel/auth): a new device gets its key, a known one answers a
- * challenge with HMAC-SHA256(hash key, challenge) and gets its key back.
- * The key is handed to the saver (written next to the address in its file).
- * A server without the channel, a device without a password or a failed
- * registration is used over plain HTTP. */
-typedef enum { MINI_CHAN_PENDING, MINI_CHAN_READY, MINI_CHAN_PLAIN, MINI_CHAN_FAILED } MiniChanState;
-/** @brief Called from the fetching task with a key to keep. */
-typedef void (*MiniChanSaver)(const char *origin, const char *key_hex);
-
-/** @brief The device id (its WiFi MAC); servers not ready are tried again. */
+/** @brief The device id (its WiFi MAC) sent in X-MiniScheme-Device. */
 void mini_chan_set_device(const char *id);
 /** @brief The server list is rebuilt from config values between begin and
- *         end: a server keeps its state (and a key it registered) while a
- *         value names it; one no value names is dropped. password: the app
- *         service password of the value (its <key>_password); the first
- *         value naming a server with one gives the hash key it registers
- *         with. Without a password a server is used over plain HTTP, with
- *         the device id in X-MiniScheme-Device; relay (an app server with
- *         <key>_relay = 1): its requests go through the system converter
- *         instead (<converter>/relay?url=, encrypted when that one is). */
+ *         end. password: the value's app service password (its
+ *         <key>_password), "" for none; the first value naming a server
+ *         with a password gives it. relay (an app server with
+ *         <key>_relay = 1 and no password): its requests go through the
+ *         system converter instead (<converter>/relay?url=). */
 void mini_chan_servers_begin(void);
 void mini_chan_server_add(const char *value, const char *password, bool relay);
+void mini_chan_servers_end(void);
 /** @brief The system converter app servers are relayed through (a config value). */
 void mini_chan_set_relay(const char *value);
-/** @brief Tests a server and an app service password, registering nothing
- *         (the settings page's test button): "ok" (the device is registered
- *         there with it), "new" (unknown there: saving registers it),
- *         "password", "no_channel", "unreachable", "error"; no password:
- *         "plain" when <server>/health answers. detail: the reason. Blocks. */
-const char *mini_chan_test(const char *url, const char *password, int timeout_ms, char *detail, size_t cap);
-void mini_chan_servers_end(void);
-/** @brief The converter for https:// URLs (a config value, key allowed). */
+/** @brief The converter for https:// URLs (a config value). */
 void mini_chan_set_https(const char *value);
-void mini_chan_set_saver(MiniChanSaver fn);
-/** @brief What a fetch waits for now: MINI_CHAN_STEP_CLOCK (the network
- *         time, the converter checks it), MINI_CHAN_STEP_REGISTER (a
- *         registration) or MINI_CHAN_STEP_WIFI (the clock, with no WiFi
- *         connection yet), with the server into server; MINI_CHAN_STEP_NONE. */
-#define MINI_CHAN_STEP_NONE     0
-#define MINI_CHAN_STEP_CLOCK    1
-#define MINI_CHAN_STEP_REGISTER 2
-#define MINI_CHAN_STEP_WIFI     3
-int mini_chan_step(char *server, size_t cap);
-/** @brief Registers with every server not tried yet (blocks, the HTTP task). */
-void mini_chan_register_all(int timeout_ms);
-/** @brief The servers' states as a JSON array: server, state (ready, plain,
- *         failed, pending), reason (no_password, no_channel, password,
- *         unreachable, refused, tcp, error) and error. */
+/** @brief Tests a server and an app service password, registering nothing
+ *         (the settings page's test button, GET <server>/device/check):
+ *         "ok" (the device is registered there with it), "new" (unknown
+ *         there: its first request registers it), "password" (registered
+ *         with another one), "plain" (no password: the server answers),
+ *         "old" (a server without /device/check: it predates firmware
+ *         1.0.69), "unreachable", "error". detail: the reason. Blocks. */
+const char *mini_chan_test(const char *url, const char *password, int timeout_ms, char *detail, size_t cap);
+/** @brief The servers as a JSON array: server, auth (password, plain,
+ *         relay) and the last request's outcome: state (unknown, ok,
+ *         refused: a wrong password, failed) and error. */
 size_t mini_chan_status_json(char *out, size_t cap);
+/** @brief Kept for json-feed-status: always MINI_CHAN_STEP_NONE now (a
+ *         request no longer waits for the clock or a registration). */
+#define MINI_CHAN_STEP_NONE     0
+int mini_chan_step(char *server, size_t cap);
 
-/* One GET, plain HTTP or through the converter: an https:// URL goes to the
- * https converter, any other to its own server when that server is ready */
+/* One GET: an https:// URL through the https converter (/fetch?url=), an
+ * app server set to be relayed through the system converter (/relay?url=),
+ * any other to its own server */
 typedef struct MiniFetch MiniFetch;
-#define MINI_FETCH_REDIRECTS 1      /* follow HTTP redirects (plain HTTP only) */
+#define MINI_FETCH_REDIRECTS 1      /* follow HTTP redirects */
 #define MINI_FETCH_BIG       2      /* 1 KB receive buffer instead of 512 B */
-#define MINI_FETCH_WAIT      (-2)   /* *status of a NULL open: not ready yet (the clock), try again */
+#define MINI_FETCH_WAIT      (-2)   /* kept for callers: no longer returned */
 /** @brief Opens url: *status (HTTP status), *length (-1 unknown); NULL with
- *         err set when it cannot (*status MINI_FETCH_WAIT: try again soon). */
+ *         err set when it cannot. */
 MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *status, int64_t *length,
                            char *err, size_t err_cap);
 /** @brief > 0 bytes, 0 at the end, < 0 an error. */
 int mini_fetch_read(MiniFetch *f, char *buf, int cap);
-/** @brief Whether the fetch goes through the converter. */
-bool mini_fetch_encrypted(const MiniFetch *f);
 void mini_fetch_close(MiniFetch *f);
 #endif
 

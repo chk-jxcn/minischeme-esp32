@@ -20,7 +20,6 @@ idf_component_register(
         "src/minischeme_jsonfeed.c"
         "src/minischeme_api.c"
         "src/minischeme_market.c"
-        "src/minischeme_crypto.c"
         "src/minischeme_channel.c"
         "src/minischeme_image.c"
     INCLUDE_DIRS
@@ -41,7 +40,6 @@ idf_component_register(
         esp_wifi
         esp_http_server
         esp_http_client
-        mbedtls
         esp_lcd
         app_update
         bootloader_support

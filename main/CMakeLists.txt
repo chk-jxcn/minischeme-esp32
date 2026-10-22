@@ -21,7 +21,6 @@ idf_component_register(
         esp_wifi
         esp_http_server
         esp_http_client
-        mbedtls
         esp_lcd
         app_update
         bootloader_support

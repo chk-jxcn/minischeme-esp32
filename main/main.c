@@ -1952,30 +1952,9 @@ static const char *server_key_section(const char *key) {
     return (strcmp(key, "proxy") == 0 || strcmp(key, "https_proxy") == 0) ? "app" : "server";
 }
 
-/* value for key, keeping the key the old value had for the same server */
-static const char *keep_server_key(const char *key, const char *value, char *buf, size_t cap) {
-    uint8_t k[32];
-    char old[200], o1[96], o2[96];
-    if (!is_server_key(key) || mini_chan_key_of(value, k) || !value[0]) return value;
-    if (!ini_file_value("/spiffs/config.ini", key, old, sizeof(old)) || !mini_chan_key_of(old, k)) return value;
-    mini_wipe(k, sizeof(k));
-    mini_chan_origin(mini_chan_url_of(old), o1, sizeof(o1));
-    mini_chan_origin(value, o2, sizeof(o2));
-    const char *at = strchr(old, '@');
-    if (strcmp(o1, o2) != 0 || !at || (size_t)(at - old) + strlen(value) + 2 > cap) {
-        mini_wipe(old, sizeof(old));
-        return value;
-    }
-    snprintf(buf, cap, "%.*s@%s", (int)(at - old), old, value);
-    mini_wipe(old, sizeof(old));
-    return buf;
-}
-
 /* GET /api/settings: what the settings page shows (never the password, never a key) */
 #define SETTINGS_JSON_CAP 4096
 static esp_err_t http_settings_get(httpd_req_t *req) {
-    /* the servers not registered with yet are tried now: the page shows the outcome */
-    mini_chan_register_all(4000);
     char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
     char *out = (char *)malloc(SETTINGS_JSON_CAP);
     char *esc = (char *)malloc(200);
@@ -1995,19 +1974,13 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
         const char *url = mini_chan_url_of(vals[i]);   /* the address, never the key */
         if (url != vals[i]) memmove(vals[i], url, strlen(url) + 1);
     }
-    /* the app service passwords of proxy and https_proxy (shown in plain
-     * text) and whether each is bound to its server (registered there) */
+    /* the app service passwords of proxy and https_proxy (shown in plain text) */
     char srv_pw[2][SERVER_PASSWORD_MAX + 1];
-    bool srv_bound[2];
     for (int i = 0; i < 2; i++) {
         static const char *const sk[] = { "proxy", "https_proxy" };
-        char pk[32], sv[200];
-        uint8_t k[32];
+        char pk[32];
         snprintf(pk, sizeof(pk), "%s_password", sk[i]);
         if (!mini_device_config_value(cfg, pk, srv_pw[i], sizeof(srv_pw[i]))) srv_pw[i][0] = '\0';
-        srv_bound[i] = mini_device_config_value(cfg, sk[i], sv, sizeof(sv)) && mini_chan_key_of(sv, k);
-        mini_wipe(k, sizeof(k));
-        mini_wipe(sv, sizeof(sv));
     }
     free(cfg);
     char ssid[33], ip[16];
@@ -2021,7 +1994,7 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                          "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
                                          "panel" };
-    /* the converters this device uses and whether it is registered there */
+    /* the servers this device uses: with a password or not, the last outcome */
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
     n += mini_chan_status_json(out + n, 1100);
     for (int i = 0; i < NKEYS && n < SETTINGS_JSON_CAP - 700; i++) {
@@ -2031,8 +2004,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     free(vals);
     for (int i = 0; i < 2; i++) {
         json_escape(srv_pw[i], esc, 200);
-        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"%s_password\":\"%s\",\"%s_bound\":%s",
-                              i ? "https_proxy" : "proxy", esc, i ? "https_proxy" : "proxy", srv_bound[i] ? "true" : "false");
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"%s_password\":\"%s\"",
+                              i ? "https_proxy" : "proxy", esc);
     }
     mini_wipe(srv_pw, sizeof(srv_pw));
     json_escape(s_settings_mode ? "settings" : s_app_path, esc, 200);
@@ -2199,34 +2172,17 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         char base[32];
         bool server_pw = server_password_base(key, SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
                                               base, sizeof(base));
-        if (server_pw) {
-            char cur[SERVER_PASSWORD_MAX + 1] = "", sv[200] = "";
-            uint8_t k[32];
-            if (strlen(value) > SERVER_PASSWORD_MAX) {
-                free(body);
-                return http_error(req, "app service password: 64 characters at most");
-            }
-            /* registered there (its value carries the key): the password stays
-             * until the address names another server (send the address first) */
-            if (ini_file_value("/spiffs/config.ini", base, sv, sizeof(sv)) && mini_chan_key_of(sv, k) &&
-                (!ini_file_value("/spiffs/config.ini", key, cur, sizeof(cur)) || strcmp(cur, value) != 0)) {
-                mini_wipe(k, sizeof(k));
-                mini_wipe(sv, sizeof(sv));
-                free(body);
-                return http_error(req, "the app service password is bound to the registered server: change the server address to set another");
-            }
-            mini_wipe(sv, sizeof(sv));
-            mini_wipe(cur, sizeof(cur));
+        if (server_pw && strlen(value) > SERVER_PASSWORD_MAX) {
+            free(body);
+            return http_error(req, "app service password: 64 characters at most");
         }
         int panel_ips = strcmp(key, "panel") == 0 ? panel_is_ips(value) : -2;
         if (panel_ips == -1) {
             free(body);
             return http_error(req, "panel: ips or tft");
         }
-        char keyed[200];
-        const char *v = keep_server_key(key, value, keyed, sizeof(keyed));
+        const char *v = value;
         bool saved_ok = config_save(section, &key, &v, 1);
-        mini_wipe(keyed, sizeof(keyed));
         if (!saved_ok) {
             free(body);
             return http_error(req, "cannot write /spiffs/config.ini");
@@ -2718,43 +2674,6 @@ static void ini_hide_keys(char *text) {
     }
 }
 
-/* new_text (malloc'd) with the key of old_text's value put back in each
- * value that still names the same server; new_text itself when none */
-static char *ini_keep_keys(const char *old_text, char *new_text, const char *const *keys, size_t nkeys) {
-    char o[200], v[200], on[96], vn[96], nv[200];
-    uint8_t k[32];
-    for (size_t i = 0; old_text && new_text && i < nkeys; i++) {
-        if (!mini_device_config_value(old_text, keys[i], o, sizeof(o)) || !mini_chan_key_of(o, k)) continue;
-        if (!mini_device_config_value(new_text, keys[i], v, sizeof(v)) || !v[0] || mini_chan_key_of(v, k)) continue;
-        mini_chan_origin(mini_chan_url_of(o), on, sizeof(on));
-        mini_chan_origin(v, vn, sizeof(vn));
-        const char *at = strchr(o, '@');
-        if (strcmp(on, vn) != 0 || !at) continue;
-        int n = snprintf(nv, sizeof(nv), "%.*s@%s", (int)(at - o), o, v);
-        if (n < 0 || (size_t)n >= sizeof(nv)) continue;
-        char *next = mini_device_config_set(new_text, "config", keys[i], nv);
-        if (next) {
-            free(new_text);
-            new_text = next;
-        }
-        /* the same server: its app service password is bound to the key */
-        char pk[48], opw[SERVER_PASSWORD_MAX + 1];
-        snprintf(pk, sizeof(pk), "%s_password", keys[i]);
-        if (mini_device_config_value(old_text, pk, opw, sizeof(opw))) {
-            next = mini_device_config_set(new_text, "config", pk, opw);
-            if (next) {
-                free(new_text);
-                new_text = next;
-            }
-        }
-        mini_wipe(opw, sizeof(opw));
-    }
-    mini_wipe(k, sizeof(k));
-    mini_wipe(o, sizeof(o));
-    mini_wipe(nv, sizeof(nv));
-    return new_text;
-}
-
 /* GET /api/apps/config?key=: the app's metadata ([fields], [config]) and its
  * config.ini (without converter keys), read only when the page opens that app's form */
 static esp_err_t http_app_config_get(httpd_req_t *req) {
@@ -2768,20 +2687,6 @@ static esp_err_t http_app_config_get(httpd_req_t *req) {
     bool exists = fp != NULL;
     if (fp) fclose(fp);
     char *text = exists ? read_small_file(ini, 16 * 1024) : NULL;
-    char bound[96] = "";   /* JSON array of the server keys registered there */
-    {
-        size_t bn = (size_t)snprintf(bound, sizeof(bound), "[");
-        char sv[200];
-        uint8_t k[32];
-        for (size_t i = 0; text && i < sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]); i++) {
-            if (mini_device_config_value(text, APP_SERVER_KEYS[i], sv, sizeof(sv)) && mini_chan_key_of(sv, k)) {
-                bn += (size_t)snprintf(bound + bn, sizeof(bound) - bn, "%s\"%s\"", bn > 1 ? "," : "", APP_SERVER_KEYS[i]);
-            }
-        }
-        snprintf(bound + bn, sizeof(bound) - bn, "]");
-        mini_wipe(k, sizeof(k));
-        mini_wipe(sv, sizeof(sv));
-    }
     if (text) ini_hide_keys(text);
     char *jm = json_string_alloc(meta ? meta : ""), *jt = json_string_alloc(text ? text : ""), *jp = json_string_alloc(ini);
     free(meta);
@@ -2796,8 +2701,6 @@ static esp_err_t http_app_config_get(httpd_req_t *req) {
     httpd_resp_sendstr_chunk(req, jp);
     httpd_resp_sendstr_chunk(req, exists ? ",\"exists\":true,\"ini\":" : ",\"exists\":false,\"ini\":");
     httpd_resp_sendstr_chunk(req, jt);
-    httpd_resp_sendstr_chunk(req, ",\"bound\":");
-    httpd_resp_sendstr_chunk(req, bound);
     httpd_resp_sendstr_chunk(req, ",\"meta\":");
     httpd_resp_sendstr_chunk(req, jm);
     httpd_resp_sendstr_chunk(req, "}");
@@ -2818,16 +2721,12 @@ static esp_err_t http_app_config_post(httpd_req_t *req) {
     uint8_t *body = req->content_len ? http_read_body(req, &len, &err) : (uint8_t *)calloc(1, 1);
     if (!body) return http_error(req, err ? err : "out of memory");
     snprintf(ini, sizeof(ini), "%s/config.ini", dir);
-    {   /* a server address the form left unchanged keeps the device's key for it */
-        char *old = read_small_file(ini, 16 * 1024);
+    {
         char *text = (char *)malloc(len + 1);
         if (text) {
             memcpy(text, body, len);
             text[len] = '\0';
-            text = ini_keep_keys(old, text, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]));
         }
-        if (old) mini_wipe(old, strlen(old));
-        free(old);
         if (!text) {
             free(body);
             return http_error(req, "out of memory");
@@ -2968,11 +2867,11 @@ static esp_err_t http_wifi_scan(httpd_req_t *req) {
     return r;
 }
 
-/* The protocol converters (minischeme_channel.h): the servers named in
- * config.ini and in the running app's ini, the device id (the MAC) and the
- * hardware password the device registers with; apps' https:// data goes to
- * the app's own converter_url, else [app] https_proxy, else proxy */
-static void channel_saver(const char *origin, const char *key_hex);
+/* The app servers and converters (minischeme_channel.h): the servers named
+ * in config.ini and in the running app's ini, the device id (the MAC) and
+ * each server's app service password, both sent in headers; apps' https://
+ * data goes to the app's own converter_url, else [app] https_proxy, else proxy */
+static void ini_file_strip_keys(const char *path, const char *const *keys, size_t nkeys);
 
 /* app: an app's own servers, which may ask to be relayed through the
  * system converter (<key>_relay = 1, used while they have no password) */
@@ -3005,9 +2904,7 @@ static void migrate_server_passwords(const char *path, const char *const *keys, 
     bool changed = false;
     for (size_t i = 0; text && i < nkeys; i++) {
         if (!mini_device_config_value(text, keys[i], v, sizeof(v)) || !v[0]) continue;
-        uint8_t k[32];
-        bool registered = mini_chan_key_of(v, k);
-        mini_wipe(k, sizeof(k));
+        bool registered = mini_chan_has_key(v);   /* registered there over the old encrypted channel */
         if (!system && !registered) continue;
         snprintf(pk, sizeof(pk), "%s_password", keys[i]);
         if (mini_device_config_value(text, pk, pw, sizeof(pw))) continue;   /* present, even empty */
@@ -3052,7 +2949,11 @@ static void setup_channel(const char *cfg) {
         fresh = read_small_file("/spiffs/config.ini", 32 * 1024);   /* with the passwords written */
         if (fresh) cfg = fresh;
     }
-    mini_chan_set_saver(channel_saver);
+    /* values of older firmware carry the encrypted channel's key: dropped */
+    ini_file_strip_keys("/spiffs/config.ini", SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]));
+    if (s_app_ini[0]) {
+        ini_file_strip_keys(s_app_ini, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]));
+    }
     mini_chan_set_device(s_chan_id);
     mini_wipe(pass, sizeof(pass));
     mini_chan_servers_begin();
@@ -3080,59 +2981,19 @@ static void setup_channel(const char *cfg) {
     mini_wipe(v, sizeof(v));
 }
 
-/* Keys the converters gave (in the fetching tasks), written by the main
- * loop; the queue exists only while a save waits (registrations are rare,
- * its 650 bytes stay with the VM heap) */
-typedef struct {
-    char origin[96];
-    char hex[65];
-} ChanSave;
-#define CHAN_SAVES 4
-static ChanSave *s_chan_saves = NULL;
-static volatile int s_chan_save_n = 0;
-static portMUX_TYPE s_chan_save_mux = portMUX_INITIALIZER_UNLOCKED;
-
-static void channel_saver(const char *origin, const char *key_hex) {
-    size_t on = strlen(origin), kn = strlen(key_hex);
-    if (on >= sizeof(s_chan_saves[0].origin) || kn >= sizeof(s_chan_saves[0].hex)) return;
-    /* allocated outside the critical section; a queue made meanwhile wins */
-    ChanSave *fresh = s_chan_saves ? NULL : (ChanSave *)calloc(CHAN_SAVES, sizeof(ChanSave));
-    portENTER_CRITICAL(&s_chan_save_mux);
-    if (!s_chan_saves) {
-        s_chan_saves = fresh;
-        fresh = NULL;
-    }
-    if (s_chan_saves) {
-        int i = 0;
-        while (i < s_chan_save_n && strcmp(s_chan_saves[i].origin, origin) != 0) i++;
-        if (i < CHAN_SAVES) {
-            memcpy(s_chan_saves[i].origin, origin, on + 1);
-            memcpy(s_chan_saves[i].hex, key_hex, kn + 1);
-            if (i == s_chan_save_n) s_chan_save_n++;
-        }
-    }
-    portEXIT_CRITICAL(&s_chan_save_mux);
-    free(fresh);
-    if (!s_chan_saves) ESP_LOGW(TAG, "Out of memory: the key for %s is not saved", origin);
-}
-
-/* The key written into every value of path (among keys) naming the server */
-static void ini_file_put_key(const char *path, const char *const *keys, size_t nkeys, const char *origin,
-                             const char *hex) {
+/* Every value of path (among keys) without the old channel key: the address only */
+static void ini_file_strip_keys(const char *path, const char *const *keys, size_t nkeys) {
     char *text = read_small_file(path, 32 * 1024);
     if (!text || !text[0]) {
         free(text);
         return;
     }
     bool changed = false;
-    char v[200], nv[200], o[96];
+    char v[200], nv[200];
     for (size_t i = 0; text && i < nkeys; i++) {
         if (!mini_device_config_value(text, keys[i], v, sizeof(v)) || !v[0]) continue;
-        const char *url = mini_chan_url_of(v);
-        mini_chan_origin(url, o, sizeof(o));
-        if (strcmp(o, origin) != 0) continue;
-        int k = snprintf(nv, sizeof(nv), "%s@%s", hex, url);
-        if (k < 0 || (size_t)k >= sizeof(nv) || strcmp(nv, v) == 0) continue;
+        if (!mini_chan_has_key(v)) continue;
+        snprintf(nv, sizeof(nv), "%s", mini_chan_url_of(v));
         char *next = mini_device_config_set(text, "app", keys[i], nv);
         if (next) {
             mini_wipe(text, strlen(text));
@@ -3152,34 +3013,10 @@ static void ini_file_put_key(const char *path, const char *const *keys, size_t n
         if (fp) ok = fclose(fp) == 0 && ok;
         if (ok) ok = rename(tmp, path) == 0;
         if (!ok) remove(tmp);
-        ESP_LOGI(TAG, "%s: the key for %s %s", path, origin, ok ? "saved" : "NOT saved");
+        ESP_LOGI(TAG, "%s: old channel keys %s", path, ok ? "removed" : "NOT removed");
     }
     if (text) mini_wipe(text, strlen(text));
     free(text);
-}
-
-/* Main loop: the keys registered since the last call, into the files */
-static void channel_save_pending(void) {
-    if (s_chan_save_n == 0) return;
-    ChanSave *saves;
-    int n;
-    portENTER_CRITICAL(&s_chan_save_mux);
-    n = s_chan_save_n;
-    saves = s_chan_saves;
-    s_chan_saves = NULL;
-    s_chan_save_n = 0;
-    portEXIT_CRITICAL(&s_chan_save_mux);
-    if (!saves) return;
-    for (int i = 0; i < n; i++) {
-        ini_file_put_key("/spiffs/config.ini", SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
-                         saves[i].origin, saves[i].hex);
-        if (s_app_ini[0]) {
-            ini_file_put_key(s_app_ini, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]),
-                             saves[i].origin, saves[i].hex);
-        }
-    }
-    mini_wipe(saves, CHAN_SAVES * sizeof(ChanSave));
-    free(saves);
 }
 
 static size_t s_http_stack = DEF_HTTP_STACK; /* [memory] http_stack */
@@ -6063,7 +5900,6 @@ void app_main(void) {
             setup_channel(cfg);
             free(cfg);
         }
-        channel_save_pending();
 #endif
 
         /* Physical button (GPIO 18), or the WebREPL's: short, long and mid

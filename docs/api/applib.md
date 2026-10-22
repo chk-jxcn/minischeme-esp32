@@ -342,8 +342,8 @@ on the configuration pages next to the address (apps never read them):
 
 | Key | Meaning |
 |---|---|
-| `proxy_url_password` | The app service password for that server: the device registers its encrypted channel there with it. Bound to the server once registered. Empty: plain HTTP, every request carrying `X-MiniScheme-Device` (the board's MAC, the simulator's `SIM-...` id), so a simple server of your own needs no encryption and may ignore the header. |
-| `proxy_url_relay` | `1`: without a password, requests go through the system protocol converter (`<converter>/relay?url=`, encrypted when the device is registered there); the converter passes the device id on. Ignored when the server has a password (it is its own converter). |
+| `proxy_url_password` | The app service password for that server. Every request is plain HTTP and carries `X-MiniScheme-Device` (the board's MAC, the simulator's `SIM-...` id); with a password also `X-MiniScheme-Password` (base64 of it, firmware 1.0.69+; before, an encrypted channel registered with it). minischeme-proxy registers the device with the first password it sees and refuses another one (403). Base64 is no encryption: use a password of its own. A simple server of your own may ignore both headers. |
+| `proxy_url_relay` | `1`: without a password, requests go through the system protocol converter (`<converter>/relay?url=`); the converter passes the device id on. Ignored when the server has a password (it is its own converter). |
 
 The same pairs exist for `converter_url` (`converter_url_password`, `converter_url_relay`).
 
