@@ -1,0 +1,11 @@
+# Text files are stored with LF line endings (Windows tools here wrote CRLF
+# into some files, which made every line of them change in a commit)
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.msbc binary
+*.fasl binary
+*.bin binary
+*.wasm binary
+*.mfnt binary
+*.db binary
