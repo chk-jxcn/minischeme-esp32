@@ -106,7 +106,7 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 
 **Password** (`config.ini [http] http_password`; when that is empty, `[server] hardware_password` written by the WebREPL setup is used). It guards the HTTP API only; the servers use their own app service passwords (6.1):
 - Sent in the `X-MiniScheme-Auth` header (the WebREPL does this), or as `?auth=<percent-encoded password>` where a header is impossible (the mirror WebSocket, a link to the device page).
-- With a password set every `/api/` route needs it, except `/api/app/call` and `/api/app/file` when called by the board's own `/app` page.
+- With a password set every `/api/` route needs it, except `/api/app/call` and `/api/app/file` when called by the board's own `/app` page. That page is served as `/app?t=<token>` (a 302 from `/app`, random per boot, firmware 1.0.67+) and `appweb.js` sends the token back with every call: a sandboxed page has an opaque origin and browsers send no `Referer` from one, so the token is the only proof that the call comes from the board's page.
 - Compared in constant time; a wrong or missing password answers `401` with `"auth_required": true`.
 - `POST /api/settings` with `http.http_password` (or `server.hardware_password`) applies the new password at once.
 
@@ -182,16 +182,20 @@ cd repos/minischeme && make test            # MinGW: mingw32-make SHELL=sh CC=gc
 
 # firmware (ESP-IDF 6.1 environment)
 cd repos/minischeme-esp32 && idf.py build
+# the board's HTTP access rules against a real board (the password from its config.ini, never printed)
+MINISCHEME_BOARD=192.168.2.119 MINISCHEME_PASSWORD=... python -m unittest tests/test_board_http.py -v
 python tools/make_manifest.py <dir with the 3 images> <version> 6.1
 
 # apps: compile to dist/, update index.json; --sync also updates the firmware and WebREPL copies
 cd repos/minischeme-apps && python tools/build_apps.py --sync
+cd repos/minischeme-apps && python -m unittest discover -s tests -v   # pages, metadata, stale images (CI too)
 
 # proxy
 cd repos/minischeme-proxy && python app_proxy.py --mode local --port 8087 && python -m pytest tests
 
 # WebREPL with the local server (proxy built in)
 cd repos/minischeme-webrepl && python server.py --port 8087 && python -m pytest tests
+# (tests/test_app_medicine.py and test_sim_cli.py drive the simulator: they need Edge / Chrome)
 
 # the simulator from the command line (headless browser): run code and apps, press KEY 18, screenshot
 cd repos/minischeme-webrepl && python tools/sim.py --app calendar --press short --wait 2 --shot month.png

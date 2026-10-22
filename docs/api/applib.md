@@ -1066,7 +1066,12 @@ Notes:
 - Strings are bytes: the form decoding and JSON keep UTF-8 as it is. Browsers send
   UTF-8; other senders must too.
 - Scripts and other tools may call the same endpoint, e.g.
-  `curl -d "text=..." "http://<board>/api/app/call?fn=add"`.
+  `curl -d "text=..." "http://<board>/api/app/call?fn=add"` (with
+  `-H "X-MiniScheme-Auth: <password>"` on a board with a hardware password).
+- The board serves the page as `/app?t=<token>` (firmware 1.0.67+; `/app` redirects there, the token is
+  random per boot) and `appCall` / `appFile*` send the token back. A sandboxed page sends no `Referer`,
+  so on a board with a hardware password the token is what lets the page's calls in; a page that calls
+  `fetch('/api/...')` itself instead of the helpers gets `401`. `tests/test_apps.py` checks this.
 - The device's compiler misreads the character literal `#\"`: use `(integer->char 34)`.
 
 ---
@@ -1117,6 +1122,7 @@ the owner's. A refused call raises an error like
 
 Every `/api/*` route checks its caller: a browser page of another origin may call it only from the local
 network (`localhost`, `127.x`, `10.x`, `172.16-31.x`, `192.168.x`, `*.local`), a sandboxed app page
-(`Origin: null`) only `/api/app/call`, and requests from the board itself are refused. The API has no
-password: anyone on the network can manage the board, as before.
+(`Origin: null`) only `/api/app/call` and `/api/app/file`, and requests from the board itself are
+refused. With a hardware password (`[http] http_password`) every route needs it (`X-MiniScheme-Auth`),
+except the two app routes called with the page token of the board's own `/app?t=<token>`.
 
