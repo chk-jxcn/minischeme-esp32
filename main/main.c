@@ -5405,14 +5405,106 @@ static void check_app_error(const char *where) {
  * heap and leave the app's Flash image alone; leaving them restarts into
  * the boot app */
 
+/* A launch whose app's schedule.ini says persist = 1 is also kept in a file
+ * until its (app-return): a restart, a crash or a power cut starts it again
+ * (the settings boot in between leaves it). A launch that does not get past
+ * SCHED_TRIES boots of a minute each is dropped. File: "tries N", then one
+ * "HH:MM path" line per launch. */
+#define SCHED_FILE  "/spiffs/.sched_launch"
+#define SCHED_TRIES 3
+static bool s_sched_healthy = false;     /* this launch ran a minute: its tries start over */
+
+static bool sched_persists(const char *app_path) {
+    char dir[64], ini_path[80], v[8] = "";
+    snprintf(dir, sizeof(dir), "%s", app_path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return false;
+    *slash = '\0';
+    snprintf(ini_path, sizeof(ini_path), "%s/schedule.ini", dir);
+    char *ini = read_small_file(ini_path, 4096);
+    bool on = ini && mini_device_config_value(ini, "persist", v, sizeof(v)) && v[0] == '1';
+    free(ini);
+    return on;
+}
+
+static void sched_save(const SchedState *st, int tries) {
+    if (st->n == 0 || !sched_persists(st->path[0])) {
+        remove(SCHED_FILE);
+        return;
+    }
+    FILE *fp = fopen(SCHED_FILE ".tmp", "w");
+    if (!fp) return;
+    fprintf(fp, "tries %d\n", tries);
+    for (uint32_t i = 0; i < st->n && i < SCHED_MAX; i++) fprintf(fp, "%.5s %.63s\n", st->at[i], st->path[i]);
+    if (fclose(fp) == 0) {
+        remove(SCHED_FILE);          /* SPIFFS: rename does not replace */
+        rename(SCHED_FILE ".tmp", SCHED_FILE);
+    } else {
+        remove(SCHED_FILE ".tmp");
+    }
+}
+
+static bool sched_load(SchedState *st, int *tries) {
+    char *text = read_small_file(SCHED_FILE, 2048);
+    if (!text) return false;
+    memset(st, 0, sizeof(*st));
+    *tries = 0;
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        if (strncmp(line, "tries ", 6) == 0) {
+            *tries = atoi(line + 6);
+        } else if (strlen(line) > 6 && line[5] == ' ' && st->n < SCHED_MAX) {
+            memcpy(st->at[st->n], line, 5);
+            st->at[st->n][5] = '\0';
+            snprintf(st->path[st->n], 64, "%.63s", line + 6);
+            st->n++;
+        }
+    }
+    free(text);
+    return st->n > 0;
+}
+
+/* The running launch and its queue, kept again (tries: 0 once it ran a minute) */
+static void sched_save_current(void) {
+    if (!s_sched_boot) return;
+    SchedState st;
+    memset(&st, 0, sizeof(st));
+    snprintf(st.path[0], 64, "%s", s_sched_path);
+    snprintf(st.at[0], 6, "%s", s_sched_at);
+    st.n = 1;
+    for (uint32_t i = 0; i < s_sched_queue.n && st.n < SCHED_MAX; i++, st.n++) {
+        memcpy(st.path[st.n], s_sched_queue.path[i], 64);
+        memcpy(st.at[st.n], s_sched_queue.at[i], 6);
+    }
+    sched_save(&st, s_sched_healthy ? 0 : 1);
+}
+
 /* Boot: the scheduled launch RTC memory holds (not in the settings) becomes
- * this boot's; RTC keeps none, so a crash or a restart returns to the boot app */
+ * this boot's; RTC keeps none, so a crash or a restart returns to the boot
+ * app, unless the launch persists (its file) */
 static void sched_take_boot(void) {
     if (s_sched_rtc.magic != SCHED_MAGIC || s_sched_rtc.n > SCHED_MAX) {
         memset(&s_sched_rtc, 0, sizeof(s_sched_rtc));
         s_sched_rtc.magic = SCHED_MAGIC;
     }
     memset(&s_sched_queue, 0, sizeof(s_sched_queue));
+    if (!s_settings_mode) {
+        SchedState kept;
+        int tries = 0;
+        if (s_sched_rtc.n > 0) {
+            sched_save(&s_sched_rtc, 1);                 /* this boot is its first try */
+        } else if (sched_load(&kept, &tries)) {
+            if (tries >= SCHED_TRIES) {
+                ESP_LOGW(TAG, "Schedule: %s did not run after %d restarts; dropped", kept.path[0], tries);
+                remove(SCHED_FILE);
+            } else {
+                ESP_LOGI(TAG, "Schedule: resuming %s (%s) after a restart", kept.path[0], kept.at[0]);
+                kept.magic = SCHED_MAGIC;
+                kept.fired_min = s_sched_rtc.fired_min;
+                s_sched_rtc = kept;
+                sched_save(&s_sched_rtc, tries + 1);
+            }
+        }
+    }
     if (!s_settings_mode && s_sched_rtc.n > 0) {
         s_sched_rtc.path[0][63] = '\0';
         s_sched_rtc.at[0][5] = '\0';
@@ -5421,6 +5513,8 @@ static void sched_take_boot(void) {
             s_sched_boot = true;
             snprintf(s_sched_path, sizeof(s_sched_path), "%s", p);
             snprintf(s_sched_at, sizeof(s_sched_at), "%s", s_sched_rtc.at[0]);
+        } else {
+            remove(SCHED_FILE);   /* the app is gone */
         }
         for (uint32_t i = 1; i < s_sched_rtc.n; i++) {
             memcpy(s_sched_queue.path[s_sched_queue.n], s_sched_rtc.path[i], 64);
@@ -5451,8 +5545,10 @@ static bool sched_return(void) {
     if (s_sched_queue.n > 0) {
         s_sched_rtc = s_sched_queue;
         s_sched_rtc.magic = SCHED_MAGIC;
+        sched_save(&s_sched_rtc, 0);
     } else if (s_sched_boot) {
         s_sched_rtc.n = 0;
+        remove(SCHED_FILE);
     } else {
         s_sched_at[0] = '\0';
         return false;
@@ -5543,12 +5639,14 @@ static void sched_scan(const MiniWallTime *wt, time_t wall_now) {
             s_sched_queue.n++;
             ESP_LOGI(TAG, "Schedule %s: %s queued", due.at[i], due.path[i]);
         }
+        sched_save_current();
         return;
     }
     ESP_LOGI(TAG, "Schedule %s: restarting into %s", due.at[0], due.path[0]);
     due.magic = SCHED_MAGIC;
     due.fired_min = minute;
     s_sched_rtc = due;
+    sched_save(&due, 0);
     s_sched_restart_at = esp_timer_get_time();
 }
 
@@ -6041,6 +6139,10 @@ void app_main(void) {
             if (mini_get_error(s_vm)) ESP_LOGE(TAG, "app-tick error: %s", mini_get_error(s_vm));
             check_app_error("app-tick");
             sched_scan(&wt, wall_now);
+            if (s_sched_boot && !s_sched_healthy && esp_timer_get_time() > 60000000LL) {
+                s_sched_healthy = true;   /* it runs: a later restart may try it SCHED_TRIES times again */
+                sched_save_current();
+            }
             if (now_sec % 60 == 0) {
                 ESP_LOGI(TAG, "Clock %s | heap %u/%u B | free %u B",
                          wt.synced ? "SYNCED" : "WAITING NTP",

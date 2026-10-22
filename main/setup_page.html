@@ -12,12 +12,16 @@ main{max-width:720px;margin:0 auto;padding:12px 16px 40px}
 h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:0 0 10px;color:var(--accent)}h3{font-size:14px;margin:14px 0 6px;color:var(--muted);font-weight:600}
 section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}
 label{display:block;color:var(--muted);font-size:13px;margin:8px 0 3px}
-input,select,textarea{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:#0e151e;color:var(--text);font:inherit}
-input[type=checkbox]{width:auto;margin-right:6px;vertical-align:middle}
+input,select,textarea{width:100%;min-height:38px;padding:7px 10px;border-radius:6px;border:1px solid var(--line);background:#0e151e;color:var(--text);font:inherit}
+input[type=checkbox]{width:auto;min-height:0;margin:0 6px 0 0;vertical-align:middle}
+input[type=file]{padding:6px 10px}
 textarea{font:13px/1.45 ui-monospace,Consolas,monospace;min-height:150px}
-button{padding:7px 13px;border-radius:6px;border:1px solid var(--accent);background:#173f52;color:var(--text);font:inherit;cursor:pointer;margin:8px 8px 0 0}
+button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 14px;border-radius:6px;border:1px solid var(--accent);background:#173f52;color:var(--text);font:inherit;line-height:1.2;white-space:nowrap;cursor:pointer;margin:10px 8px 0 0;vertical-align:middle}
 button.plain{border-color:var(--line);background:transparent}
-.row{display:flex;gap:8px;align-items:flex-end}.row>*{flex:1}.row>button{flex:none}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}.row>*{flex:1 1 180px;min-width:0}.row>button{flex:none;margin:0}
+/* an input with its button on one line (a password and its test) */
+.inline{display:flex;gap:8px;align-items:center}.inline>input,.inline>select{flex:1;min-width:0}.inline>button{flex:none;margin:0}
 .kv{display:grid;grid-template-columns:110px 1fr;gap:2px 10px;font-size:14px}.kv b{font-weight:normal;color:var(--muted)}
 .app{border-top:1px solid var(--line);padding:10px 0}.app:first-of-type{border-top:0}
 .app .name{font-weight:600}.desc{color:var(--muted);font-size:13px}
@@ -34,13 +38,15 @@ button.plain{border-color:var(--line);background:transparent}
 details summary{cursor:pointer;color:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:13px}td{padding:2px 6px 2px 0;border-bottom:1px solid #1b2836}
 header{position:sticky;top:0;z-index:3;background:var(--bg);border-bottom:1px solid var(--line)}
-header .in{max-width:720px;margin:0 auto;padding:8px 16px 0;display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
-header .name{font-size:17px;font-weight:600;padding-bottom:8px}
-.tabs{display:flex;gap:4px}
-.tabs button{margin:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:8px 12px}
+header .in{max-width:720px;margin:0 auto;padding:8px 16px 0;display:flex;align-items:flex-end;gap:4px 14px;flex-wrap:wrap}
+header .name{font-size:17px;font-weight:600;padding-bottom:8px;white-space:nowrap}
+.tabs{display:flex;gap:4px;max-width:100%;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:none;min-height:0;margin:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:8px 12px}
 .tabs button.on{color:var(--text);border-bottom-color:var(--accent)}
 #appframe{display:block;width:100%;max-width:752px;margin:0 auto;border:0;min-height:300px;background:var(--bg)}
-button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
+button.small{min-height:30px;padding:0 10px;margin:0 0 0 8px;font-size:13px}
+h2 button.small{margin-top:-4px}
 .pane{display:none}
 .app .name button{float:right}
 </style>
@@ -116,13 +122,15 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取；单个应用可在自己的配置里用 proxy_url 指定别的服务器）</label>
 <input id="proxy" placeholder="http://电脑IP:8087" oninput="serverPwLock()">
 <label for="proxypw">应用代理的应用服务密码（明文显示；设备用它在这台服务器上注册加密通道，也是该服务器用户门户的登录密码。注册后与服务器绑定：改了服务器地址才能改密码）</label>
-<input id="proxypw" autocomplete="off" spellcheck="false" maxlength="64">
-<button class="plain small" onclick="testServer('proxy', 'proxypw', 'proxytest')">测试连接</button> <span id="proxytest" class="desc"></span>
+<div class="inline"><input id="proxypw" autocomplete="off" spellcheck="false" maxlength="64">
+<button class="plain" onclick="testServer('proxy', 'proxypw', 'proxytest')">测试连接</button></div>
+<div id="proxytest" class="help"></div>
 <label for="hproxy">HTTPS 转换地址（应用请求 https:// 数据时由它代取；留空用应用代理）</label>
 <input id="hproxy" placeholder="http://电脑IP:8087" oninput="serverPwLock()">
 <label for="hproxypw">HTTPS 转换地址的应用服务密码（与应用代理是同一台服务器时可留空）</label>
-<input id="hproxypw" autocomplete="off" spellcheck="false" maxlength="64">
-<button class="plain small" onclick="testServer('hproxy', 'hproxypw', 'hproxytest')">测试连接</button> <span id="hproxytest" class="desc"></span>
+<div class="inline"><input id="hproxypw" autocomplete="off" spellcheck="false" maxlength="64">
+<button class="plain" onclick="testServer('hproxy', 'hproxypw', 'hproxytest')">测试连接</button></div>
+<div id="hproxytest" class="help"></div>
 <label for="murl">应用市场地址（留空：应用代理的 /market）</label>
 <input id="murl" placeholder="http://电脑IP:8087/market">
 <div class="desc" id="chstate"></div>
@@ -655,8 +663,9 @@ const APP_SERVER_KEYS = ['proxy_url', 'proxy', 'converter_url'];
 function serverPwHtml(p, key, values) {
   const id = `${p}_${key}_password`;
   return `<label for="${id}">${esc(key)} 的应用服务密码（明文；设备用它在这台服务器注册加密通道，注册后与服务器绑定。留空：不加密，用明文 HTTP，请求头带设备 ID）</label>
-    <input id="${id}" value="${esc(values[key + '_password'] || '')}" autocomplete="off" spellcheck="false" maxlength="64">
-    <button class="plain small" onclick="testServer('${p}_${key}', '${id}', '${p}_${key}_test')">测试连接</button> <span id="${p}_${key}_test" class="desc"></span>
+    <div class="inline"><input id="${id}" value="${esc(values[key + '_password'] || '')}" autocomplete="off" spellcheck="false" maxlength="64">
+    <button class="plain" onclick="testServer('${p}_${key}', '${id}', '${p}_${key}_test')">测试连接</button></div>
+    <div id="${p}_${key}_test" class="help"></div>
     <label><input type="checkbox" id="${p}_${key}_relay"${values[key + '_relay'] === '1' ? ' checked' : ''}>
       没有密码时经系统协议转换器转发（设备 → 系统设置里的转换器（加密）→ 这台服务器）；有密码时只用这台服务器自己的转换器</label>`;
 }
