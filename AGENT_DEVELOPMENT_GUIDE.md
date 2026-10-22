@@ -104,7 +104,7 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 ### 4.2 HTTP API
 `GET /api/info`, `POST /api/exec` (MSBC body), `POST /api/eval` (when the firmware has a compiler), `POST /api/upload?path=&run=`, `GET /api/fs/list`, `GET /api/fs/read?path=`, `GET /api/screen` (mirror rows), `GET /api/stats`, `GET|POST /api/settings`, `GET /api/apps`, `GET /api/hardware`, ...
 
-**Password** (`config.ini [http] http_password`; when that is empty, `[server] hardware_password` written by the WebREPL setup is used):
+**Password** (`config.ini [http] http_password`; when that is empty, `[server] hardware_password` written by the WebREPL setup is used). It guards the HTTP API only; the servers use their own app service passwords (6.1):
 - Sent in the `X-MiniScheme-Auth` header (the WebREPL does this), or as `?auth=<percent-encoded password>` where a header is impossible (the mirror WebSocket, a link to the device page).
 - With a password set every `/api/` route needs it, except `/api/app/call` and `/api/app/file` when called by the board's own `/app` page.
 - Compared in constant time; a wrong or missing password answers `401` with `"auth_required": true`.
@@ -148,9 +148,13 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 ## 6. App proxy and protocol converter (minischeme-proxy)
 
 ### 6.1 Encrypted channel (MSC1, `minischeme_channel.h`)
-- The firmware registers itself. Its id is the WiFi MAC (12 uppercase hex digits); its hardware hash key is `HKDF-SHA256(salt = MAC, ikm = [server] hardware_password, info = "msc1_hw_hash")`, computed on the device (the password is never sent). The first request to a server without a key posts `{"mac", "hardware_hash_key"}` to `<server>/channel/auth`: a new device gets `master_key_2 = HKDF(hardware hash key, master_key_1, MAC)`; a known one (e.g. after a factory reset) gets a challenge, answers `HMAC-SHA256(hash key, challenge)` and gets its key back.
+- **App service passwords (1.0.65)**: every server value has its own password next to it, `<key>_password` (`[app] proxy_password`, `https_proxy_password`, `[server] proxy_url_password`, `converter_url_password`, an app's `proxy_url_password` / `converter_url_password`), shown in plain text on the configuration pages. The hardware password (`[server] hardware_password` / `[http] http_password`) only guards the board's web page and HTTP API and can be changed any time. Boot migration: a server value without `<key>_password` gets the hardware password written once (the system's servers all, an app's own ones only when registered), the password those devices registered with.
+- **Bound**: once registered (the value carries the key) the password is bound to the server: `POST /api/settings` refuses another `<key>_password` until the address names another server (send the address first); `/api/apps/config` keeps the old one while the address names the same server and reports `bound` keys; the pages show it read-only.
+- **No password: plain HTTP**, never the encrypted channel (simple development: an app's own server). Plain requests to a configured server carry `X-MiniScheme-Device: <MAC>` (the simulator: its `SIM-...` id) so the server can tell devices apart, or ignore it. An app server without a password and `<key>_relay = 1` is reached through the system converter (`[app] https_proxy`, else `proxy`) as `<converter>/relay?url=<url>`, encrypted when the device is registered there; the converter passes the device id on. A server with a password only uses its own converter (no extra hop).
+- **Test**: `POST /api/channel/test` (`url=`, `password=`) tries the server, registering nothing (`/channel/auth` with `"check": true`, proxy 1.0.46+): `ok` (registered there with it), `new` (unknown there: saving registers it), `password`, `no_channel`, `unreachable`, `error`; no password: `plain` when `<server>/health` answers. The settings page's 测试连接 buttons show it; saving stays possible.
+- The firmware registers itself. Its id is the WiFi MAC (12 uppercase hex digits); its hash key for a server is `HKDF-SHA256(salt = MAC, ikm = that server's app service password, info = "msc1_hw_hash")`, computed on the device (the password is never sent). The first request to a server without a key posts `{"mac", "hardware_hash_key"}` to `<server>/channel/auth`: a new device gets `master_key_2 = HKDF(hardware hash key, master_key_1, MAC)`; a known one (e.g. after a factory reset) gets a challenge, answers `HMAC-SHA256(hash key, challenge)` and gets its key back.
 - One key per server, stored in the value that names the server, in the file where that value lives: `[app] proxy = <key>@http://host:8087` in config.ini (also `https_proxy`, `[server] proxy_url`, `converter_url`), or an app's own `proxy_url` / `proxy` / `converter_url` in its config.ini (its https:// data goes to its `converter_url` when set). `config-get` returns the address without the key; the settings page never shows it. Each app can use its own server.
-- Routing (`mini_fetch_open`): a URL goes through the channel of its own server (scheme://host:port) when the device is registered there; an `https://` URL goes to the https converter (`https_proxy`, else `proxy`), encrypted or as `<it>/fetch?url=`. No hardware password, a server without the channel (403 "disabled" / 404) or a failed registration: plain HTTP; `/api/settings` (`channel`) and the settings page show each server's state and the reason. The old `[channel]` section is ignored.
+- Routing (`mini_fetch_open`): a URL goes through the channel of its own server (scheme://host:port) when the device is registered there; an `https://` URL goes to the https converter (`https_proxy`, else `proxy`), encrypted or as `<it>/fetch?url=`. No app service password, a server without the channel (403 "disabled" / 404) or a failed registration: plain HTTP; `/api/settings` (`channel`) and the settings page show each server's state and the reason. The old `[channel]` section is ignored.
 - A registered device is never re-keyed: registering again only returns its key when the password (its hash key) matches; otherwise 403. A key the server refuses is dropped and the device registers again once.
 - Each request: 16 random nonce bytes; `HKDF-SHA256(salt = nonce, ikm = device key, info = "msc1 request keys")` gives the request and response keys (used once), AES-256-GCM with a zero IV.
 - Request: `"MSC1" | u8 id length | id | nonce | u32 n | ciphertext | tag`; plaintext `u32 time | method | url | body`. Response: records of at most 1024 bytes.
@@ -188,7 +192,37 @@ cd repos/minischeme-proxy && python app_proxy.py --mode local --port 8087 && pyt
 
 # WebREPL with the local server (proxy built in)
 cd repos/minischeme-webrepl && python server.py --port 8087 && python -m pytest tests
+
+# the simulator from the command line (headless browser): run code and apps, press KEY 18, screenshot
+cd repos/minischeme-webrepl && python tools/sim.py --app calendar --press short --wait 2 --shot month.png
 ```
+
+### Command-line simulator (`tools/sim.py`, minischeme-webrepl)
+
+For agents and scripts: the real WebREPL page (same WASM VM, apps, local proxy, display
+and button code as in the browser) in a headless Edge / Chrome / Chromium, driven from the
+command line. It starts its own `server.py` on a free port (or `--url` a running one); the
+simulator's storage (installed apps, `config.ini`) persists in `~/.minischeme-sim`
+(`--profile DIR`, `--fresh` for an empty one). Commands run in the order given:
+
+```bash
+cd repos/minischeme-webrepl
+python tools/sim.py --eval "(+ 1 2)" --eval "(api-version)"              # prints 3, "1.6.0"
+python tools/sim.py --app weather --wait 5 --shot weather.png            # a bundled app (apps/<id>.msbc)
+python tools/sim.py --app ../minischeme-apps/apps/calendar.msbc --press short --wait 2 --shot month.png
+python tools/sim.py --app my_app.scm --wait 3 --shot my.png --log        # Scheme source, compiled in the page
+python tools/sim.py --config app.carousel=0 --app calendar               # (config-set! "app" "carousel" "0")
+python tools/sim.py --js "LOCAL_SERVER_BASE"                             # any JavaScript in the page
+printf 'eval (* 6 7)\nshot a.png\nquit\n' | python tools/sim.py --repl  # one command per line
+```
+
+`--press short|long|mid|hold|<seconds>` is KEY 18 (0.15 / 1.2 / 4 / 8.5 s), `--wait S` lets
+the device run (feeds, carousel, clock), `--shot` saves the 320x480 (or 480x320) LCD as PNG,
+`--log` prints the WebREPL terminal lines since the last `--log`. An `--eval` error or a
+missing app exits with status 1. `--show` opens a visible window. Data requests go through
+the started server like the web page's (its `/api/fetch`), carrying the simulator's
+`SIM-...` id in `X-MiniScheme-Device`.
+
 
 ### Rules for agents
 1. All code, identifiers, comments and commit messages in English (conventional commits).

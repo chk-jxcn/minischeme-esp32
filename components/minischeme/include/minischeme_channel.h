@@ -102,14 +102,27 @@ typedef enum { MINI_CHAN_PENDING, MINI_CHAN_READY, MINI_CHAN_PLAIN, MINI_CHAN_FA
 /** @brief Called from the fetching task with a key to keep. */
 typedef void (*MiniChanSaver)(const char *origin, const char *key_hex);
 
-/** @brief The device id and hardware password ("" none); servers not ready
- *         are tried again. */
-void mini_chan_set_device(const char *id, const char *password);
+/** @brief The device id (its WiFi MAC); servers not ready are tried again. */
+void mini_chan_set_device(const char *id);
 /** @brief The server list is rebuilt from config values between begin and
  *         end: a server keeps its state (and a key it registered) while a
- *         value names it; one no value names is dropped. */
+ *         value names it; one no value names is dropped. password: the app
+ *         service password of the value (its <key>_password); the first
+ *         value naming a server with one gives the hash key it registers
+ *         with. Without a password a server is used over plain HTTP, with
+ *         the device id in X-MiniScheme-Device; relay (an app server with
+ *         <key>_relay = 1): its requests go through the system converter
+ *         instead (<converter>/relay?url=, encrypted when that one is). */
 void mini_chan_servers_begin(void);
-void mini_chan_server_add(const char *value);
+void mini_chan_server_add(const char *value, const char *password, bool relay);
+/** @brief The system converter app servers are relayed through (a config value). */
+void mini_chan_set_relay(const char *value);
+/** @brief Tests a server and an app service password, registering nothing
+ *         (the settings page's test button): "ok" (the device is registered
+ *         there with it), "new" (unknown there: saving registers it),
+ *         "password", "no_channel", "unreachable", "error"; no password:
+ *         "plain" when <server>/health answers. detail: the reason. Blocks. */
+const char *mini_chan_test(const char *url, const char *password, int timeout_ms, char *detail, size_t cap);
 void mini_chan_servers_end(void);
 /** @brief The converter for https:// URLs (a config value, key allowed). */
 void mini_chan_set_https(const char *value);

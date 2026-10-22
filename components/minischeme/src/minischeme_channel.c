@@ -238,7 +238,9 @@ void mini_chan_origin(const char *url, char *out, size_t cap) {
 typedef struct {
     char origin[96];
     uint8_t key[32];
-    bool used, seen, has_key;
+    uint8_t hash[32];    /* from this server's app service password (has_hash) */
+    bool used, seen, has_key, has_hash;
+    bool relay;          /* no password: reached through the system converter's /relay */
     bool from_config;    /* this round: a config value carried the key */
     bool plain_entry;    /* this round: a value named the server without a key */
     bool retried;        /* registered again once after the server refused the key */
@@ -250,9 +252,8 @@ typedef struct {
 
 static ChanServer s_srv[CHAN_SERVERS];
 static char s_dev_id[MINI_CHAN_ID_MAX + 1];
-static uint8_t s_hash_key[32];
-static bool s_has_pass;
 static char s_https[128];
+static char s_relay[128];   /* the system converter app servers are relayed through */
 static MiniChanSaver s_saver;
 static SemaphoreHandle_t s_lock, s_reg_lock;   /* the table; one registration at a time */
 static int s_step = MINI_CHAN_STEP_NONE;        /* what a fetch waits for now (mini_chan_step) */
@@ -314,18 +315,10 @@ static void to_hex(const uint8_t *b, size_t n, char *out) {
     out[2 * n] = '\0';
 }
 
-void mini_chan_set_device(const char *id, const char *password) {
+void mini_chan_set_device(const char *id) {
     chan_lock();
     if (!s_reg_lock) s_reg_lock = xSemaphoreCreateMutex();
     snprintf(s_dev_id, sizeof(s_dev_id), "%s", id ? id : "");
-    s_has_pass = password && password[0] && s_dev_id[0];
-    if (s_has_pass) {
-        static const char info[] = "msc1_hw_hash";
-        mini_hkdf_sha256((const uint8_t *)s_dev_id, strlen(s_dev_id), (const uint8_t *)password, strlen(password),
-                         (const uint8_t *)info, sizeof(info) - 1, s_hash_key, sizeof(s_hash_key));
-    } else {
-        mini_wipe(s_hash_key, sizeof(s_hash_key));
-    }
     for (int i = 0; i < CHAN_SERVERS; i++) {
         if (s_srv[i].used && s_srv[i].state != MINI_CHAN_READY) {
             set_state(&s_srv[i], MINI_CHAN_PENDING, "", "");
@@ -341,17 +334,32 @@ void mini_chan_servers_begin(void) {
     chan_lock();
     for (int i = 0; i < CHAN_SERVERS; i++) {
         s_srv[i].seen = s_srv[i].from_config = s_srv[i].plain_entry = false;
+        s_srv[i].has_hash = false;   /* named again with its password this round */
+        s_srv[i].relay = false;
     }
     chan_unlock();
 }
 
-void mini_chan_server_add(const char *value) {
+void mini_chan_server_add(const char *value, const char *password, bool relay) {
     char origin[96];
     mini_chan_origin(mini_chan_url_of(value), origin, sizeof(origin));
     if (strncmp(origin, "http://", 7) != 0 && strncmp(origin, "tcp://", 6) != 0) return;
     if (origin[strlen(origin) - 1] == '/') return;   /* no host */
-    uint8_t key[32];
+    uint8_t key[32], hash[32];
     bool keyed = mini_chan_key_of(value, key);
+    bool hashed = false;
+    if (password && password[0]) {
+        static const char info[] = "msc1_hw_hash";
+        char id[MINI_CHAN_ID_MAX + 1];
+        chan_lock();
+        snprintf(id, sizeof(id), "%s", s_dev_id);
+        chan_unlock();
+        if (id[0]) {
+            mini_hkdf_sha256((const uint8_t *)id, strlen(id), (const uint8_t *)password, strlen(password),
+                             (const uint8_t *)info, sizeof(info) - 1, hash, sizeof(hash));
+            hashed = true;
+        }
+    }
     chan_lock();
     ChanServer *s = find_server(origin);
     for (int i = 0; !s && i < CHAN_SERVERS; i++) {
@@ -365,6 +373,16 @@ void mini_chan_server_add(const char *value) {
     }
     if (s) {
         s->seen = true;
+        if (relay && !hashed) s->relay = true;
+        if (hashed && !s->has_hash) {     /* the first value naming the server with a password */
+            bool changed = memcmp(s->hash, hash, sizeof(hash)) != 0;
+            memcpy(s->hash, hash, sizeof(hash));
+            s->has_hash = true;
+            if (changed && s->state != MINI_CHAN_READY) {   /* a new password: register again */
+                set_state(s, MINI_CHAN_PENDING, "", "");
+                s->retry_us = 0;
+            }
+        }
         if (keyed && !s->from_config) {   /* the file's key comes first */
             bool same = s->has_key && memcmp(s->key, key, sizeof(key)) == 0;
             memcpy(s->key, key, sizeof(key));
@@ -376,6 +394,7 @@ void mini_chan_server_add(const char *value) {
     }
     chan_unlock();
     mini_wipe(key, sizeof(key));
+    mini_wipe(hash, sizeof(hash));
 }
 
 void mini_chan_servers_end(void) {
@@ -400,6 +419,14 @@ void mini_chan_servers_end(void) {
         if (s_saver) s_saver(save[i], hex[i]);
         mini_wipe(hex[i], sizeof(hex[i]));
     }
+}
+
+void mini_chan_set_relay(const char *value) {
+    chan_lock();
+    snprintf(s_relay, sizeof(s_relay), "%s", mini_chan_url_of(value));
+    size_t n = strlen(s_relay);
+    while (n > 0 && s_relay[n - 1] == '/') s_relay[--n] = '\0';
+    chan_unlock();
 }
 
 void mini_chan_set_https(const char *value) {
@@ -464,7 +491,7 @@ static size_t parse_hex(const char *hex, uint8_t *out, size_t cap) {
 
 typedef struct {
     MiniChanState state;
-    const char *reason;
+    const char *reason;   /* also "new": a check found the device unknown there */
     char error[80];
     int64_t retry_us;
     uint8_t key[32];
@@ -497,8 +524,10 @@ typedef struct {
     uint8_t ch[64], mac[32];
 } RegBufs;
 
+/* check: the server registers nothing (a password test; servers before
+ * 1.0.46 ignore it and register a new device) */
 static void reg_exchange(const char *origin, const char *id, const uint8_t hash_key[32], int timeout_ms,
-                         RegResult *r) {
+                         bool check, RegResult *r) {
     RegBufs *b = (RegBufs *)calloc(1, sizeof(RegBufs));
     if (!b) {
         reg_unreachable(r);
@@ -507,7 +536,8 @@ static void reg_exchange(const char *origin, const char *id, const uint8_t hash_
     }
     snprintf(b->url, sizeof(b->url), "%s/channel/auth", origin);
     to_hex(hash_key, 32, b->hex);
-    snprintf(b->body, sizeof(b->body), "{\"mac\":\"%s\",\"hardware_hash_key\":\"%s\"}", id, b->hex);
+    snprintf(b->body, sizeof(b->body), "{\"mac\":\"%s\",\"hardware_hash_key\":\"%s\"%s}", id, b->hex,
+             check ? ",\"check\":true" : "");
     int st = post_json(b->url, b->body, b->resp, sizeof(b->resp), timeout_ms);
     if (st < 0 || st >= 500) {
         reg_unreachable(r);
@@ -518,6 +548,9 @@ static void reg_exchange(const char *origin, const char *id, const uint8_t hash_
     } else if (st == 200 && json_str(b->resp, "status", b->status, sizeof(b->status)) &&
                strcmp(b->status, "registered") == 0) {
         reg_key(r, b->resp);
+    } else if (check && st == 200 && strcmp(b->status, "new") == 0) {
+        r->state = MINI_CHAN_PENDING;
+        r->reason = "new";
     } else if (st == 200 && strcmp(b->status, "challenge_required") == 0 &&
                json_str(b->resp, "challenge", b->challenge, sizeof(b->challenge))) {
         /* registered before (a factory reset): prove the hash key, get the key back */
@@ -534,7 +567,7 @@ static void reg_exchange(const char *origin, const char *id, const uint8_t hash_
             r->state = MINI_CHAN_FAILED;
             r->reason = st == 403 ? "password" : "error";
             snprintf(r->error, sizeof(r->error), st == 403
-                     ? "the hardware password differs from the one this device registered with"
+                     ? "the app service password differs from the one this device registered with"
                      : "registration: HTTP %d", st);
         }
     } else {
@@ -566,22 +599,23 @@ static bool chan_ready(const char *origin, int timeout_ms, uint8_t key[32]) {
     ready = s && s->state == MINI_CHAN_READY;   /* another task registered meanwhile */
     due = s && s->state == MINI_CHAN_PENDING && esp_timer_get_time() >= s->retry_us;
     if (ready) memcpy(key, s->key, 32);
-    bool has_pass = s_has_pass;
-    memcpy(hash_key, s_hash_key, sizeof(hash_key));
+    /* the server's own app service password; without one: plain HTTP */
+    bool has_pass = s && s->has_hash;
+    if (has_pass) memcpy(hash_key, s->hash, sizeof(hash_key));
     snprintf(id, sizeof(id), "%s", s_dev_id);
     chan_unlock();
     if (due) {
         if (!has_pass) {
             r.state = MINI_CHAN_PLAIN;
             r.reason = "no_password";
-            snprintf(r.error, sizeof(r.error), "no hardware password ([server] hardware_password): plain HTTP");
+            snprintf(r.error, sizeof(r.error), "no app service password for this server: plain HTTP");
         } else if (strncmp(origin, "tcp://", 6) == 0) {
             r.state = MINI_CHAN_FAILED;
             r.reason = "tcp";
             snprintf(r.error, sizeof(r.error), "a tcp:// converter needs a key: register over http:// first");
         } else {
             set_step(MINI_CHAN_STEP_REGISTER, origin);
-            reg_exchange(origin, id, hash_key, timeout_ms < 4000 ? 4000 : timeout_ms, &r);
+            reg_exchange(origin, id, hash_key, timeout_ms < 4000 ? 4000 : timeout_ms, false, &r);
             end_step(MINI_CHAN_STEP_REGISTER);
         }
         chan_lock();
@@ -610,6 +644,50 @@ static bool chan_ready(const char *origin, int timeout_ms, uint8_t key[32]) {
     mini_wipe(hash_key, sizeof(hash_key));
     mini_wipe(&r, sizeof(r));
     return ready;
+}
+
+const char *mini_chan_test(const char *url, const char *password, int timeout_ms, char *detail, size_t cap) {
+    char origin[96], id[MINI_CHAN_ID_MAX + 1];
+    detail[0] = '\0';
+    mini_chan_origin(mini_chan_url_of(url), origin, sizeof(origin));
+    if (strncmp(origin, "http://", 7) != 0 || origin[strlen(origin) - 1] == '/') {
+        snprintf(detail, cap, "an http://host:port address is needed");
+        return "error";
+    }
+    chan_lock();
+    snprintf(id, sizeof(id), "%s", s_dev_id);
+    chan_unlock();
+    if (!password || !password[0]) {   /* plain HTTP: is the server there? */
+        char health[112];
+        snprintf(health, sizeof(health), "%s/health", origin);
+        esp_http_client_config_t cfg = { .url = health, .timeout_ms = timeout_ms, .disable_auto_redirect = true };
+        esp_http_client_handle_t h = esp_http_client_init(&cfg);
+        if (!h) return "error";
+        esp_http_client_set_header(h, "X-MiniScheme-Device", id);
+        int st = esp_http_client_perform(h) == ESP_OK ? esp_http_client_get_status_code(h) : -1;
+        esp_http_client_cleanup(h);
+        if (st < 0) {
+            snprintf(detail, cap, "cannot connect to %s", origin);
+            return "unreachable";
+        }
+        snprintf(detail, cap, "%s answered HTTP %d (plain HTTP, no password)", origin, st);
+        return "plain";
+    }
+    uint8_t hash[32];
+    static const char info[] = "msc1_hw_hash";
+    mini_hkdf_sha256((const uint8_t *)id, strlen(id), (const uint8_t *)password, strlen(password),
+                     (const uint8_t *)info, sizeof(info) - 1, hash, sizeof(hash));
+    RegResult r;
+    memset(&r, 0, sizeof(r));
+    reg_exchange(origin, id, hash, timeout_ms, true, &r);
+    mini_wipe(hash, sizeof(hash));
+    const char *result;
+    if (r.state == MINI_CHAN_READY) result = "ok";
+    else if (r.reason && strcmp(r.reason, "new") == 0) result = "new";
+    else result = r.reason && r.reason[0] ? r.reason : "error";
+    snprintf(detail, cap, "%s", r.error);
+    mini_wipe(&r, sizeof(r));
+    return result;
 }
 
 /* The server refused the device's key: register again once, then give up */
@@ -778,13 +856,15 @@ static bool chan_http_send(MiniFetch *f, const char *server, const uint8_t *msg,
     return true;
 }
 
-/* <base>/fetch?url=<url, percent-encoded> (malloc'd) */
-static char *fetch_url(const char *base, const char *url) {
+/* <base>/<path>?url=<url, percent-encoded> (malloc'd): path "fetch" (an
+ * https:// URL the converter fetches) or "relay" (an app server reached
+ * through the system converter, which passes the device id on) */
+static char *fetch_url(const char *base, const char *path, const char *url) {
     static const char hex[] = "0123456789ABCDEF";
-    size_t cap = strlen(base) + 12 + strlen(url) * 3 + 1;
+    size_t cap = strlen(base) + strlen(path) + 8 + strlen(url) * 3 + 1;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
-    size_t n = (size_t)snprintf(out, cap, "%s/fetch?url=", base);
+    size_t n = (size_t)snprintf(out, cap, "%s/%s?url=", base, path);
     for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
         bool plain = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
                      *p == '-' || *p == '_' || *p == '.' || *p == '~';
@@ -803,7 +883,7 @@ static char *fetch_url(const char *base, const char *url) {
 MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *status, int64_t *length,
                            char *err, size_t err_cap) {
     MiniFetch *f = (MiniFetch *)calloc(1, sizeof(MiniFetch));
-    char *plain_url = NULL;
+    char *plain_url = NULL, *relay_url = NULL;
     if (!f) {
         snprintf(err, err_cap, "out of memory");
         return NULL;
@@ -811,21 +891,38 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     f->sock = -1;
     *status = 0;
     *length = -1;
-    /* the server: an https:// URL's converter, else the URL's own */
+    /* the server: an https:// URL's converter; an app server without a
+     * password that asks for it, the system converter (/relay); else the
+     * URL's own. A configured server gets the device id on plain HTTP. */
     bool https = strncmp(url, "https://", 8) == 0;
     char base[128], origin[96];
+    bool relay = false, known = false;
     chan_lock();
     snprintf(base, sizeof(base), "%s", s_https);
+    if (!https) {
+        mini_chan_origin(url, origin, sizeof(origin));
+        ChanServer *own = find_server(origin);
+        known = own != NULL;
+        relay = own && own->relay && !own->has_hash && s_relay[0];
+        if (relay) snprintf(base, sizeof(base), "%s", s_relay);
+    }
     chan_unlock();
     if (https && !base[0]) {
         snprintf(err, err_cap, "an https:// URL needs a protocol converter: config.ini [app] https_proxy or proxy");
         goto fail;
     }
-    mini_chan_origin(https ? base : url, origin, sizeof(origin));
+    if (relay) {
+        relay_url = fetch_url(base, "relay", url);
+        if (!relay_url) {
+            snprintf(err, err_cap, "out of memory");
+            goto fail;
+        }
+    }
+    mini_chan_origin(https || relay ? base : url, origin, sizeof(origin));
     uint8_t key[32];
     if (!chan_ready(origin, timeout_ms, key)) {
         if (https) {
-            plain_url = fetch_url(base, url);
+            plain_url = fetch_url(base, "fetch", url);
             if (!plain_url) {
                 snprintf(err, err_cap, "out of memory");
                 goto fail;
@@ -837,8 +934,13 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
             .buffer_size = big ? 1024 : 512, .buffer_size_tx = big ? 512 : 256,
             .disable_auto_redirect = !(flags & MINI_FETCH_REDIRECTS), .max_redirection_count = 3,
         };
+        if (relay) cfg.url = relay_url;
         f->h = esp_http_client_init(&cfg);
         free(plain_url);
+        plain_url = NULL;
+        if (f->h && (known || relay) && s_dev_id[0]) {   /* the server tells its devices apart (it may ignore it) */
+            esp_http_client_set_header(f->h, "X-MiniScheme-Device", s_dev_id);
+        }
         if (!f->h || esp_http_client_open(f->h, 0) != ESP_OK) {
             snprintf(err, err_cap, f->h ? "cannot connect" : "out of memory");
             goto fail;
@@ -846,6 +948,7 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
         int64_t n = esp_http_client_fetch_headers(f->h);
         *status = esp_http_client_get_status_code(f->h);
         *length = n > 0 ? n : -1;
+        free(relay_url);
         return f;
     }
 
@@ -872,8 +975,10 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     uint8_t nonce[16];
     esp_fill_random(nonce, sizeof(nonce));
     size_t len = 0;
-    uint8_t *msg = f->r ? mini_chan_request(key, s_dev_id, nonce, (uint32_t)now, "GET", url, NULL, 0,
-                                            f->r, &len) : NULL;
+    uint8_t *msg = f->r ? mini_chan_request(key, s_dev_id, nonce, (uint32_t)now, "GET", relay ? relay_url : url,
+                                            NULL, 0, f->r, &len) : NULL;
+    free(relay_url);
+    relay_url = NULL;
     mini_wipe(key, sizeof(key));
     if (!msg) {
         free(f->r);
@@ -917,6 +1022,8 @@ MiniFetch *mini_fetch_open(const char *url, int timeout_ms, int flags, int *stat
     *length = f->r->total == MINI_CHAN_LENGTH_UNKNOWN ? -1 : (int64_t)f->r->total;
     return f;
 fail:
+    free(plain_url);
+    free(relay_url);
     mini_fetch_close(f);
     return NULL;
 }

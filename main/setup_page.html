@@ -113,14 +113,20 @@ button.small{padding:2px 10px;margin:0 0 0 8px;font-size:13px}
 <input id="device" maxlength="23">
 <label for="boot">启动应用（重启后生效）</label>
 <select id="boot"></select>
-<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取；单个应用可在自己的 config.ini 里用 proxy_url 指定别的服务器）</label>
-<input id="proxy" placeholder="http://电脑IP:8087">
+<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取；单个应用可在自己的配置里用 proxy_url 指定别的服务器）</label>
+<input id="proxy" placeholder="http://电脑IP:8087" oninput="serverPwLock()">
+<label for="proxypw">应用代理的应用服务密码（明文显示；设备用它在这台服务器上注册加密通道，也是该服务器用户门户的登录密码。注册后与服务器绑定：改了服务器地址才能改密码）</label>
+<input id="proxypw" autocomplete="off" spellcheck="false" maxlength="64">
+<button class="plain small" onclick="testServer('proxy', 'proxypw', 'proxytest')">测试连接</button> <span id="proxytest" class="desc"></span>
 <label for="hproxy">HTTPS 转换地址（应用请求 https:// 数据时由它代取；留空用应用代理）</label>
-<input id="hproxy" placeholder="http://电脑IP:8087">
+<input id="hproxy" placeholder="http://电脑IP:8087" oninput="serverPwLock()">
+<label for="hproxypw">HTTPS 转换地址的应用服务密码（与应用代理是同一台服务器时可留空）</label>
+<input id="hproxypw" autocomplete="off" spellcheck="false" maxlength="64">
+<button class="plain small" onclick="testServer('hproxy', 'hproxypw', 'hproxytest')">测试连接</button> <span id="hproxytest" class="desc"></span>
 <label for="murl">应用市场地址（留空：应用代理的 /market）</label>
 <input id="murl" placeholder="http://电脑IP:8087/market">
 <div class="desc" id="chstate"></div>
-<div class="desc">加密通道：设备第一次连接服务器时用硬件密码自动注册（设备 ID 为 WiFi MAC，密码不发给服务器），每台服务器一个密钥，保存在该服务器地址所在的配置项里。服务器没有开启加密通道或没有设置硬件密码时使用明文连接。</div>
+<div class="desc">加密通道：设备第一次连接服务器时用该服务器的应用服务密码自动注册（设备 ID 为 WiFi MAC，密码不发给服务器），每台服务器一个密钥，保存在该服务器地址所在的配置项里。服务器没有开启加密通道或没有设置应用服务密码时使用明文连接。硬件密码只保护本网页和 HTTP 接口，可以随时修改。</div>
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
 <label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
 <label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
@@ -403,6 +409,9 @@ async function refresh() {
   keep('device', state.device_name);
   keep('proxy', state.proxy);
   keep('hproxy', state.https_proxy);
+  keep('proxypw', state.proxy_password);
+  keep('hproxypw', state.https_proxy_password);
+  serverPwLock();
   keep('murl', state.market_url);
   $('chstate').innerHTML = channelText(state);
   if (document.activeElement !== $('webapp')) $('webapp').checked = !/^(0|false|no|off)$/i.test(state.web_in_app || '');
@@ -626,7 +635,7 @@ async function openConfig(key, quiet) {
   try {
     const r = await api('/api/apps/config?key=' + encodeURIComponent(key));
     if (r.success === false) throw new Error(r.error || '读取失败');
-    cfgOpen[key] = {meta: r.meta || '', ini: r.ini, exists: !!r.exists, path: r.path};
+    cfgOpen[key] = {meta: r.meta || '', ini: r.ini, exists: !!r.exists, path: r.path, bound: r.bound || []};
     renderConfig(key);
   } catch (e) {
     box.innerHTML = '';
@@ -640,17 +649,51 @@ function defaultIni(meta) {
   return '; settings of this app\n' + (at >= 0 ? meta.slice(at) : '[config]\n');
 }
 
+/* An app's server addresses: each gets its app service password below it */
+const APP_SERVER_KEYS = ['proxy_url', 'proxy', 'converter_url'];
+
+function serverPwHtml(p, key, values) {
+  const id = `${p}_${key}_password`;
+  return `<label for="${id}">${esc(key)} 的应用服务密码（明文；设备用它在这台服务器注册加密通道，注册后与服务器绑定。留空：不加密，用明文 HTTP，请求头带设备 ID）</label>
+    <input id="${id}" value="${esc(values[key + '_password'] || '')}" autocomplete="off" spellcheck="false" maxlength="64">
+    <button class="plain small" onclick="testServer('${p}_${key}', '${id}', '${p}_${key}_test')">测试连接</button> <span id="${p}_${key}_test" class="desc"></span>
+    <label><input type="checkbox" id="${p}_${key}_relay"${values[key + '_relay'] === '1' ? ' checked' : ''}>
+      没有密码时经系统协议转换器转发（设备 → 系统设置里的转换器（加密）→ 这台服务器）；有密码时只用这台服务器自己的转换器</label>`;
+}
+
+/* bound (registered) and the address unchanged: the password is read-only */
+function appPwLock(key) {
+  const c = cfgOpen[key], p = 'c' + cfgId(key);
+  if (!c) return;
+  const values = iniValues(c.exists ? c.ini : defaultIni(c.meta));
+  for (const k of APP_SERVER_KEYS) {
+    const srv = $(`${p}_${k}`), pw = $(`${p}_${k}_password`);
+    if (!srv || !pw) continue;
+    const locked = c.bound.includes(k) && srv.value.trim() === (values[k] || '');
+    pw.readOnly = locked;
+    pw.style.opacity = locked ? '0.7' : '';
+    pw.title = locked ? '已在这台服务器注册：密码与服务器绑定，改了服务器地址才能修改' : '';
+    const relay = $(`${p}_${k}_relay`);
+    if (relay) relay.disabled = !!pw.value.trim();   /* a password: its own converter only */
+  }
+}
+
 function renderConfig(key) {
   const c = cfgOpen[key], box = $('cf-' + cfgId(key)), a = appByKey(key);
   if (!c || !box || !a) return;
   const fields = appFields(c.meta), values = iniValues(c.exists ? c.ini : defaultIni(c.meta)), p = 'c' + cfgId(key);
-  box.innerHTML = `<div class="form">${fields.length ? fields.map(f => fieldHtml(p, f, f.key in values ? values[f.key] : f.def)).join('')
+  box.innerHTML = `<div class="form">${fields.length ? fields.map(f => fieldHtml(p, f, f.key in values ? values[f.key] : f.def) +
+                                                    (APP_SERVER_KEYS.includes(f.key) ? serverPwHtml(p, f.key, values) : '')).join('')
                                                     : '<div class="desc">这个应用没有可配置的项。</div>'}
     ${fields.length ? `<button onclick="saveConfig('${esc(key)}')">保存</button>` : ''}
     <button class="plain" onclick="defaultConfig('${esc(key)}')">恢复默认配置</button>
     <button class="plain" onclick="rawConfig('${esc(key)}')">编辑文件</button>
     <div id="raw-${cfgId(key)}"></div>
     <div class="help">${c.exists ? '保存到 ' : '还没有配置文件，显示的是默认值；保存后写入 '}${esc(rel(c.path))}${a.running ? '，重启应用后生效' : '，应用下次启动时生效'}</div></div>`;
+  for (const k of APP_SERVER_KEYS) {
+    for (const el of [$(`${p}_${k}`), $(`${p}_${k}_password`)]) if (el) el.addEventListener('input', () => appPwLock(key));
+  }
+  appPwLock(key);
 }
 
 async function writeConfig(key, text) {
@@ -671,6 +714,17 @@ async function saveConfig(key) {
     const v = fieldValue(p, f);
     if (/[;#\n]/.test(v)) return say(`${f.label}：不能含有 ; 或 #`, 'warn');
     if (values[f.key] !== v) text = iniSet(text, 'config', f.key, v);
+    const pw = APP_SERVER_KEYS.includes(f.key) ? $(`${p}_${f.key}_password`) : null;
+    if (pw && !pw.readOnly) {
+      const pv = pw.value.trim();
+      if (/[;#\s]/.test(pv)) return say(`${f.key} 的应用服务密码：不能含有空格、; 或 #`, 'warn');
+      if ((values[f.key + '_password'] || '') !== pv) text = iniSet(text, 'config', f.key + '_password', pv);
+    }
+    const relay = APP_SERVER_KEYS.includes(f.key) ? $(`${p}_${f.key}_relay`) : null;
+    if (relay) {
+      const rv = relay.checked ? '1' : '0';
+      if ((values[f.key + '_relay'] || '0') !== rv) text = iniSet(text, 'config', f.key + '_relay', rv);
+    }
   }
   try {
     await writeConfig(key, text);
@@ -748,14 +802,58 @@ function buttonMs(id) {
   return v;
 }
 
+/* Tests a server with an app service password: the device tries it and
+ * registers nothing; whatever the outcome, saving stays possible */
+const TEST_TEXT = {
+  ok: ['ok', '密码正确，设备已在这台服务器注册'],
+  new: ['ok', '服务器可连接；设备还没有在这台服务器注册，保存后用这个密码注册（以后改不了，请记下）'],
+  plain: ['ok', '服务器可连接（没有设置密码：明文 HTTP，请求头带设备 ID）'],
+  password: ['bad', '密码不对：设备在这台服务器注册时用的是另一个密码'],
+  no_channel: ['warn', '服务器没有开启加密通道，将使用明文 HTTP'],
+  unreachable: ['bad', '无法连接服务器'],
+  refused: ['bad', '服务器拒绝了注册'],
+  error: ['bad', '测试失败']
+};
+async function testServer(srvId, pwId, outId) {
+  const out = $(outId);
+  let url = $(srvId).value.trim();
+  if (!url && srvId === 'hproxy') url = $('proxy').value.trim();   /* empty: the app proxy */
+  if (!url) { out.textContent = '请先填写服务器地址'; out.className = 'desc warn'; return; }
+  out.textContent = '测试中…';
+  out.className = 'desc';
+  try {
+    const r = await api('/api/channel/test', {method: 'POST', body: form({url, password: $(pwId).value.trim()}),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'}});
+    if (r.success === false) throw new Error(r.error || '测试失败');
+    const [kind, text] = TEST_TEXT[r.result] || ['bad', r.result];
+    out.textContent = (kind === 'ok' ? '✔ ' : kind === 'warn' ? '⚠ ' : '✘ ') + text + (r.detail && kind !== 'ok' ? `（${r.detail}）` : '') +
+                      (kind === 'ok' ? '' : '。仍可保存');
+    out.className = 'desc ' + kind;
+  } catch (e) {
+    out.textContent = '✘ ' + e.message + '。仍可保存';
+    out.className = 'desc bad';
+  }
+}
+
+/* A server's app service password is bound to it once the device registered
+ * there: read-only until the address names another server */
+function serverPwLock() {
+  for (const [srv, pw, key] of [['proxy', 'proxypw', 'proxy'], ['hproxy', 'hproxypw', 'https_proxy']]) {
+    const locked = !!state[key + '_bound'] && $(srv).value.trim() === (state[key] || '');
+    $(pw).readOnly = locked;
+    $(pw).style.opacity = locked ? '0.7' : '';
+    $(pw).title = locked ? '已在这台服务器注册：密码与服务器绑定，改了服务器地址才能修改' : '';
+  }
+}
+
 /* Each server the device uses: registered there (encrypted), plain, or why not */
 function channelText(state) {
   const list = state.channel || [];
   if (!list.length) return '没有设置服务器。';
   const why = {
-    no_password: '没有设置硬件密码（[server] hardware_password），使用明文连接',
+    no_password: '没有设置这台服务器的应用服务密码，使用明文连接',
     no_channel: '服务器没有开启加密通道，使用明文连接',
-    password: '硬件密码与这台设备在该服务器上注册时用的不一致',
+    password: '应用服务密码与这台设备在该服务器上注册时用的不一致',
     unreachable: '连不上服务器，稍后自动重试',
     refused: '服务器不接受这台设备的密钥',
     tcp: 'tcp:// 地址需要先经 http:// 注册'
@@ -776,8 +874,15 @@ async function saveCommon(andRestart) {
     const bloff = String(Math.max(-10, Math.min(10, parseInt($('bloff').value || '0', 10) || 0)));
     const blmin = String(Math.max(0, Math.min(255, parseInt($('blmin').value || '30', 10) || 30)));
     const blmax = String(Math.max(0, Math.min(255, parseInt($('blmax').value || '255', 10) || 255)));
+    /* each address before its password: the firmware refuses a bound password
+     * unless the address already names another server */
+    const servers = {'app.proxy': $('proxy').value.trim()};
+    if (!$('proxypw').readOnly) servers['app.proxy_password'] = $('proxypw').value.trim();
+    servers['app.https_proxy'] = $('hproxy').value.trim();
+    if (!$('hproxypw').readOnly) servers['app.https_proxy_password'] = $('hproxypw').value.trim();
+    for (const [k, v] of Object.entries(servers)) if (/[;#&\s]/.test(v)) throw new Error(`${k}：不能含有空格、; # &`);
     await post({'system.boot_app': $('boot').value, 'system.device_name': $('device').value.trim(),
-                'app.proxy': $('proxy').value.trim(), 'app.https_proxy': $('hproxy').value.trim(),
+                ...servers,
                 'market.market_url': $('murl').value.trim(),
                 'market.market_auto_update': $('mauto').checked ? '1' : '0',
                 'system.web_in_app': $('webapp').checked ? '1' : '0',

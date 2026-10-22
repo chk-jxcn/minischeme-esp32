@@ -259,7 +259,7 @@ settings page).
 ### Test in the WebREPL simulator
 
 ```bash
-python web_repl/server.py                 # http://localhost:8080 (WEBREPL_PORT to change)
+cd minischeme-webrepl && python server.py --port 8087    # http://localhost:8087
 ```
 
 Open the page, click "📦 App 管理", install the app from the list of built apps
@@ -269,6 +269,10 @@ answers any `http://.../app/...` URL itself by importing `tools/app_proxy.py`, s
 proxy process is needed; restart `server.py` after editing `app_proxy.py`. The "KEY
 18" button gives short and long presses; a click on the screen calls `app-touch`.
 The app manager's form edits the app's settings (see below).
+
+From the command line (agents, scripts), `tools/sim.py` in minischeme-webrepl runs the same
+page headless: `python tools/sim.py --app my_app.scm --wait 3 --press short --shot out.png`
+(see its `--help`).
 
 ---
 
@@ -332,6 +336,16 @@ Do not put secrets in the defaults: the meta trailer travels inside the image.
 
 applib itself reads `proxy` (no default: unset, the footer says where to set it), `carousel` and
 `carousel_seconds`, from the app's ini or `config.ini`.
+
+An app's own server (`proxy_url`, `converter_url`) has two more keys in its `config.ini`, edited
+on the configuration pages next to the address (apps never read them):
+
+| Key | Meaning |
+|---|---|
+| `proxy_url_password` | The app service password for that server: the device registers its encrypted channel there with it. Bound to the server once registered. Empty: plain HTTP, every request carrying `X-MiniScheme-Device` (the board's MAC, the simulator's `SIM-...` id), so a simple server of your own needs no encryption and may ignore the header. |
+| `proxy_url_relay` | `1`: without a password, requests go through the system protocol converter (`<converter>/relay?url=`, encrypted when the device is registered there); the converter passes the device id on. Ignored when the server has a password (it is its own converter). |
+
+The same pairs exist for `converter_url` (`converter_url_password`, `converter_url_relay`).
 
 Since API 1.6.0, `(config-get "key" app-id)` reads another app's `config.ini`, but only in a
 combined app and only for its `[combo] members` (any other id is an error);

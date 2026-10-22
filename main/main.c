@@ -1905,6 +1905,29 @@ static bool is_server_key(const char *key) {
     return false;
 }
 
+/* Each server value has its app service password next to it: <key>_password
+ * (proxy_password, converter_url_password, ...). The device registers with
+ * that server with it (the hardware password only guards the HTTP API);
+ * a value without one falls back to [server] hardware_password. */
+#define SERVER_PASSWORD_MAX 64
+
+/* The server key whose password key this is ("proxy" for "proxy_password"), into base */
+static bool server_password_base(const char *key, const char *const *keys, size_t nkeys, char *base, size_t cap) {
+    size_t n = strlen(key);
+    if (n <= 9 || strcmp(key + n - 9, "_password") != 0 || n - 9 >= cap) return false;
+    memcpy(base, key, n - 9);
+    base[n - 9] = '\0';
+    for (size_t i = 0; i < nkeys; i++) {
+        if (strcmp(base, keys[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* The section a system server key lives in */
+static const char *server_key_section(const char *key) {
+    return (strcmp(key, "proxy") == 0 || strcmp(key, "https_proxy") == 0) ? "app" : "server";
+}
+
 /* value for key, keeping the key the old value had for the same server */
 static const char *keep_server_key(const char *key, const char *value, char *buf, size_t cap) {
     uint8_t k[32];
@@ -1948,6 +1971,20 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
         const char *url = mini_chan_url_of(vals[i]);   /* the address, never the key */
         if (url != vals[i]) memmove(vals[i], url, strlen(url) + 1);
     }
+    /* the app service passwords of proxy and https_proxy (shown in plain
+     * text) and whether each is bound to its server (registered there) */
+    char srv_pw[2][SERVER_PASSWORD_MAX + 1];
+    bool srv_bound[2];
+    for (int i = 0; i < 2; i++) {
+        static const char *const sk[] = { "proxy", "https_proxy" };
+        char pk[32], sv[200];
+        uint8_t k[32];
+        snprintf(pk, sizeof(pk), "%s_password", sk[i]);
+        if (!mini_device_config_value(cfg, pk, srv_pw[i], sizeof(srv_pw[i]))) srv_pw[i][0] = '\0';
+        srv_bound[i] = mini_device_config_value(cfg, sk[i], sv, sizeof(sv)) && mini_chan_key_of(sv, k);
+        mini_wipe(k, sizeof(k));
+        mini_wipe(sv, sizeof(sv));
+    }
     free(cfg);
     char ssid[33], ip[16];
     int rssi;
@@ -1968,6 +2005,12 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
         n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"%s\":\"%s\"", names[i], esc);
     }
     free(vals);
+    for (int i = 0; i < 2; i++) {
+        json_escape(srv_pw[i], esc, 200);
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"%s_password\":\"%s\",\"%s_bound\":%s",
+                              i ? "https_proxy" : "proxy", esc, i ? "https_proxy" : "proxy", srv_bound[i] ? "true" : "false");
+    }
+    mini_wipe(srv_pw, sizeof(srv_pw));
     json_escape(s_settings_mode ? "settings" : s_app_path, esc, 200);
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app\":\"%s\",\"settings_from\":\"%s\"", esc,
                           s_settings_mode ? s_settings_from : "");
@@ -2062,6 +2105,35 @@ static bool is_weak_password(const char *pwd) {
     return false;
 }
 
+/* POST /api/channel/test, body "url=...&password=...": tries the server with
+ * that app service password, registering nothing (the settings page's test
+ * button; saving stays possible whatever it finds) */
+static esp_err_t http_channel_test(httpd_req_t *req) {
+    const char *err = NULL;
+    size_t len = 0;
+    if (req->content_len > 512) return http_error(req, "body too large");
+    char *body = (char *)http_read_body(req, &len, &err);
+    if (!body) return http_error(req, err);
+    char url[160] = "", pw[SERVER_PASSWORD_MAX + 1] = "";
+    for (char *field = strtok(body, "&"); field; field = strtok(NULL, "&")) {
+        char *eq = strchr(field, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        url_decode(field);
+        url_decode(eq + 1);
+        if (strcmp(field, "url") == 0) snprintf(url, sizeof(url), "%s", eq + 1);
+        else if (strcmp(field, "password") == 0) snprintf(pw, sizeof(pw), "%s", eq + 1);
+    }
+    mini_wipe(body, len);
+    free(body);
+    char detail[96], esc[200], out[320];
+    const char *result = mini_chan_test(url, pw, 6000, detail, sizeof(detail));
+    mini_wipe(pw, sizeof(pw));
+    json_escape(detail, esc, sizeof(esc));
+    snprintf(out, sizeof(out), "{\"success\":true,\"result\":\"%s\",\"detail\":\"%s\"}", result, esc);
+    return http_send_json(req, out);
+}
+
 /* POST /api/settings, body "section.key=value&...": each value written to
  * config.ini (comments kept); new WiFi, button, channel, and backlight settings apply at once */
 static esp_err_t http_settings_post(httpd_req_t *req) {
@@ -2100,6 +2172,28 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
                 return http_error(req, "weak password: must be at least 6 characters and cannot use sequential or repeated digits");
             }
         }
+        char base[32];
+        bool server_pw = server_password_base(key, SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
+                                              base, sizeof(base));
+        if (server_pw) {
+            char cur[SERVER_PASSWORD_MAX + 1] = "", sv[200] = "";
+            uint8_t k[32];
+            if (strlen(value) > SERVER_PASSWORD_MAX) {
+                free(body);
+                return http_error(req, "app service password: 64 characters at most");
+            }
+            /* registered there (its value carries the key): the password stays
+             * until the address names another server (send the address first) */
+            if (ini_file_value("/spiffs/config.ini", base, sv, sizeof(sv)) && mini_chan_key_of(sv, k) &&
+                (!ini_file_value("/spiffs/config.ini", key, cur, sizeof(cur)) || strcmp(cur, value) != 0)) {
+                mini_wipe(k, sizeof(k));
+                mini_wipe(sv, sizeof(sv));
+                free(body);
+                return http_error(req, "the app service password is bound to the registered server: change the server address to set another");
+            }
+            mini_wipe(sv, sizeof(sv));
+            mini_wipe(cur, sizeof(cur));
+        }
         int panel_ips = strcmp(key, "panel") == 0 ? panel_is_ips(value) : -2;
         if (panel_ips == -1) {
             free(body);
@@ -2128,7 +2222,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strncmp(key, "button_", 7) == 0) buttons = true;
         if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
         if (panel_ips >= 0) s_panel_request = panel_ips;   /* the main loop owns the LCD bus */
-        if (is_server_key(key) || strcmp(key, "hardware_password") == 0) channel_upd = true;
+        if (is_server_key(key) || server_pw || strcmp(key, "hardware_password") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
     free(body);
@@ -2592,6 +2686,17 @@ static char *ini_keep_keys(const char *old_text, char *new_text, const char *con
             free(new_text);
             new_text = next;
         }
+        /* the same server: its app service password is bound to the key */
+        char pk[48], opw[SERVER_PASSWORD_MAX + 1];
+        snprintf(pk, sizeof(pk), "%s_password", keys[i]);
+        if (mini_device_config_value(old_text, pk, opw, sizeof(opw))) {
+            next = mini_device_config_set(new_text, "config", pk, opw);
+            if (next) {
+                free(new_text);
+                new_text = next;
+            }
+        }
+        mini_wipe(opw, sizeof(opw));
     }
     mini_wipe(k, sizeof(k));
     mini_wipe(o, sizeof(o));
@@ -2612,6 +2717,20 @@ static esp_err_t http_app_config_get(httpd_req_t *req) {
     bool exists = fp != NULL;
     if (fp) fclose(fp);
     char *text = exists ? read_small_file(ini, 16 * 1024) : NULL;
+    char bound[96] = "";   /* JSON array of the server keys registered there */
+    {
+        size_t bn = (size_t)snprintf(bound, sizeof(bound), "[");
+        char sv[200];
+        uint8_t k[32];
+        for (size_t i = 0; text && i < sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]); i++) {
+            if (mini_device_config_value(text, APP_SERVER_KEYS[i], sv, sizeof(sv)) && mini_chan_key_of(sv, k)) {
+                bn += (size_t)snprintf(bound + bn, sizeof(bound) - bn, "%s\"%s\"", bn > 1 ? "," : "", APP_SERVER_KEYS[i]);
+            }
+        }
+        snprintf(bound + bn, sizeof(bound) - bn, "]");
+        mini_wipe(k, sizeof(k));
+        mini_wipe(sv, sizeof(sv));
+    }
     if (text) ini_hide_keys(text);
     char *jm = json_string_alloc(meta ? meta : ""), *jt = json_string_alloc(text ? text : ""), *jp = json_string_alloc(ini);
     free(meta);
@@ -2626,6 +2745,8 @@ static esp_err_t http_app_config_get(httpd_req_t *req) {
     httpd_resp_sendstr_chunk(req, jp);
     httpd_resp_sendstr_chunk(req, exists ? ",\"exists\":true,\"ini\":" : ",\"exists\":false,\"ini\":");
     httpd_resp_sendstr_chunk(req, jt);
+    httpd_resp_sendstr_chunk(req, ",\"bound\":");
+    httpd_resp_sendstr_chunk(req, bound);
     httpd_resp_sendstr_chunk(req, ",\"meta\":");
     httpd_resp_sendstr_chunk(req, jm);
     httpd_resp_sendstr_chunk(req, "}");
@@ -2802,12 +2923,65 @@ static esp_err_t http_wifi_scan(httpd_req_t *req) {
  * the app's own converter_url, else [app] https_proxy, else proxy */
 static void channel_saver(const char *origin, const char *key_hex);
 
-static void add_servers(const char *text, const char *const *keys, size_t nkeys) {
-    char v[200];
+/* app: an app's own servers, which may ask to be relayed through the
+ * system converter (<key>_relay = 1, used while they have no password) */
+static void add_servers(const char *text, const char *const *keys, size_t nkeys, bool app) {
+    char v[200], pk[48], pw[SERVER_PASSWORD_MAX + 1], rl[8];
     for (size_t i = 0; text && i < nkeys; i++) {
-        if (mini_device_config_value(text, keys[i], v, sizeof(v)) && v[0]) mini_chan_server_add(v);
+        if (!mini_device_config_value(text, keys[i], v, sizeof(v)) || !v[0]) continue;
+        snprintf(pk, sizeof(pk), "%s_password", keys[i]);
+        if (!mini_device_config_value(text, pk, pw, sizeof(pw))) pw[0] = '\0';
+        snprintf(pk, sizeof(pk), "%s_relay", keys[i]);
+        bool relay = app && mini_device_config_value(text, pk, rl, sizeof(rl)) && rl[0] == '1';
+        mini_chan_server_add(v, pw, relay);
     }
     mini_wipe(v, sizeof(v));
+    mini_wipe(pw, sizeof(pw));
+}
+
+/* Devices set up before the per-server passwords registered with the
+ * hardware password: a server value without a <key>_password gets it
+ * written once (the system's servers all; an app's own ones only when the
+ * device registered there: an app server without a password is plain HTTP),
+ * so changing the hardware password later (it guards the HTTP API only)
+ * leaves the registrations alone. A key written empty stays. */
+static void migrate_server_passwords(const char *path, const char *const *keys, size_t nkeys, bool system,
+                                     const char *hw) {
+    if (!hw || !hw[0]) return;
+    char *text = read_small_file(path, 32 * 1024);
+    if (!text) return;
+    char v[200], pk[48], pw[8];
+    bool changed = false;
+    for (size_t i = 0; text && i < nkeys; i++) {
+        if (!mini_device_config_value(text, keys[i], v, sizeof(v)) || !v[0]) continue;
+        uint8_t k[32];
+        bool registered = mini_chan_key_of(v, k);
+        mini_wipe(k, sizeof(k));
+        if (!system && !registered) continue;
+        snprintf(pk, sizeof(pk), "%s_password", keys[i]);
+        if (mini_device_config_value(text, pk, pw, sizeof(pw))) continue;   /* present, even empty */
+        char *next = mini_device_config_set(text, system ? server_key_section(keys[i]) : "config", pk, hw);
+        if (next) {
+            mini_wipe(text, strlen(text));
+            free(text);
+            text = next;
+            changed = true;
+            ESP_LOGI(TAG, "%s: %s set from the hardware password (the server's registration)", path, pk);
+        }
+    }
+    mini_wipe(v, sizeof(v));
+    if (changed && text) {
+        char tmp[96];
+        snprintf(tmp, sizeof(tmp), "%.88s.tmp", path);
+        FILE *fp = fopen(tmp, "wb");
+        size_t len = strlen(text);
+        bool ok = fp && fwrite(text, 1, len, fp) == len;
+        if (fp) ok = fclose(fp) == 0 && ok;
+        if (ok) ok = rename(tmp, path) == 0;
+        if (!ok) remove(tmp);
+    }
+    if (text) mini_wipe(text, strlen(text));
+    free(text);
 }
 
 static void setup_channel(const char *cfg) {
@@ -2816,19 +2990,40 @@ static void setup_channel(const char *cfg) {
     snprintf(s_chan_id, sizeof(s_chan_id), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     char pass[72] = "", v[200] = "";
     if (cfg) mini_device_config_value(cfg, "hardware_password", pass, sizeof(pass));
+    char *fresh = NULL;
+    if (pass[0]) {
+        migrate_server_passwords("/spiffs/config.ini", SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]),
+                                 true, pass);
+        if (s_app_ini[0]) {
+            migrate_server_passwords(s_app_ini, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]),
+                                     false, pass);
+        }
+        fresh = read_small_file("/spiffs/config.ini", 32 * 1024);   /* with the passwords written */
+        if (fresh) cfg = fresh;
+    }
     mini_chan_set_saver(channel_saver);
-    mini_chan_set_device(s_chan_id, pass);
+    mini_chan_set_device(s_chan_id);
     mini_wipe(pass, sizeof(pass));
     mini_chan_servers_begin();
-    add_servers(cfg, SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]));
+    add_servers(cfg, SYS_SERVER_KEYS, sizeof(SYS_SERVER_KEYS) / sizeof(SYS_SERVER_KEYS[0]), false);
     char *app = s_app_ini[0] ? read_small_file(s_app_ini, 32 * 1024) : NULL;
-    add_servers(app, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]));
+    add_servers(app, APP_SERVER_KEYS, sizeof(APP_SERVER_KEYS) / sizeof(APP_SERVER_KEYS[0]), true);
     mini_chan_servers_end();
+    /* the system converter app servers are relayed through: [app] https_proxy, else proxy */
+    if (!cfg || ((!mini_device_config_value(cfg, "https_proxy", v, sizeof(v)) || !v[0]) &&
+                 !mini_device_config_value(cfg, "proxy", v, sizeof(v)))) {
+        v[0] = '\0';
+    }
+    mini_chan_set_relay(v);
     if ((!app || !mini_device_config_value(app, "converter_url", v, sizeof(v)) || !v[0]) && cfg &&
         (!mini_device_config_value(cfg, "https_proxy", v, sizeof(v)) || !v[0])) {
         mini_device_config_value(cfg, "proxy", v, sizeof(v));
     }
     free(app);
+    if (fresh) {
+        mini_wipe(fresh, strlen(fresh));
+        free(fresh);
+    }
     mini_chan_set_https(v);
     mini_json_feed_set_https_proxy(mini_chan_url_of(v));
     mini_wipe(v, sizeof(v));
@@ -2971,6 +3166,7 @@ static void start_http_server(void) {
         { .uri = "/api/fs/rename",       .method = HTTP_POST,    .handler = http_fs_rename },
         { .uri = "/api/settings",        .method = HTTP_GET,     .handler = http_settings_get },
         { .uri = "/api/settings",        .method = HTTP_POST,    .handler = http_settings_post },
+        { .uri = "/api/channel/test",    .method = HTTP_POST,    .handler = http_channel_test },
         { .uri = "/api/apps",            .method = HTTP_GET,     .handler = http_apps },
         { .uri = "/api/hardware",        .method = HTTP_GET,     .handler = http_hardware },
         { .uri = "/api/market",          .method = HTTP_GET,     .handler = http_market },
