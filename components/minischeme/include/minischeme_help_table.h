@@ -241,11 +241,14 @@
     { "time-us", "(time-us)", "System / Time", "Microseconds since boot, for timing short intervals." }, \
     { "micros", "(micros)", "System / Time", "Older name of time-us (same procedure, kept for compatibility). Microseconds since boot, for timing short intervals." }, \
     { "time-synced?", "(time-synced?)", "System / Time", "Whether the wall clock has been set (NTP)." }, \
+    { "time-local", "(time-local)", "System / Time", "The local time: (year month day hour minute second weekday), or #f." }, \
     { "app-rom-capacity", "(app-rom-capacity)", "System / Apps", "Bytes of the approm flash partition that holds the app's Code ROM image (vm-rom-bytes is the image); 0 when there is none." }, \
     { "app-last-stats", "(app-last-stats)", "System / Apps", "Figures of the app that ran before the system settings opened (kept across that restart), or #f." }, \
     { "last-app-stats", "(last-app-stats)", "System / Apps", "Older name of app-last-stats (same procedure, kept for compatibility). Figures of the app that ran before the system settings opened (kept across that restart), or #f." }, \
     { "app-info", "(app-info)", "System / Apps", "The running app: (path id ini-path folder)." }, \
     { "app-list", "(app-list)", "System / Apps", "The installed apps with their metadata: ((path id name description pages version) ...)." }, \
+    { "app-scheduled", "(app-scheduled)", "System / Apps", "The time this run is for, \"HH:MM\": a launch from the app's schedule.ini, or the time its app-schedule hook was called with; #f otherwise." }, \
+    { "app-return", "(app-return)", "System / Apps", "A scheduled launch is done: the next app due at that time, else the boot app, starts after this call (#t); #f when there is nothing to return to." }, \
     { "config-get", "(config-get key [app-id])", "System / Configuration", "Value of a key in the running app's own config.ini (its folder), else in /spiffs/config.ini, as a string; #f when neither has it. app-id: a member of the running combined app." }, \
     { "app-has-config?", "(app-has-config? app-id)", "System / Configuration", "Whether a member of the running combined app ([combo] members) has its own config.ini." }, \
     { "config-set!", "(config-set! section key value)", "System / Configuration", "Write key = value into /spiffs/config.ini (the line replaced in place with its comment kept, else added to [section]); #t when saved. Read again at the next boot." }, \
@@ -305,6 +308,7 @@
     { "gui-text-width", "(gui-text-width str [font-id])", "Display / Graphics", "Width in pixels of str drawn in a font (default the current font)." }, \
     { "gui-text-styled", "(gui-text-styled x y str color [font-id])", "Display / Graphics", "Draw UTF-8 text with its top-left corner at x y in a font (default the current font)." }, \
     { "gui-text-box", "(gui-text-box x y w h str color [font-id [halign [valign]]])", "Display / Graphics", "Draw one line of text aligned in a box and clipped to it. halign 0 left, 1 center, 2 right; valign 0 top, 1 middle, 2 bottom." }, \
+    { "gui-text-scaled", "(gui-text-scaled x y str color scale [font-id])", "Display / Graphics", "Draw UTF-8 text in a font (default the current one) with every dot scale x scale (2..8): large text without a large font." }, \
     { "gui-chart", "(gui-chart x y w h ring start count lo hi color)", "Display / Graphics", "Line chart of count values of the vector ring from index start (wrapping), scaled from lo..hi to the box." }, \
     { "gui-image", "(gui-image x y path [frame [speed]])", "Display / Graphics", "Draw an image file at x y (its top-left corner): a baseline JPEG, or an animation (a MANI file of JPEG frames, which the photo album's web page makes from a GIF)." }, \
     { "image-info", "(image-info path)", "Display / Graphics", "The size of an image file and its frames: (width height frames total-ms)." }, \

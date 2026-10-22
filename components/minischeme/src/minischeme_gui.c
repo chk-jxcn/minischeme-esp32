@@ -79,7 +79,7 @@ enum {
     GUI_OP_CLEAR = 1, GUI_OP_PIXEL, GUI_OP_LINE, GUI_OP_RECT, GUI_OP_RRECT, GUI_OP_CARD,
     GUI_OP_CIRCLE, GUI_OP_TEXT, GUI_OP_TEXT_STYLED, GUI_OP_TEXT_BOX, GUI_OP_SEG7,
     GUI_OP_SET_CLIP, GUI_OP_RESET_CLIP, GUI_OP_CHART, GUI_OP_ARC, GUI_OP_TEXT_SCROLL, GUI_OP_BITMAP,
-    GUI_OP_IMAGE
+    GUI_OP_IMAGE, GUI_OP_TEXT_SCALED
 };
 
 typedef struct {
@@ -1763,6 +1763,7 @@ static void gui_dl_replay(void) {
             case GUI_OP_CIRCLE:      mini_gui_circle(c->x, c->y, c->p, c->c1, c->b != 0); break;
             case GUI_OP_TEXT:        mini_gui_text(c->x, c->y, str, c->c1, c->p); break;
             case GUI_OP_TEXT_STYLED: mini_gui_text_styled(c->x, c->y, str, c->c1, c->p); break;
+            case GUI_OP_TEXT_SCALED: mini_gui_text_scaled(c->x, c->y, str, c->c1, c->p, c->b); break;
             case GUI_OP_TEXT_BOX:    mini_gui_text_box(c->x, c->y, c->w, c->h, str, c->c1, c->p, c->b >> 4, c->b & 0xF); break;
             case GUI_OP_SEG7:        mini_gui_seg7(c->x, c->y, c->w, c->h, c->p, str, c->c1, c->c2, c->c3, c->c4); break;
             case GUI_OP_SET_CLIP:    mini_gui_set_clip(c->x, c->y, c->w, c->h); break;
@@ -2757,6 +2758,98 @@ void mini_gui_text_styled(int x, int y, const char *str, uint16_t color, int fon
     }
 }
 
+/* One glyph scale x scale: a set dot (or one more than half covered) is a
+ * scale x scale square; coverage is not blended at that size */
+static void draw_glyph_scaled(const MiniGlyph *g, int cur_x, int cur_y, int glyph_h, uint16_t color, int scale) {
+    int bpp = g->bpp > 1 ? g->bpp : 1, bpr = g->bytes_per_row;
+    unsigned max = (1u << bpp) - 1u;
+    int width = bpr * 8 / bpp;
+    for (int r = 0; r < glyph_h; r++) {
+        int y0 = cur_y + r * scale;
+        if (y0 >= s_clip_y1) break;
+        if (y0 + scale <= s_clip_y0) continue;
+        const uint8_t *src = &g->bitmap[r * bpr];
+        int run = -1;
+        for (int c = 0; c <= width; c++) {
+            bool on = false;
+            if (c < width) {
+                int bit = c * bpp;
+                unsigned v = (src[bit >> 3] >> (8 - bpp - (bit & 7))) & max;
+                on = v * 2 > max;
+            }
+            if (on && run < 0) run = c;
+            if (!on && run >= 0) {
+                for (int k = 0; k < scale; k++) {
+                    int y = y0 + k;
+                    if (y >= s_clip_y0 && y < s_clip_y1) gui_hrun(cur_x + run * scale, cur_x + c * scale, y, color);
+                }
+                run = -1;
+            }
+        }
+    }
+}
+
+void mini_gui_text_scaled(int x, int y, const char *str, uint16_t color, int font_id, int scale) {
+    if (scale <= 1) {
+        mini_gui_text_styled(x, y, str, color, font_id);
+        return;
+    }
+    if (scale > 8) scale = 8;
+    GUI_REC(GUI_OP_TEXT_SCALED, x, y, 0, 0, font_id, (uint8_t)scale, color, 0, 0, 0, str ? str : "");
+
+    if (!str) return;
+    const MiniFont *font = mini_font_get(font_id);
+    if (!font) font = mini_font_get(s_current_font);
+    if (!font) return;
+    if (!strchr(str, '\n') && (y >= s_clip_y1 || y + font->height * scale <= s_clip_y0)) return;
+
+    int cur_x = x, cur_y = y;
+    for (const unsigned char *p = (const unsigned char *)str; *p; p++) {
+        unsigned char c = *p;
+        if (c == '\n') {
+            cur_x = x;
+            cur_y += (font->height + 2) * scale;
+            continue;
+        }
+        uint16_t cp = c;
+        if ((c & 0xF8) == 0xF0) {
+            if (*(p + 1) && *(p + 2) && *(p + 3)) p += 3;
+            continue;
+        } else if ((c & 0xF0) == 0xE0) {
+            unsigned char c1 = *(p + 1);
+            unsigned char c2 = c1 ? *(p + 2) : 0;
+            if (c1 && c2) {
+                p += 2;
+                cp = (uint16_t)(((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
+            }
+        } else if ((c & 0xE0) == 0xC0) {
+            unsigned char c1 = *(p + 1);
+            if (c1) {
+                p++;
+                cp = (uint16_t)(((c & 0x1F) << 6) | (c1 & 0x3F));
+            }
+        }
+        const MiniFont *used = font;
+        const MiniGlyph *g = mini_font_glyph(font, cp, &used);
+        if (g) {
+            int y_offset = 0;
+            if (used != font) {
+                if (font->ascent && used->ascent) y_offset = (int)font->ascent - (int)used->ascent;
+                else if (font->height > used->height) y_offset = (font->height - used->height) / 2;
+            }
+            int glyph_w = g->bytes_per_row * 8 / (g->bpp > 1 ? g->bpp : 1) * scale;
+            if (cur_x < s_clip_x1 && cur_x + glyph_w > s_clip_x0) {
+                draw_glyph_scaled(g, cur_x, cur_y + y_offset * scale, used->height, color, scale);
+            }
+            cur_x += g->advance * scale;
+        } else {
+            int pw = (cp < 128) ? 8 : 16;
+            mini_gui_rect(cur_x, cur_y, (pw - 2) * scale, (font->height - 2) * scale, color, false);
+            cur_x += pw * scale;
+        }
+    }
+}
+
 void mini_gui_text_box(int x, int y, int w, int h, const char *str, uint16_t color, int font_id, int halign, int valign) {
     GUI_REC(GUI_OP_TEXT_BOX, x, y, w, h, font_id, (uint8_t)(((halign & 0xF) << 4) | (valign & 0xF)), color, 0, 0, 0, str ? str : "");
     if (GUI_ROWS_HIDDEN(y, h)) return; /* text is clipped to the box */
@@ -3587,6 +3680,21 @@ static Value prim_gui_text_styled(MiniVM *vm, int argc, Value *argv) {
                              mini_string_data(argv[2]),
                              (uint16_t)mini_to_fixnum(argv[3]),
                              fid);
+    }
+    return mini_void();
+}
+
+/* (gui-text-scaled x y str color scale [font-id]): text in a font (default
+ * the current one), every dot scale x scale (2..8) */
+static Value prim_gui_text_scaled(MiniVM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc >= 5 && mini_is_fixnum(argv[0]) && mini_is_fixnum(argv[1]) && mini_is_string(argv[2]) &&
+        mini_is_fixnum(argv[3]) && mini_is_fixnum(argv[4])) {
+        int fid = (argc >= 6 && mini_is_fixnum(argv[5])) ? (int)mini_to_fixnum(argv[5]) : s_current_font;
+        mini_gui_text_scaled((int)mini_to_fixnum(argv[0]), (int)mini_to_fixnum(argv[1]), mini_string_data(argv[2]),
+                             (uint16_t)mini_to_fixnum(argv[3]), fid, (int)mini_to_fixnum(argv[4]));
+    } else {
+        vm_error(vm, "gui-text-scaled: expected x y str color scale [font-id]");
     }
     return mini_void();
 }
@@ -4610,6 +4718,7 @@ void mini_register_gui_lib(MiniVM *vm) {
         { "gui-get-clip",        prim_gui_get_clip },
         { "gui-push-clip",       prim_gui_push_clip },
         { "gui-chart",           prim_gui_chart },
+        { "gui-text-scaled",     prim_gui_text_scaled },
         { "gui-bitmap",          prim_gui_bitmap },
         { "gui-image",           prim_gui_image },
         { "image-info",          prim_image_info },

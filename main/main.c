@@ -157,6 +157,29 @@ typedef struct {
     char error[120];
 } LastAppStats;
 static RTC_NOINIT_ATTR LastAppStats s_last_app;
+
+/* Scheduled launches: an app with schedule.ini in its folder ([schedule]
+ * times = 08:00, 12:30) starts at those times and returns to the boot app
+ * with (app-return). The launch, and the apps due at the same time after
+ * it, cross the restart in RTC memory; so does the last minute scanned. */
+#define SCHED_MAGIC 0x5C4ED017u
+#define SCHED_MAX   5
+typedef struct {
+    uint32_t magic;
+    int32_t fired_min;              /* epoch minute of the last scan */
+    uint32_t n;                     /* launches: [0] starts on this restart */
+    char at[SCHED_MAX][6];          /* "HH:MM" each is due at */
+    char path[SCHED_MAX][64];
+} SchedState;
+static RTC_NOINIT_ATTR SchedState s_sched_rtc;
+static SchedState s_sched_queue;    /* this boot: the launches still due after it */
+static bool s_sched_boot = false;   /* this boot is a scheduled launch */
+static char s_sched_path[64] = "";
+static char s_sched_at[6] = "";     /* (app-scheduled): the time it runs for, "" none */
+static volatile int64_t s_sched_restart_at = 0;   /* (app-return): restart from the main loop */
+static int64_t s_sched_return_at = 0;   /* schedule.ini return_after: the automatic return */
+static Value prim_app_scheduled(MiniVM *vm, int argc, Value *argv);
+static Value prim_app_return(MiniVM *vm, int argc, Value *argv);
 static const esp_partition_t *s_rom_part;   /* the App ROM partition (defined with the ROM code) */
 
 static bool file_has_magic(const char *path, const char *magic);
@@ -4642,7 +4665,10 @@ static bool has_installed_app(void) {
 static void select_boot_app(void) {
     snprintf(s_app_path, sizeof(s_app_path), "%s", file_has_magic(APP_FASL_PATH, "MFAS") ? APP_FASL_PATH : APP_MSBC_PATH);
     char path[64];
-    if (boot_app_path(s_sys_cfg.boot_app, path, sizeof(path))) {
+    if (s_sched_boot) {
+        snprintf(s_app_path, sizeof(s_app_path), "%s", s_sched_path);
+        ESP_LOGI(TAG, "Scheduled launch at %s: %s", s_sched_at, s_app_path);
+    } else if (boot_app_path(s_sys_cfg.boot_app, path, sizeof(path))) {
         if (strncmp(path, APPS_DIR "/settings/", sizeof(APPS_DIR "/settings/") - 1) == 0) {
             ESP_LOGW(TAG, "boot_app %s is the system settings; starting %s", path, s_app_path);
         } else if (file_has_magic(path, "MSBC") || file_has_magic(path, "MFAS")) {
@@ -5172,6 +5198,8 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
     mini_register_c_func(vm, "app-list", prim_app_list);
+    mini_register_c_func(vm, "app-scheduled", prim_app_scheduled);
+    mini_register_c_func(vm, "app-return", prim_app_return);
     mini_register_c_func(vm, "factory-reset", prim_factory_reset);
     mini_register_c_func(vm, "setup-mode-start", prim_setup_mode_start);
     mini_register_c_func(vm, "setup-mode-status", prim_setup_mode_status);
@@ -5349,6 +5377,167 @@ static void check_app_error(const char *where) {
  * heap and leave the app's Flash image alone; leaving them restarts into
  * the boot app */
 
+/* Boot: the scheduled launch RTC memory holds (not in the settings) becomes
+ * this boot's; RTC keeps none, so a crash or a restart returns to the boot app */
+static void sched_take_boot(void) {
+    if (s_sched_rtc.magic != SCHED_MAGIC || s_sched_rtc.n > SCHED_MAX) {
+        memset(&s_sched_rtc, 0, sizeof(s_sched_rtc));
+        s_sched_rtc.magic = SCHED_MAGIC;
+    }
+    memset(&s_sched_queue, 0, sizeof(s_sched_queue));
+    if (!s_settings_mode && s_sched_rtc.n > 0) {
+        s_sched_rtc.path[0][63] = '\0';
+        s_sched_rtc.at[0][5] = '\0';
+        const char *p = s_sched_rtc.path[0];
+        if (file_has_magic(p, "MSBC") || file_has_magic(p, "MFAS")) {
+            s_sched_boot = true;
+            snprintf(s_sched_path, sizeof(s_sched_path), "%s", p);
+            snprintf(s_sched_at, sizeof(s_sched_at), "%s", s_sched_rtc.at[0]);
+        }
+        for (uint32_t i = 1; i < s_sched_rtc.n; i++) {
+            memcpy(s_sched_queue.path[s_sched_queue.n], s_sched_rtc.path[i], 64);
+            memcpy(s_sched_queue.at[s_sched_queue.n], s_sched_rtc.at[i], 6);
+            s_sched_queue.n++;
+        }
+    }
+    s_sched_rtc.n = 0;
+}
+
+/* The running launch's schedule.ini return_after (seconds): the automatic return */
+static void sched_arm_return(void) {
+    if (!s_sched_boot) return;
+    char path[96], val[12] = "";
+    snprintf(path, sizeof(path), "%s/schedule.ini", s_app_dir);
+    char *ini = read_small_file(path, 4096);
+    long secs = 0;
+    if (ini && mini_device_config_value(ini, "return_after", val, sizeof(val)) && parse_long(val, 10, 86400, &secs)) {
+        s_sched_return_at = esp_timer_get_time() + (int64_t)secs * 1000000;
+        ESP_LOGI(TAG, "Scheduled launch returns after %ld s", secs);
+    }
+    free(ini);
+}
+
+/* (app-return): the next launch due, else the boot app; false when this
+ * run is neither a scheduled launch nor has one waiting */
+static bool sched_return(void) {
+    if (s_sched_queue.n > 0) {
+        s_sched_rtc = s_sched_queue;
+        s_sched_rtc.magic = SCHED_MAGIC;
+    } else if (s_sched_boot) {
+        s_sched_rtc.n = 0;
+    } else {
+        s_sched_at[0] = '\0';
+        return false;
+    }
+    if (!s_sched_restart_at) s_sched_restart_at = esp_timer_get_time() + 300000;
+    return true;
+}
+
+/* The minute's launches: every installed app whose schedule.ini lists the
+ * time (a restart in between: up to two minutes back). The running app is
+ * told with its app-schedule hook; others start now, or after the running
+ * launch when one is on screen. */
+static void sched_scan(const MiniWallTime *wt, time_t wall_now) {
+    if (!wt->synced || s_settings_mode || s_sched_restart_at) return;
+    int32_t minute = (int32_t)(wall_now / 60);
+    if (minute == s_sched_rtc.fired_min) return;
+    int32_t from = s_sched_rtc.fired_min + 1;
+    if (from > minute || from < minute - 2) from = minute - 2;
+    s_sched_rtc.fired_min = minute;
+    int now_mod = wt->hour * 60 + wt->minute;
+
+    char (*paths)[64] = (char (*)[64])malloc(MAX_APPS * 64);
+    if (!paths) return;
+    int n = installed_apps(paths, MAX_APPS);
+    SchedState due;
+    memset(&due, 0, sizeof(due));
+    char hook_at[6] = "";
+    for (int i = 0; i < n; i++) {
+        char dir[64], ini_path[80], times[160] = "";
+        snprintf(dir, sizeof(dir), "%s", paths[i]);
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) continue;
+        *slash = '\0';
+        if (strcmp(dir, "/spiffs") == 0) continue;   /* a root app has no folder of its own */
+        snprintf(ini_path, sizeof(ini_path), "%s/schedule.ini", dir);
+        char *ini = read_small_file(ini_path, 4096);
+        bool listed = ini && mini_device_config_value(ini, "times", times, sizeof(times));
+        free(ini);
+        if (!listed) continue;
+        for (const char *p = times; *p;) {
+            while (*p && !isdigit((unsigned char)*p)) p++;
+            if (!*p) break;
+            int h = 0, m = -1;
+            while (isdigit((unsigned char)*p)) h = h < 100 ? h * 10 + (*p - '0') : h, p++;
+            if (*p == ':' && isdigit((unsigned char)p[1])) {
+                p++;
+                m = 0;
+                while (isdigit((unsigned char)*p)) m = m < 100 ? m * 10 + (*p - '0') : m, p++;
+            }
+            if (h > 23 || m < 0 || m > 59) continue;
+            int t = h * 60 + m;
+            bool hit = false;
+            for (int32_t k = from; k <= minute && !hit; k++) hit = ((now_mod - (minute - k)) % 1440 + 1440) % 1440 == t;
+            if (!hit) continue;
+            char at[6];
+            at[0] = (char)('0' + h / 10);
+            at[1] = (char)('0' + h % 10);
+            at[2] = ':';
+            at[3] = (char)('0' + m / 10);
+            at[4] = (char)('0' + m % 10);
+            at[5] = 0;
+            if (strcmp(paths[i], s_app_path) == 0) {
+                snprintf(hook_at, sizeof(hook_at), "%s", at);
+            } else if (due.n < SCHED_MAX) {
+                memcpy(due.path[due.n], paths[i], 64);
+                memcpy(due.at[due.n], at, 6);
+                due.n++;
+            }
+            break;   /* one launch per app and minute */
+        }
+    }
+    free(paths);
+
+    if (hook_at[0] && mini_device_has_hook(s_vm, "app-schedule")) {
+        ESP_LOGI(TAG, "Schedule %s: the running app's app-schedule hook", hook_at);
+        snprintf(s_sched_at, sizeof(s_sched_at), "%s", hook_at);
+        mini_clear_error(s_vm);
+        Value arg = mini_make_string(s_vm, hook_at);
+        mini_device_call_hook(s_vm, "app-schedule", NULL, 1, &arg);
+        check_app_error("app-schedule");
+    }
+    if (due.n == 0) return;
+    if (s_sched_boot || s_sched_at[0]) {
+        /* a launch on screen: these follow it on its (app-return) */
+        for (uint32_t i = 0; i < due.n && s_sched_queue.n < SCHED_MAX; i++) {
+            memcpy(s_sched_queue.path[s_sched_queue.n], due.path[i], 64);
+            memcpy(s_sched_queue.at[s_sched_queue.n], due.at[i], 6);
+            s_sched_queue.n++;
+            ESP_LOGI(TAG, "Schedule %s: %s queued", due.at[i], due.path[i]);
+        }
+        return;
+    }
+    ESP_LOGI(TAG, "Schedule %s: restarting into %s", due.at[0], due.path[0]);
+    due.magic = SCHED_MAGIC;
+    due.fired_min = minute;
+    s_sched_rtc = due;
+    s_sched_restart_at = esp_timer_get_time();
+}
+
+/* (app-scheduled): the "HH:MM" this run is for (a scheduled launch, or the
+ * time its app-schedule hook was called with), #f otherwise */
+static Value prim_app_scheduled(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    return s_sched_at[0] ? mini_make_string(vm, s_sched_at) : mini_false();
+}
+
+/* (app-return): a scheduled launch is done: the next one due, or the boot
+ * app, starts after this call (#t); #f when there is nothing to return to */
+static Value prim_app_return(MiniVM *vm, int argc, Value *argv) {
+    (void)vm; (void)argc; (void)argv;
+    return sched_return() ? mini_true() : mini_false();
+}
+
 static void open_system_settings(void) {
     if (s_settings_mode) return;
     ESP_LOGI(TAG, "Restarting into the system settings");
@@ -5518,6 +5707,7 @@ void app_main(void) {
     s_settings_boot = 0; /* the next restart runs the boot app again */
     if (s_builtin_boot == BUILTIN_SETTINGS_MAGIC) s_builtin_settings = s_settings_mode;
     s_builtin_boot = 0;
+    sched_take_boot();
     if (!s_settings_mode && !has_installed_app()) {
         ESP_LOGI(TAG, "No app installed; starting built-in system settings");
         s_settings_mode = true;
@@ -5534,6 +5724,7 @@ void app_main(void) {
         ESP_LOGI(TAG, "Boot app: the system settings");
     } else {
         select_boot_app();
+        sched_arm_return();
         if (s_app_api_err[0]) {
             free(vm_heap_hold);
             vm_heap_hold = NULL;
@@ -5783,6 +5974,16 @@ void app_main(void) {
             s_settings_restart_at = 0;
             open_system_settings();
         }
+        if (s_sched_return_at && esp_timer_get_time() >= s_sched_return_at) {
+            s_sched_return_at = 0;
+            ESP_LOGI(TAG, "Scheduled launch: return_after reached");
+            sched_return();
+        }
+        if (s_sched_restart_at && esp_timer_get_time() >= s_sched_restart_at) {
+            ESP_LOGI(TAG, "Schedule: restarting into %s", s_sched_rtc.n ? s_sched_rtc.path[0] : "the boot app");
+            vTaskDelay(pdMS_TO_TICKS(30));
+            esp_restart();
+        }
 
         /* 1 Hz tick keyed on the displayed clock: the wall clock once NTP has
          * synced (uptime before that), so render latency can never make the
@@ -5811,6 +6012,7 @@ void app_main(void) {
             mini_device_clock_tick(s_vm, &wt, wt.synced ? (int)(wall_now % 86400) : now_sec, last_lux, last_bl);
             if (mini_get_error(s_vm)) ESP_LOGE(TAG, "app-tick error: %s", mini_get_error(s_vm));
             check_app_error("app-tick");
+            sched_scan(&wt, wall_now);
             if (now_sec % 60 == 0) {
                 ESP_LOGI(TAG, "Clock %s | heap %u/%u B | free %u B",
                          wt.synced ? "SYNCED" : "WAITING NTP",

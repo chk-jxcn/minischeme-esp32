@@ -51,6 +51,8 @@ void mini_device_clock_tick(MiniVM *vm, const MiniWallTime *t, int tick, int lux
 /* Calls the running app's hook (e.g. "app-tick") when it defines one, else the
  * procedure named `fallback` (NULL: nothing). Arguments must be rooted. */
 Value mini_device_call_hook(MiniVM *vm, const char *hook, const char *fallback, int argc, Value *argv);
+/** @brief True when the app defines the hook (a procedure bound to that name). */
+bool mini_device_has_hook(MiniVM *vm, const char *hook);
 
 /* After an app is restored from a FASL snapshot: calls (app-resume) when the
  * app defines it. A snapshot holds Scheme state only, so the app restarts its

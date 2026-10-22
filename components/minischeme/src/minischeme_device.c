@@ -133,6 +133,11 @@ Value mini_device_call_hook(MiniVM *vm, const char *hook, const char *fallback, 
     return fallback ? mini_call_named(vm, fallback, argc, argv) : mini_void();
 }
 
+bool mini_device_has_hook(MiniVM *vm, const char *hook) {
+    Value fn = env_lookup_name(vm, hook);
+    return mini_is_closure(fn) || mini_is_cfunc(fn);
+}
+
 void mini_device_resume_app(MiniVM *vm) {
     mini_font_restore(vm);
     Value fn = env_lookup_name(vm, "app-resume");
@@ -865,10 +870,14 @@ static Value cached_string(MiniVM *vm, Value *cache, int slot, const char *text)
 #define CLOCK_CACHE_GLOBAL "%clock-strings"
 #define CLOCK_CACHE_SLOTS  5
 
+/* The wall time of the last clock tick: (time-local) */
+static MiniWallTime s_last_wall;
+
 void mini_device_clock_tick(MiniVM *vm, const MiniWallTime *t, int tick, int lux, int backlight) {
     static const char *const weekdays[] = { "周日", "周一", "周二", "周三", "周四", "周五", "周六" };
     char hm[16], sec[8], week[16], date[32], lunar[48];
     if (!vm || !t) return;
+    s_last_wall = *t;
     mini_backlight_auto_step();
     backlight = mini_backlight_get();
 
@@ -1004,6 +1013,20 @@ static void add_section(MiniVM *vm, Value *root, const char *section, const Info
     mini_pop_root(vm);
 }
 
+/* (time-local): (year month day hour minute second weekday) of the last
+ * clock tick (the app-tick wall time), #f before the clock is synced */
+static Value prim_time_local(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (!s_last_wall.synced) return mini_false();
+    const int f[7] = { s_last_wall.year, s_last_wall.month, s_last_wall.day, s_last_wall.hour,
+                       s_last_wall.minute, s_last_wall.second, ((s_last_wall.wday % 7) + 7) % 7 };
+    Value list = mini_nil();
+    mini_push_root(vm, &list);
+    for (int i = 6; i >= 0; i--) list = mini_make_cons(vm, mini_make_fixnum(f[i]), list);
+    mini_pop_root(vm);
+    return list;
+}
+
 static Value prim_system_info(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
     static const InfoField memory[] = {
@@ -1057,6 +1080,7 @@ void mini_register_device_lib(MiniVM *vm) {
         { "lunar-date",        prim_lunar_date },
         { "lunar-date-string", prim_lunar_date_string },
         { "system-info",       prim_system_info },
+        { "time-local",        prim_time_local },
     };
     mini_register_prim_table(vm, funcs, sizeof(funcs) / sizeof(funcs[0]));
 }

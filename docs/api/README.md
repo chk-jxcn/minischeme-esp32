@@ -4,7 +4,8 @@
 
 | 文件 | 内容 |
 |---|---|
-| [v1.6.0.md](v1.6.0.md) | **API 1.6.0 参考**（当前版本）：每个接口的原型、说明、返回值、样例，按组件分组。由 `tools/gen_api.py` 生成，样例都由测试实际运行验证。 |
+| [v1.7.0.md](v1.7.0.md) | **API 1.7.0 参考**（当前版本）：每个接口的原型、说明、返回值、样例，按组件分组。由 `tools/gen_api.py` 生成，样例都由测试实际运行验证。 |
+| [v1.6.0.md](v1.6.0.md) | API 1.6.0 参考（旧版本）。 |
 | [v1.5.0.md](v1.5.0.md) | API 1.5.0 参考（旧版本）。 |
 | [v1.4.0.md](v1.4.0.md) | API 1.4.0 参考（旧版本）。 |
 | [v1.3.0.md](v1.3.0.md) | API 1.3.0 参考（旧版本）。 |
@@ -28,7 +29,7 @@ API 版本号为 `major.minor.patch`：
 
 固件提供的版本可以从三个地方查到：
 
-- `(api-version)` → `"1.6.0"`；
+- `(api-version)` → `"1.7.0"`；
 - `GET /api/info` 里的 `"api"` 字段（以及 `"api_extensions"`）；
 - 硬件信息页“系统”页的“固件”一行。
 
@@ -87,7 +88,7 @@ extensions = esp32 1.0    ; 可选：用到的扩展 API
 
 | 调用 | 结果 |
 |---|---|
-| `(api-version)` | `"1.6.0"` |
+| `(api-version)` | `"1.7.0"` |
 | `(api-compatible? "1.0")` | `#t`：需要该版本的应用能在本固件上运行 |
 | `(api-has? 'gpio-write)` | 本设备是否提供该接口（已实现、扩展存在、确实可调用） |
 | `(api-info 'gpio-write)` | `("gpio" "1.0.0" stable #f all)`：组件、引入版本、状态、扩展、适用范围 |
@@ -100,6 +101,8 @@ extensions = esp32 1.0    ; 可选：用到的扩展 API
 apps/<id>/meta.ini      元数据、设置项说明、默认设置
 apps/<id>/<id>.scm      程序（通常基于 applib：前面会拼上 apps/lib/applib.scm 和 infopages.scm）
 ```
+
+设备上应用目录里还可以有 `schedule.ini`（定时唤起，见第 7 节），由应用或它的网页写入。
 
 **meta.ini**：
 
@@ -133,10 +136,26 @@ python tools/install_apps.py <板子IP> <id> --boot <id>  # 安装、设为开�
 | `(app-mid-press)` | 中长按（默认 3.5 秒以上）。硬件信息页打开时不调用（这时中长按进入系统设置）。 |
 | `(app-touch x y)` | 触摸（有触摸屏的设备）。 |
 | `(app-resume)` | 从 FASL 堆快照恢复后调用，用来重新启动 C 侧的服务（例如 JSON feed）。 |
+| `(app-schedule at)` | API 1.7.0。应用正在运行时到了它 `schedule.ini` 里的时间点，`at` 为 `"08:00"`。处理完后调用 `(app-return)`。 |
 | `gui-render-proc` | 全局变量，值为无参的绘制过程。渲染器需要重绘时调用它；条带模式下每帧只执行一次，命令记录成显示列表后分条带回放。状态变化后用 `(gui-invalidate x y w h)` 标出需要重绘的行。绘制过程必须是确定的（同样的状态画出同样的内容）。 |
 | `info-*` | 保留给共享的硬件信息页模块（`apps/lib/infopages.scm`）。 |
 
 **按键手势**：短按、短长按（0.8 秒）和中长按（3.5 秒）交给应用（`app-button`、`app-long-press`、`app-mid-press`）；长长按（8 秒）打开硬件信息页，在信息页上短按翻页、短长按返回应用、中长按进入系统设置（这些由固件处理，应用收不到）。三个时间可以在 config.ini `[system]` 的 `button_long_ms`、`button_mid_ms`、`button_hold_ms` 中设定（设备网页“系统配置”的常用设置里也能改，保存后立即生效）。按住时右下角最多显示三条进度条。系统设置里没有长长按：短按切换下一项，短长按确认，中长按返回上一级（在主菜单上中长按退出设置），菜单里不再有【返回】项。
+
+**定时唤起**（API 1.7.0）：应用目录（`/spiffs/apps/<id>/` 或 `/spiffs/user/<id>/`）里有 `schedule.ini` 时，系统按其中的时间点启动这个应用：
+
+```ini
+[schedule]
+times = 08:00, 12:30, 19:00   ; 本地时间，逗号分隔
+return_after = 0              ; 可选：启动后多少秒自动返回，0 或不写表示等应用调用 (app-return)
+```
+
+- 时钟同步后，每分钟检查一次所有已安装应用的 `schedule.ini`；系统设置运行时不检查。重启错过的时间点最多补两分钟。
+- 到点的应用不是当前应用：板子重启进入它，`(app-scheduled)` 返回 `"08:00"`。应用做完后调用 `(app-return)`，板子重启回到开机应用（`[system] boot_app`，即原来的应用）。
+- 到点的应用就是当前应用：不重启，调用它的 `(app-schedule at)` 钩子，此后 `(app-scheduled)` 也返回该时间；没有这个钩子则什么都不做。
+- 同一时间有多个应用到点：依次运行，前一个 `(app-return)` 后启动下一个，最后一个返回开机应用。一个定时应用运行期间又有别的应用到点，也排在它后面。
+- 定时应用崩溃或板子重启（按键进入设置等）后，回到开机应用，排队的启动取消。
+- 应用自己（`write-file-string`）或它的网页（`/api/app/file?name=schedule.ini`）写 `schedule.ini`；吃药提醒应用是完整的例子。
 
 **出错处理**：以下任一情况固件判定应用崩溃，显示错误原因后进入设置：
 
@@ -163,3 +182,4 @@ python tools/install_apps.py <板子IP> <id> --boot <id>  # 安装、设为开�
 | 1.4.0 | 2026-10-12 | 新增 `gui-bitmap`：1 位点阵（二维码、图标）不论多少点都只占一条显示列表命令，点阵数据放在字符串池里；以前用 `gui-rect` 逐段画，一个二维码就要约 350 条命令（上限 512）。 |
 | 1.5.0 | 2026-10-14 | 新增 `gui-image`、`image-info`：从文件绘制图片（baseline JPEG，以及由 GIF 转换来的 MANI 动图，按帧间隔播放，速度可调）。每个条带只解码它覆盖的 JPEG MCU 行，不需要帧缓冲，打开一张图约占 6 KB。应用网页可以经 `/api/app/file` 读写自己目录里的文件；应用的 meta.ini 可以用 `storage_kb` 申请更大的存储空间。电子相册应用声明 `api = 1.5`。 |
 | 1.6.0 | 2026-10-20 | 合并应用：meta.ini `[combo] members = a, b` 列出它带上的应用，`(config-get key app-id)` 读取成员应用自己的 config.ini，新增 `(app-has-config? app-id)`。旧固件忽略 app-id，合集应用用 `(defined? 'app-has-config?)` 兼容。 |
+| 1.7.0 | 2026-10-22 | 定时唤起：应用目录里的 `schedule.ini` 列出时间点，系统到点启动应用（正在运行则调用 `app-schedule` 钩子）；新增 `(app-scheduled)`、`(app-return)`。新增 `(gui-text-scaled x y str color scale [font-id])`：用现有字体按整数倍放大绘制，不需要单独的大字体。预留的 `(time-local)` 实现为正式接口（仅设备）：本地日期时间 `(年 月 日 时 分 秒 星期)`，用于取年份或按天计数。吃药提醒应用声明 `api = 1.7`。 |

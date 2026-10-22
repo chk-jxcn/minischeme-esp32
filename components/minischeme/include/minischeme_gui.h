@@ -278,6 +278,8 @@ void mini_gui_set_font(int font_id);
 int  mini_gui_get_font(void);
 int  mini_gui_text_width(const char *str, int font_id);
 void mini_gui_text_styled(int x, int y, const char *str, uint16_t color, int font_id);
+/** @brief Text in a font, every dot scale x scale (2..8; 1 is mini_gui_text_styled). */
+void mini_gui_text_scaled(int x, int y, const char *str, uint16_t color, int font_id, int scale);
 void mini_gui_text_box(int x, int y, int w, int h, const char *str, uint16_t color, int font_id, int halign, int valign);
 
 /* Text longer than its box scrolls in a loop at speed pixels per second:
