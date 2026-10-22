@@ -62,6 +62,7 @@
 #include "esp_flash.h"
 #include "esp_mac.h"
 #include "esp_rom_sys.h"
+#include "esp_random.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
 
@@ -1312,8 +1313,8 @@ static void remote_input(const char *button, const char *light, char *out, size_
  *    cannot reach the board through the visitor's browser;
  *  - "Origin: null" is an app's own page (sandboxed by /app's CSP): it may
  *    call /api/app/call and /api/app/file, and only when the request comes
- *    from this board's /app page (its Referer), not from a sandboxed frame
- *    of some other site;
+ *    from this board's /app page (the token of its URL, or a Referer), not
+ *    from a sandboxed frame of some other site;
  *  - with [http] http_password set, every route needs it (X-MiniScheme-Auth
  *    header or ?auth=), except the app routes called by the board's own
  *    /app page;
@@ -2394,6 +2395,25 @@ static bool referer_is_board(httpd_req_t *req) {
     return rn > 0 && rn == hn && strncasecmp(rh, hh, rn) == 0;
 }
 
+/* The board's /app page carries a token in its URL (/app?t=...), random
+ * per boot: its calls send it back, since a sandboxed page (an opaque
+ * origin) gets no Referer. Only the page itself (or a client that can read
+ * /app anyway) learns it; another site's frame cannot read it. */
+static const char *app_page_token(void) {
+    static char token[17];
+    if (!token[0]) {
+        uint8_t r[8];
+        esp_fill_random(r, sizeof(r));
+        for (int i = 0; i < 8; i++) snprintf(token + 2 * i, 3, "%02x", r[i]);
+    }
+    return token;
+}
+
+static bool app_token_ok(httpd_req_t *req) {
+    char given[24];
+    return http_query(req, "t", given, sizeof(given)) && secret_equal(given, app_page_token());
+}
+
 /* The password given with the request (X-MiniScheme-Auth, or ?auth=) is right */
 static bool http_authed(httpd_req_t *req) {
     char given[96];
@@ -2429,7 +2449,7 @@ static esp_err_t http_guard(httpd_req_t *req) {
     if (s_http_password[0] != '\0') {
         /* an app's own page on this board cannot know the password: its two
          * routes stay open to it, and only to it */
-        bool own_app_page = app_route && null_origin && referer_is_board(req);
+        bool own_app_page = app_route && null_origin && (app_token_ok(req) || referer_is_board(req));
         if (!own_app_page && !http_authed(req)) {
             return http_refuse(req, "401 Unauthorized", "unauthorized", true);
         }
@@ -2572,6 +2592,14 @@ static esp_err_t http_app_page(httpd_req_t *req) {
         httpd_resp_set_status(req, "404 Not Found");
         httpd_resp_set_type(req, "text/html; charset=utf-8");
         return httpd_resp_sendstr(req, "<p style=\"font-family:sans-serif\">This app has no web page.</p>");
+    }
+    if (!app_token_ok(req)) {   /* the page's calls send the token back (appweb.js) */
+        static char location[32];
+        snprintf(location, sizeof(location), "/app?t=%s", app_page_token());
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", location);
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_send(req, NULL, 0);
     }
     FILE *fp = fopen(s_app_path, "rb");
     uint8_t *buf = fp ? (uint8_t *)malloc(2048) : NULL;
