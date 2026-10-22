@@ -10,7 +10,7 @@ MiniScheme ESP32 runs the MiniScheme bytecode VM on an ESP32-D0WDQ6 driving a 3.
 
 ## Features
 - **Band rendering**: the screen is drawn 13 rows at a time (8.3 KB) instead of a 300 KB frame buffer.
-- **Measured VM heap**: after WiFi joins, the firmware measures free RAM and gives the VM `min(free - reserved_heap, largest block - 8 KB)`, about 102 KB.
+- **Measured VM heap**: after WiFi joins, the firmware measures free RAM and gives the VM `min(free - reserved_heap, largest block - 4 KB)`, about 116 KB (since 1.0.70: `reserved_heap` 60 KB, half-band LCD DMA transfers, 2 static WiFi rx buffers, trimmed task stacks).
 - **Apps from flash**: MSBC images run in place from the `approm` partition.
 - **HTTP API with a password**: `config.ini [http] http_password` (or the WebREPL's `[server] hardware_password`), sent in the `X-MiniScheme-Auth` header or as `?auth=` (percent-encoded); every API route needs it once set, compared in constant time. Browser pages may call the API only from this network or from the published WebREPL.
 - **Plain HTTP to app servers** (since 1.0.69, no TLS and no encryption: it saves RAM and about 15 KB of code): each request carries the device id (`X-MiniScheme-Device`, the WiFi MAC) and the app service password set for that server (`X-MiniScheme-Password`, base64, not encrypted) for [minischeme-proxy](https://github.com/chk-jxcn/minischeme-proxy) to tell devices apart. Keys of the old encrypted channel in config.ini values (`<key>@http://...`) are dropped at boot.

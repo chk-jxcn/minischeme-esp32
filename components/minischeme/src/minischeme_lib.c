@@ -807,10 +807,9 @@ void esp32_wifi_early_init(void) {
             esp_event_loop_create_default();
             s_esp32_sta_netif = esp_netif_create_default_wifi_sta();
         }
+        /* the buffer counts of sdkconfig (2 static, 6 dynamic rx, 6 tx): each
+         * static rx buffer holds 1.6 KB for good, the VM heap gets it instead */
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        cfg.static_rx_buf_num = 4;
-        cfg.dynamic_rx_buf_num = 8;
-        cfg.dynamic_tx_buf_num = 8;
         cfg.mgmt_sbuf_num = 8;
         cfg.rx_ba_win = 4;
         esp_err_t err = esp_wifi_init(&cfg);

@@ -200,7 +200,7 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
  * 64 KB gives a 101 KB VM heap with ~34 KB free when idle and ~19 KB at the
  * lowest under web load. 60 KB still kept 15 KB but served half the requests
  * (the HTTP server starves); without IRAM, 64 KB fell to 8 KB under load. */
-#define MIN_OS_RESERVE       (64 * 1024)
+#define MIN_OS_RESERVE       (60 * 1024)
 #define WIFI_PROBE_WAIT_MS   4000        /* the heap probe waits this long for WiFi to join */
 /* Largest block claimed at boot for the VM heap (128 KB heap + VM struct/eden) */
 #define VM_HEAP_HOLD_MAX     (136 * 1024)
@@ -213,7 +213,7 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 #define DEF_VM_EDEN           (4 * 1024)
 #define DEF_VM_STACK          1024
 #define DEF_VM_FRAMES         256
-#define DEF_HTTP_STACK        6144
+#define DEF_HTTP_STACK        5120
 
 static const char *TAG = "MiniScheme_ESP32";
 
@@ -3503,7 +3503,8 @@ static void mirror_stream_task(void *pvParameters) {
 
 static void start_mirror_server(void) {
     if (s_mirror_task_handle != NULL) return;
-    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 4096, NULL, 5, &s_mirror_task_handle, 0);
+    /* measured: about 2.3 KB used while streaming */
+    xTaskCreatePinnedToCore(mirror_stream_task, "mirror_stream", 3584, NULL, 5, &s_mirror_task_handle, 0);
 }
 
 #endif /* MINISCHEME_FW_HTTP */
@@ -3531,7 +3532,7 @@ typedef struct {
     int lcd_gamma;                 /* [display] lcd_gamma: ESP32_LCD_GAMMA_* */
     uint8_t gamma_pos[16], gamma_neg[16], vcom[4];   /* lcd_gamma_pos / _neg, lcd_vcom (hex bytes) */
     size_t gamma_pos_n, gamma_neg_n, vcom_n;
-    int lcd_dma_lines;             /* rows per DMA transfer, 0 = whole band */
+    int lcd_dma_lines;             /* rows per DMA transfer, 0 = half a band */
     uint32_t lcd_clock_hz;         /* requested WR clock */
     /* [memory] */
     size_t reserved_heap;          /* heap kept free for the system at run time */
@@ -3864,13 +3865,21 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
         write_config_template(path);
     } else {
         *cfg = parsed;
-        if (cfg->reserved_heap == 80 * 1024 || cfg->reserved_heap == 76 * 1024) {
-            /* a former default (80 KB, 76 KB), never changed by hand: the current one, in the file too */
+        if (cfg->reserved_heap == 80 * 1024 || cfg->reserved_heap == 76 * 1024 || cfg->reserved_heap == 64 * 1024) {
+            /* a former default (80, 76, 64 KB), never changed by hand: the current one, in the file too */
             char v[16];
             snprintf(v, sizeof(v), "%u", (unsigned)MIN_OS_RESERVE);
             const char *key = "reserved_heap", *val = v;
             cfg->reserved_heap = MIN_OS_RESERVE;
             if (config_save("memory", &key, &val, 1)) ESP_LOGI(TAG, "config.ini: reserved_heap %s (the new default)", v);
+        }
+        if (cfg->http_stack == 6144) {
+            /* the former default (the WebREPL setup wrote it): 3.3 KB is used */
+            char v[16];
+            snprintf(v, sizeof(v), "%u", (unsigned)DEF_HTTP_STACK);
+            const char *key = "http_stack", *val = v;
+            cfg->http_stack = DEF_HTTP_STACK;
+            if (config_save("memory", &key, &val, 1)) ESP_LOGI(TAG, "config.ini: http_stack %s (the new default)", v);
         }
     }
     mini_device_button_timing(cfg->button_ms[0], cfg->button_ms[1], cfg->button_ms[2]);
@@ -4405,7 +4414,8 @@ static Value prim_tick_bench(MiniVM *vm, int argc, Value *argv) {
 static Value prim_mem_report(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
     static const char *const tasks[] = {
-        "main", "httpd", "jsonfeed", "tiT", "wifi", "sys_evt", "esp_timer", "ipc0", "ipc1", "IDLE0", "IDLE1", "Tmr Svc",
+        "main", "httpd", "jsonfeed", "mirror_stream", "market", "tiT", "wifi", "sys_evt", "esp_timer", "ipc0", "ipc1",
+        "IDLE0", "IDLE1", "Tmr Svc",
     };
     Value lst = mini_nil();
     mini_push_root(vm, &lst);
@@ -5560,6 +5570,23 @@ void app_main(void) {
         config_save("app", keys, values, 2);
     }
     load_or_create_config("/spiffs/config.ini", &s_sys_cfg);
+    /* The serial console's driver before the VM takes the heap: installed
+     * after it, its 2.5 KB of buffers may not be found and the console stays
+     * deaf (@INFO, @EXEC, the WebREPL's serial link) */
+    {
+        const uart_config_t uart_cfg = {
+            .baud_rate = 115200,
+            .data_bits = UART_DATA_8_BITS,
+            .parity    = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+        };
+        esp_err_t uerr = uart_driver_install(UART_NUM_0, 2048, 512, 0, NULL, 0);
+        if (uerr != ESP_OK) ESP_LOGE(TAG, "Serial console: uart_driver_install failed (%s)", esp_err_to_name(uerr));
+        uart_param_config(UART_NUM_0, &uart_cfg);
+        uart_vfs_dev_use_driver(UART_NUM_0);
+    }
     s_http_stack = s_sys_cfg.http_stack;
     if (s_sys_cfg.color_fmt == MINI_GUI_COLOR_4BPP) s_sys_cfg.color_fmt = MINI_GUI_COLOR_RGB565;
     bool rgb666 = s_sys_cfg.color_fmt == MINI_GUI_COLOR_RGB666;
@@ -5609,7 +5636,10 @@ void app_main(void) {
         /* The driver keeps two copies of a chunk, plus a staging copy when rows
          * are converted: chunks stay small even when a low-bit band is tall */
         int lines = band && mini_gui_get_band_lines() < DEF_BAND_LINES ? mini_gui_get_band_lines() : DEF_BAND_LINES;
-        int chunk = (s_sys_cfg.lcd_dma_lines > 0 && s_sys_cfg.lcd_dma_lines < lines) ? s_sys_cfg.lcd_dma_lines : lines;
+        /* half a band by default: the driver's two copies of a chunk are RAM
+         * (16.6 KB for a whole 13-row band); rendering, not the bus, sets the pace */
+        int chunk = (s_sys_cfg.lcd_dma_lines > 0 && s_sys_cfg.lcd_dma_lines < lines) ? s_sys_cfg.lcd_dma_lines
+                                                                                       : (lines + 1) / 2;
         size_t chunk_bytes = (size_t)s_sys_cfg.width * (size_t)chunk * (rgb666 ? 3u : 2u);
         if (!esp32_ili9488_start_dma(chunk_bytes, s_sys_cfg.lcd_clock_hz, rgb666)) {
             ESP_LOGW(TAG, "LCD DMA unavailable, using GPIO bit-bang transfers");
@@ -5735,9 +5765,10 @@ void app_main(void) {
     size_t largest_8bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     size_t reserved = s_sys_cfg.reserved_heap; /* [memory] reserved_heap */
     size_t avail = (free_heap > reserved) ? (free_heap - reserved) : 16384;
-    /* the VM struct and eden may be carved from the same block */
-    if (avail > (largest_8bit - 8192)) {
-        avail = (largest_8bit > 8192) ? (largest_8bit - 8192) : 32768;
+    /* the VM struct (about 1 KB) may be carved from the same block; eden
+     * and the stacks come from elsewhere */
+    if (avail > (largest_8bit - 4096)) {
+        avail = (largest_8bit > 4096) ? (largest_8bit - 4096) : 32768;
     }
     avail = (avail / 1024) * 1024;   /* KB steps: 4 KB steps lost up to 4 KB of it */
     if (avail > s_sys_cfg.max_heap) avail = s_sys_cfg.max_heap; /* [memory] max_heap */
@@ -5852,19 +5883,7 @@ void app_main(void) {
     }
 #endif
 
-    /* 8. Serial console */
-    const uart_config_t uart_cfg = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    uart_driver_install(UART_NUM_0, 2048, 512, 0, NULL, 0);
-    uart_param_config(UART_NUM_0, &uart_cfg);
-    uart_vfs_dev_use_driver(UART_NUM_0);
-
+    /* 8. Serial console (its driver was installed at the start) */
     printf("\r\n====================================================\r\n");
     printf("  MiniScheme REPL - ESP32 3.5\" ILI9488 (320x480)\r\n");
     printf("  Compiler on device: %s\r\n", s_has_compiler ? "yes (text REPL enabled)" : "no (use WebREPL bytecode mode)");

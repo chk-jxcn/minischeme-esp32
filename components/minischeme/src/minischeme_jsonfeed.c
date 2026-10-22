@@ -911,7 +911,7 @@ static Value prim_json_feed_start(MiniVM *vm, int argc, Value *argv) {
     if (s_state == JF_IDLE) s_state = JF_CONNECTING;
     JF_UNLOCK();
 #if defined(ESP_PLATFORM)
-    if (!s_task) xTaskCreate(jf_task, "jsonfeed", 4096, NULL, 4, &s_task);
+    if (!s_task) xTaskCreate(jf_task, "jsonfeed", 4096, NULL, 4, &s_task);   /* about 2.7 KB used */
     else xTaskNotifyGive(s_task);
 #endif
     return mini_true();
