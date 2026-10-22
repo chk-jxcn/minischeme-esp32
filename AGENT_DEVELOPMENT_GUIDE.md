@@ -131,8 +131,8 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 | Bootloader | `0x1000` | | `bootloader.bin` |
 | Partition table | `0x8000` | | `partition-table.bin` |
 | `factory` (app) | `0x10000` | 1536 KB | `minischeme_esp32.bin` |
-| `fontrom` | `0x190000` | 768 KB | system font ROM |
-| `approm` | `0x250000` | 256 KB | the running app's image (XIP) |
+| `fontrom` | `0x190000` | 512 KB | system font ROM (768 KB before 1.0.71; one font, simsun-16, uses 292 KB) |
+| `approm` | `0x210000` | 512 KB | app images (XIP) in two 256 KB slots: the boot app in slot 0, another app (a scheduled launch) in slot 1; an app whose image is in a slot runs from it without writing flash |
 | `storage` | `0x290000` | 1472 KB | **LittleFS**, mounted at `/spiffs` (the name is historical; the partition subtype is still `spiffs`) |
 
 - Firmware builds use **ESP-IDF 6.1** (locally and in CI, Docker image `espressif/idf:v6.1`).

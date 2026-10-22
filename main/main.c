@@ -182,6 +182,8 @@ static int64_t s_sched_return_at = 0;   /* schedule.ini return_after: the automa
 static Value prim_app_scheduled(MiniVM *vm, int argc, Value *argv);
 static Value prim_app_return(MiniVM *vm, int argc, Value *argv);
 static const esp_partition_t *s_rom_part;   /* the App ROM partition (defined with the ROM code) */
+static int s_rom_slot;                       /* the slot of the image in use, and its size */
+static size_t s_rom_slot_size;
 
 static bool file_has_magic(const char *path, const char *magic);
 static bool root_app_shadowed(const char *path);
@@ -705,8 +707,9 @@ static void job_reply_hardware(RemoteJob *job) {
     /* the settings run from RAM and never map the App ROM: look the partition up */
     const esp_partition_t *rom = s_rom_part ? s_rom_part
         : esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)APP_ROM_SUBTYPE, NULL);
-    hw_put(job, &n, ",\"app_rom\":{\"partition\":%u,\"image\":%u}",
-           (unsigned)(rom ? rom->size : 0), (unsigned)st.rom_bytes);
+    hw_put(job, &n, ",\"app_rom\":{\"partition\":%u,\"image\":%u,\"slot\":%d,\"slot_size\":%u}",
+           (unsigned)(rom ? rom->size : 0), (unsigned)st.rom_bytes, st.rom_bytes ? s_rom_slot : -1,
+           (unsigned)s_rom_slot_size);
     hw_put(job, &n, ",\"font_rom\":{\"capacity\":%u,\"used\":%u,\"fonts\":[",
            (unsigned)mini_fontrom_capacity(), (unsigned)mini_fontrom_used());
     for (int i = 0; i < mini_fontrom_count(); i++) {
@@ -4837,8 +4840,27 @@ static void factory_hold_at_boot(void) {
 #define APP_ROM_FORMAT  1u   /* bump to force a rebuild after layout changes */
 
 static const esp_partition_t *s_rom_part = NULL;
-static const void *s_rom_ptr = NULL;
+static const void *s_rom_ptr = NULL;     /* the partition, mapped */
 static esp_partition_mmap_handle_t s_rom_map;
+
+/* The partition holds 256 KB slots (one on a 256 KB partition): the boot
+ * app's image in slot 0, the other app's (a scheduled launch, an app
+ * started from the device page) in slot 1. An app whose image is in either
+ * slot runs from it: going to the scheduled app and back writes nothing. */
+#define APP_ROM_SLOT (256 * 1024)
+static int s_rom_slot = 0;
+static size_t s_rom_slot_size = 0;
+static const void *s_rom_slot_ptr = NULL;
+
+static int rom_slots(void) {
+    return (s_rom_part && s_rom_part->size >= 2 * APP_ROM_SLOT) ? (int)(s_rom_part->size / APP_ROM_SLOT) : 1;
+}
+
+static void rom_use_slot(int i) {
+    s_rom_slot = i;
+    s_rom_slot_size = rom_slots() > 1 ? APP_ROM_SLOT : s_rom_part->size;
+    s_rom_slot_ptr = (const uint8_t *)s_rom_ptr + (size_t)i * s_rom_slot_size;
+}
 
 /* Image key: app bytes + firmware build, so a change to either rebuilds */
 static uint32_t app_rom_key(const char *path) {
@@ -4860,25 +4882,29 @@ static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 typedef struct {
     const esp_partition_t *part;
-    size_t erased; /* bytes erased so far, sector aligned */
+    size_t base;   /* the slot's offset in the partition */
+    size_t size;   /* the slot's size */
+    size_t erased; /* bytes of the slot erased so far, sector aligned */
 } RomFlashSink;
 
 static bool rom_flash_write(size_t off, const void *data, size_t len, void *user) {
     RomFlashSink *rs = (RomFlashSink *)user;
-    if (off + len > rs->part->size) return false;
+    if (off + len > rs->size) return false;
     size_t need = (off + len + 4095) & ~(size_t)4095;
     if (need > rs->erased) {
-        if (esp_partition_erase_range(rs->part, rs->erased, need - rs->erased) != ESP_OK) return false;
+        if (esp_partition_erase_range(rs->part, rs->base + rs->erased, need - rs->erased) != ESP_OK) return false;
         rs->erased = need;
     }
-    return esp_partition_write(rs->part, off, data, len) == ESP_OK;
+    return esp_partition_write(rs->part, rs->base + off, data, len) == ESP_OK;
 }
 
-/* Maps the image partition; true when the image there matches key */
-static bool map_app_rom(uint32_t key) {
+/* Maps the image partition; true when a slot holds the image of key (that
+ * slot is used), else the slot to build it in is chosen: 0 for the boot
+ * app, 1 for any other */
+static bool map_app_rom(uint32_t key, bool boot_app) {
     s_rom_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, APP_ROM_SUBTYPE, NULL);
-    mini_lib_set_app_rom_capacity(s_rom_part ? s_rom_part->size : 0);
     if (!s_rom_part) {
+        mini_lib_set_app_rom_capacity(0);
         ESP_LOGW(TAG, "No approm partition: app runs from RAM");
         return false;
     }
@@ -4886,9 +4912,21 @@ static bool map_app_rom(uint32_t key) {
                            &s_rom_ptr, &s_rom_map) != ESP_OK) {
         ESP_LOGW(TAG, "approm mmap failed: app runs from RAM");
         s_rom_ptr = NULL;
+        mini_lib_set_app_rom_capacity(0);
         return false;
     }
-    return mini_rom_check(s_rom_ptr, s_rom_part->size, key);
+    int n = rom_slots();
+    for (int i = 0; i < n; i++) {
+        rom_use_slot(i);
+        if (mini_rom_check(s_rom_slot_ptr, s_rom_slot_size, key)) {
+            mini_lib_set_app_rom_capacity(s_rom_slot_size);
+            ESP_LOGI(TAG, "App ROM: slot %d of %d holds the image", i, n);
+            return true;
+        }
+    }
+    rom_use_slot(boot_app || n < 2 ? 0 : 1);
+    mini_lib_set_app_rom_capacity(s_rom_slot_size);
+    return false;
 }
 
 /* ========================================================================= */
@@ -4987,15 +5025,15 @@ static bool stream_app_rom(uint32_t key, const char *path) {
     in.total = (size_t)ftell(in.fp);
     fseek(in.fp, 0, SEEK_SET);
     mini_device_progress(0, now_ms());
-    RomFlashSink rs = { s_rom_part, 0 };
+    RomFlashSink rs = { s_rom_part, (size_t)s_rom_slot * s_rom_slot_size, s_rom_slot_size, 0 };
     size_t peak = 0;
     const char *err = NULL;
-    size_t size = mini_rom_build_stream(rom_file_read, &in, (uintptr_t)s_rom_ptr, s_rom_ptr, key,
+    size_t size = mini_rom_build_stream(rom_file_read, &in, (uintptr_t)s_rom_slot_ptr, s_rom_slot_ptr, key,
                                         rom_flash_write, &rs, &peak, &err);
     fclose(in.fp);
-    bool ok = size && mini_rom_check(s_rom_ptr, s_rom_part->size, key);
+    bool ok = size && mini_rom_check(s_rom_slot_ptr, s_rom_slot_size, key);
     if (ok) {
-        ESP_LOGI(TAG, "App ROM streamed: %u B in %d ms, %u B of memory", (unsigned)size,
+        ESP_LOGI(TAG, "App ROM streamed into slot %d: %u B in %d ms, %u B of memory", s_rom_slot, (unsigned)size,
                  (int)((esp_timer_get_time() - t0) / 1000), (unsigned)peak);
         mini_device_progress(1000, now_ms());
         vTaskDelay(pdMS_TO_TICKS(200));  /* the full bar, then the app */
@@ -5736,7 +5774,13 @@ void app_main(void) {
     }
     uint32_t rom_key = (fasl_app || s_settings_mode) ? 0 : app_rom_key(app_path);
     if (!s_sys_cfg.app_xip) rom_key = 0; /* app_xip = 0: always load to RAM */
-    bool rom_ok = rom_key && map_app_rom(rom_key);
+    bool boot_app = false;
+    {   /* the boot app's image goes in slot 0, any other app's in slot 1 */
+        char bp[64];
+        boot_app = boot_app_path(s_sys_cfg.boot_app, bp, sizeof(bp)) ? strcmp(bp, app_path) == 0
+                                                                    : strcmp(app_path, APP_MSBC_PATH) == 0;
+    }
+    bool rom_ok = rom_key && map_app_rom(rom_key, boot_app);
     /* The streaming build needs a few KB: it runs while the VM's block is
      * still held, so nothing it allocates can split that block */
     if (rom_key && !rom_ok && s_rom_ptr) {
@@ -5794,7 +5838,7 @@ void app_main(void) {
     /* 7. Run the app in place from Flash, else load it from SPIFFS to RAM
      * (bytecode, or a heap snapshot restored in place of the whole heap),
      * falling back to the copy embedded in the firmware */
-    Value app_root = rom_ok ? mini_rom_attach(s_vm, s_rom_ptr, s_rom_part->size, rom_key) : mini_void();
+    Value app_root = rom_ok ? mini_rom_attach(s_vm, s_rom_slot_ptr, s_rom_slot_size, rom_key) : mini_void();
     /* the app's own code touches only its folder; the settings are the system */
     mini_app_sandbox_set(s_settings_mode ? "" : s_app_dir);
     s_app_quota = (size_t)(s_app_storage_kb > s_sys_cfg.app_storage_kb ? s_app_storage_kb : s_sys_cfg.app_storage_kb) * 1024;

@@ -76,7 +76,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('mfnt', nargs='*', help='.mfnt files (named by the name stored in them)')
     ap.add_argument('--font', action='append', default=[], help='face:size[:gb2312|source-file] rendered here')
-    ap.add_argument('--size', default='768K', help='partition size (default 768K)')
+    ap.add_argument('--size', default='512K', help='partition size (default 512K, firmware 1.0.71+)')
     ap.add_argument('-o', '--output', required=True)
     a = ap.parse_args()
     fonts = []
