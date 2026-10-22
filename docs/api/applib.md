@@ -333,6 +333,46 @@ Do not put secrets in the defaults: the meta trailer travels inside the image.
 applib itself reads `proxy` (no default: unset, the footer says where to set it), `carousel` and
 `carousel_seconds`, from the app's ini or `config.ini`.
 
+Since API 1.6.0, `(config-get "key" app-id)` reads another app's `config.ini`, but only in a
+combined app and only for its `[combo] members` (any other id is an error);
+`(app-has-config? app-id)` tells whether that member has one. Older firmware ignores the
+second argument of `config-get`: guard with `(defined? 'app-has-config?)`.
+
+### Combined apps (合集, API 1.6)
+
+A combined app shows pages of several apps in one carousel. Its meta.ini names the
+member apps; the build (`tools/build_apps.py`, or the WebREPL's 合并应用) puts applib,
+`apps/lib/combo.scm` and every member's code into one image:
+
+```ini
+[app]
+id = combo
+name = 合集
+pages = 5
+
+[combo]
+members = weather, calendar, wxpusher, stocks
+
+[config]
+entries =            ; app.page, comma separated, in carousel order; empty: every page
+carousel = 1
+carousel_seconds = 10
+```
+
+- **English page names**: every app lists its pages in `[app] page_ids` (`page_ids = today,
+  month, moon`); `front` is always the first page. An entry is `<app>.<page>`
+  (`calendar.month`), `<app>.front`, a page number (`weather.2`, 1 first) or a view the app
+  declares with `app-view!` (`wxpusher.news[0]`, the newest message).
+- **Settings**: each member keeps reading its **own** `config.ini`: while a member's code runs,
+  `app-config` calls `(config-get key member-id)`; a member that never ran alone (no
+  `config.ini`, `(app-has-config? id)` is `#f`) uses its meta.ini defaults. Edit a member's
+  settings in that app, not in the combined app.
+- **Hooks**: a member's `app-subtitle-proc`, `app-tick-proc`, `app-data-proc`,
+  `app-long-press`, views and empty pages are kept per member; `app-header-proc` and
+  `app-page-title-only` are cleared (the combined app titles each page "app page").
+- Short press: next entry. Long press: the entry app's own long press.
+- The combined app needs API 1.6 (the build declares it); older firmware does not install it.
+
 ---
 
 ## 3. Page model and data flow
@@ -421,6 +461,12 @@ the procedure is set, there are items, and it returns a non-empty string), on ot
 pages the page name, in `theme-accent`; with a carousel, the countdown bar; on pages
 2..N the badge "n/N"; the clock `app-time` at the right edge. The title and subtitle
 are cut or scrolled to fit (`txt-fit`).
+
+- `app-header-proc` `(lambda (items x w) ...)` draws page 1's title area `[x, x + w)`
+  itself (the calendar: the date and the weekday at a fixed offset).
+- `app-page-title-only` `#t`: pages 2..N show the page name alone, without `app-title`
+  (the calendar: 月历, 月相).
+- `app-index-always` `#t`: the "n/N" badge also on page 1 (the combined app).
 
 ### Carousel
 
@@ -524,6 +570,10 @@ every call.
 | `app-subtitle-proc` | `#f` or `(lambda (items) ...)` giving the text after the title on page 1. | string or `#f` |
 | `app-tick-proc` | `#f` or `(lambda (tick) ...)` called every second. | |
 | `app-render-empty-pages` | Page indexes rendered with `'()` before data. Default `'()`. | list |
+| `app-header-proc` | `#f` or `(lambda (items x w) ...)` drawing page 1's title area itself. | |
+| `app-page-title-only` | `#t`: pages 2..N are titled by their name alone. Default `#f`. | boolean |
+| `app-index-always` | `#t`: the "n/N" badge on page 1 too. Default `#f`. | boolean |
+| `(app-view! name page proc)` | Declares a view a combined app may show: entry `<app>.<name>[i]` calls `(proc items i)` on page `page`'s data (wxpusher: `news`). | |
 | `app-pages` | Vector of page descriptors. | vector |
 | `app-urls` | Vector of the pages' URLs (built once). | vector |
 | `app-page-index` | Current page, 0-based. | integer |
@@ -761,7 +811,7 @@ y   0 +--------------------------------+
 
 ### Memory and speed
 
-- The board's VM heap is about 88 KB. Keep the app's live heap under about 32 KB
+- The board's VM heap is about 101 KB (firmware 1.0.64). Keep the app's live heap under about 32 KB
   (the test suite checks this with the cached documents). Each cached document is up
   to 4 KB of strings plus a 6-slot vector per item; up to 3 are kept (all pages'
   with a carousel), so keep documents small.
