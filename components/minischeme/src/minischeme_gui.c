@@ -160,6 +160,9 @@ static int     s_dl_count = 0;
 static int     s_dl_str_used = 0;
 static bool    s_rec_on = false;       /* drawing calls record instead of raster */
 static bool    s_rec_overflow = false; /* list full or unrecordable call seen */
+/* A whole-screen recording overflowed since the last change: moving boxes
+ * record only their own rows until the app changes something again */
+static bool    s_anim_whole_failed = false;
 /* The list still is what the render procedure draws for rows [s_dl_y0,
  * s_dl_y1): no gui-invalidate since it was recorded. Frames that only move
  * scrolling text replay it without running Scheme. */
@@ -1609,11 +1612,13 @@ static void gui_queue_rows(int y, int h);
 
 void mini_gui_forget_recording(void) {
     s_dl_fresh = false;
+    s_anim_whole_failed = false;
 }
 
 void mini_gui_invalidate(int y, int h) {
     if (s_in_band_render) return;
     s_dl_fresh = false; /* the app changed something: run the render procedure */
+    s_anim_whole_failed = false;
     gui_queue_rows(y, h);
 }
 
@@ -1880,7 +1885,22 @@ static int gui_render_rect(MiniVM *vm, int x0, int y0, int x1, int y1, int *rows
     if (x0 >= x1 || y0 >= y1) return 0;
     size_t stride = gui_row_bytes(x1 - x0, s_bits);
     int fit = (int)(s_surf.stride * (size_t)s_surf.rows / stride); /* the band buffer, as on the board */
-    int errors = gui_record_span(vm, y0, y1);
+    /* A list that does not cover the box: record the whole screen once, so
+     * the next steps of this box and the other moving boxes (five scrolling
+     * titles) replay it instead of running the render procedure for each
+     * step of each box; only a change of the app records again. A screen
+     * too big for the list records the box's rows, as before. */
+    bool covered = s_dl_fresh && !s_rec_overflow && y0 >= s_dl_y0 && y1 <= s_dl_y1;
+    int errors;
+    if (!covered && !s_anim_whole_failed) {
+        errors = gui_record_span(vm, 0, s_height);
+        if (s_rec_overflow) {
+            s_anim_whole_failed = true;
+            errors += gui_record_span(vm, y0, y1);
+        }
+    } else {
+        errors = gui_record_span(vm, y0, y1);
+    }
     if (s_rec_overflow || fit < 1) {
         /* no list to replay: the rows the usual way */
         errors += mini_gui_band_render(vm, y0, y1, NULL, NULL);
