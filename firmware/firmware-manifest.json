@@ -1,5 +1,5 @@
 {
-  "version": "1.0.74",
+  "version": "1.0.75",
   "chip": "ESP32",
   "idf": "6.1",
   "files": [
@@ -8,7 +8,7 @@
       "address": "0x1000",
       "offset": 4096,
       "size": 26128,
-      "sha256": "15293c61bd0eaf7b1d585f246ddc96da1e847c4aa674ad16b600a92cf8d1166e"
+      "sha256": "ff60824139eeadb4b90669dfb94649c5533cd8725cfa2a349e59f8dcc980012a"
     },
     {
       "name": "partition-table.bin",
@@ -21,8 +21,8 @@
       "name": "minischeme_esp32.bin",
       "address": "0x10000",
       "offset": 65536,
-      "size": 1436112,
-      "sha256": "1d3fcdd1bf559f5847a771af27912ebba69cae35ae55ded4ad744daf02d68326"
+      "size": 1428720,
+      "sha256": "0a3055af83808528a520cdf2cc5e60e5092d19115cbd3a14056712bb4a1cea78"
     },
     {
       "name": "fontrom.bin",
