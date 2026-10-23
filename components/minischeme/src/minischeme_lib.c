@@ -1154,6 +1154,21 @@ static Value prim_fs_read(MiniVM *vm, int argc, Value *argv) {
     return res;
 }
 
+/* (theme-css) => the system color scheme file /spiffs/theme.css as a string
+ * (any app may read it, outside its folder; nothing else of the system), #f
+ * without one or when it is over 16 KB. The app framework reads it (gui.scm). */
+#define THEME_CSS_PATH "/spiffs/theme.css"
+#define THEME_CSS_MAX  (16 * 1024)
+static Value prim_theme_css(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    size_t len = 0;
+    char *c = hal_fs_read(THEME_CSS_PATH, &len);
+    if (!c) return mini_false();
+    Value res = len <= THEME_CSS_MAX ? mini_make_string_len(vm, c, len) : mini_false();
+    free(c);
+    return res;
+}
+
 static Value prim_fs_exists_p(MiniVM *vm, int argc, Value *argv) {
     char path[96];
     if (argc >= 1 && mini_is_string(argv[0])) {
@@ -1753,6 +1768,7 @@ void mini_register_hardware_lib(MiniVM *vm) {
         /* File System */
         { "fs-write",               prim_fs_write },
         { "fs-read",                prim_fs_read },
+        { "theme-css",              prim_theme_css },
         { "fs-exists?",             prim_fs_exists_p },
         { "fs-remove",              prim_fs_remove },
         /* System */

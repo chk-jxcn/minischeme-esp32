@@ -59,6 +59,7 @@ h2 button.small{margin-top:-4px}
 <button id="tab-manage" onclick="showTab('manage')">应用管理</button>
 <button id="tab-config" onclick="showTab('config')">应用配置</button>
 <button id="tab-system" onclick="showTab('system')">系统配置</button>
+<button id="tab-theme" onclick="showTab('theme')">配色方案</button>
 <button id="tab-info" onclick="showTab('info')">系统信息</button>
 </nav>
 </div></header>
@@ -178,6 +179,65 @@ h2 button.small{margin-top:-4px}
 <section>
 <h2>设备</h2>
 <button onclick="restart()">重启并运行启动应用</button>
+</section>
+</div>
+
+<div id="pane-theme" class="pane">
+<section>
+<h2>白天 / 黑夜</h2>
+<div class="row">
+<div><label for="th_mode">模式</label>
+<select id="th_mode" onchange="themeFormShow()"><option value="auto">自动切换</option><option value="day">一直白天（亮色）</option><option value="night">一直黑夜（暗色）</option></select></div>
+<div id="th_switch_box"><label for="th_switch">自动切换依据</label>
+<select id="th_switch" onchange="themeFormShow()"><option value="light">光感</option><option value="time">固定时间</option><option value="sun">日出日落</option></select></div>
+</div>
+<div class="row" id="th_light_box">
+<div><label for="th_light_day">光感达到多少变白天</label><input id="th_light_day" type="number" min="0" max="1000" placeholder="120"></div>
+<div><label for="th_light_night">光感降到多少变黑夜</label><input id="th_light_night" type="number" min="0" max="1000" placeholder="50"></div>
+</div>
+<div class="row" id="th_time_box">
+<div><label for="th_day_start">白天开始</label><input id="th_day_start" type="time" placeholder="07:00"></div>
+<div><label for="th_night_start">黑夜开始</label><input id="th_night_start" type="time" placeholder="19:00"></div>
+</div>
+<div class="row" id="th_sun_box">
+<div><label for="th_lat">纬度（北纬为正）</label><input id="th_lat" type="number" step="0.0001" min="-90" max="90" placeholder="39.9042"></div>
+<div><label for="th_lon">经度（东经为正）</label><input id="th_lon" type="number" step="0.0001" min="-180" max="180" placeholder="116.4074"></div>
+</div>
+<div class="row">
+<div><label for="th_day_scheme">白天用的配色</label><select id="th_day_scheme"></select></div>
+<div><label for="th_night_scheme">黑夜用的配色</label><select id="th_night_scheme"></select></div>
+</div>
+<div class="desc" id="th_now"></div>
+<div class="desc">光感是 0..1000 的大致亮度（light-lux），两个阈值之间保持原来的模式，不会来回闪；日出日落按设备的时区计算，没有经纬度时按固定时间。应用每 10 秒检查一次，保存后 10 秒内生效。单个应用可在自己的配置里用同名的键（theme、theme_switch …）覆盖。</div>
+<button onclick="themeSaveMode()">保存</button>
+</section>
+
+<section>
+<h2>配色（类似 CSS）</h2>
+<div class="row">
+<div><label for="th_scope">编辑</label><select id="th_scope" onchange="themeLoadCss()"></select></div>
+</div>
+<textarea id="th_css" spellcheck="false" style="min-height:260px" oninput="themePreview()"></textarea>
+<div class="desc">每块是一套配色：<b>day</b>、<b>night</b>、自己起名的（如 sakura，可在上面选为白天或黑夜用的配色），<b>*</b> 对所有配色生效。块里写 <code>别名: 颜色;</code>，颜色是 #rgb、#rrggbb、rgb(r, g, b) 或另一个别名，也可以起自己的别名再引用。
+查找顺序：程序里直接给的颜色 → 应用目录的 theme.css → 系统的 theme.css → 应用自带的默认值 → 内置的白天 / 黑夜配色；都没写的别名用它最后一段的大类（titlebar_bg → bg，text_sub_fg → fg，card_border → border）。</div>
+<button onclick="themeSaveCss()">保存</button>
+<button class="plain" onclick="themeInsert('day')">插入内置白天配色</button>
+<button class="plain" onclick="themeInsert('night')">插入内置黑夜配色</button>
+<button class="plain" onclick="themeLoadCss()">重新读取</button>
+<h3>预览（系统和所选应用的 theme.css 加内置配色；应用自带的默认值不在这里）</h3>
+<div id="th_preview"></div>
+</section>
+
+<section>
+<h2>显示输出（显存）</h2>
+<div class="row">
+<div><label for="th_bits">颜色位数</label>
+<select id="th_bits"><option value="16">16 位（RGB565，全彩）</option><option value="8">8 位（256 色调色板）</option><option value="4">4 位（16 色）</option><option value="2">2 位（4 色）</option><option value="1">1 位（黑白）</option></select></div>
+<div><label for="th_palette">调色板</label>
+<select id="th_palette"><option value="color">彩色</option><option value="gray">灰度</option><option value="eink">墨水屏</option><option value="green">绿色</option><option value="amber">琥珀色</option><option value="cyan">青色</option><option value="gameboy">GameBoy</option><option value="invert">反色</option></select></div>
+</div>
+<div class="desc">颜色先按上面的配色方案算出来，再按这里的位数和调色板写进显存、送到屏幕：位数越少占的内存越少，颜色也越少。立即生效并保存到 config.ini [display]。</div>
+<button onclick="themeSaveDisplay()">应用</button>
 </section>
 </div>
 
@@ -371,7 +431,7 @@ function fieldValue(p, f) {
 
 /* ---- tabs: the running app's own page first (when it has one), then
  * app management, app settings, system settings, system information ---- */
-const TABS = ['app', 'manage', 'config', 'system', 'info'];
+const TABS = ['app', 'manage', 'config', 'system', 'theme', 'info'];
 let tab = '';
 const loaded = {};
 
@@ -391,6 +451,7 @@ function showTab(which) {
     if (which === 'config') loadApps();
     if (which === 'system') loadApps().then(loadAllConfig).then(() => loadText('/spiffs/config.ini', 'cfg'));
     if (which === 'info') loadHardware();
+    if (which === 'theme') loadApps().then(loadTheme);
   }
 }
 
@@ -928,12 +989,198 @@ async function saveAllConfig(andRestart) {
 async function loadText(path, id) {
   const r = await fetch(authUrl('/api/fs/read?path=' + encodeURIComponent(path)));
   const text = await r.text();
-  $(id).value = (!r.ok || text.startsWith('{"success":false')) ? '' : text;
+  $(id).value = (!r.ok || /^\{\s*"success"\s*:\s*false/.test(text)) ? '' : text;   /* a missing file: empty */
 }
 
 async function saveText(path, id) {
   const r = await api('/api/upload?run=0&path=' + encodeURIComponent(path), {method: 'POST', body: $(id).value});
   say(r.success ? '已保存 ' + path : (r.error || '保存失败'), r.success ? 'ok' : 'bad');
+}
+
+/* ---- 配色方案: the same cascade as apps/lib/gui.scm (keep the two in step) ---- */
+const THEME_BUILTIN = {
+  night: {bg: '#0b1118', fg: '#e6ecf3', border: '#5b7090', card_bg: 'bg', card_border: '#5b7090', titlebar_bg: '#152030',
+    text_fg: '#e6ecf3', text_sub_fg: '#bac7d6', text_muted_fg: '#a2b2c6', accent_fg: '#62d0f0', accent_bg: '#173f52',
+    success_fg: '#72d696', warning_fg: '#f0bc55', danger_fg: '#ee7c7c', purple_fg: '#c0a2f2', inactive_fg: '#34414f',
+    divider_border: '#688098', seg_on_fg: '#6fcf7f', seg_off_fg: '#142a1c', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'},
+  day: {bg: '#f3f5f8', fg: '#17202b', border: '#8d9cae', card_bg: 'bg', card_border: '#8d9cae', titlebar_bg: '#d7e1ec',
+    text_fg: '#17202b', text_sub_fg: '#33404f', text_muted_fg: '#556377', accent_fg: '#0a6f9c', accent_bg: '#c2e0ee',
+    success_fg: '#1d7f45', warning_fg: '#b8700a', danger_fg: '#bf3434', purple_fg: '#6c49b0', inactive_fg: '#c4cdd8',
+    divider_border: '#a3b0bf', seg_on_fg: '#1f7a35', seg_off_fg: '#dae6dd', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}
+};
+const THEME_NAMES = {bg: '背景', fg: '文字（大类）', border: '边框（大类）', titlebar_bg: '标题栏、底栏', card_bg: '卡片背景',
+  card_border: '卡片边框', text_fg: '正文', text_sub_fg: '次要文字', text_muted_fg: '提示文字', accent_fg: '强调色',
+  accent_bg: '强调背景、按钮', success_fg: '正常、上涨', warning_fg: '警告', danger_fg: '危险、下跌', purple_fg: '紫色',
+  inactive_fg: '未激活', divider_border: '分隔线', seg_on_fg: '数码管亮段', seg_off_fg: '数码管暗段', bar_fg: '进度条',
+  bar_bg: '进度条底', icon_fg: '图标'};
+const THEME_KEYS = ['theme', 'theme_switch', 'theme_light_day', 'theme_light_night', 'theme_day_start', 'theme_night_start',
+  'theme_lat', 'theme_lon', 'theme_day', 'theme_night'];
+let themeSys = '', themeCfg = {};
+
+function themeParse(text) {
+  const blocks = [];
+  const t = String(text || '').replace(/\/\*[\s\S]*?(\*\/|$)/g, '');
+  for (const chunk of t.split('}')) {
+    const open = chunk.indexOf('{');
+    if (open < 0) continue;
+    const pairs = {};
+    for (const part of chunk.slice(open + 1).split(';')) {
+      const c = part.indexOf(':');
+      if (c < 0) continue;
+      const k = part.slice(0, c).trim(), v = part.slice(c + 1).trim();
+      if (k && v) pairs[k] = v;
+    }
+    for (const n of chunk.slice(0, open).split(',').map(x => x.trim()).filter(Boolean)) blocks.push({name: n, pairs});
+  }
+  return blocks;
+}
+
+function themeBlockGet(css, scheme, alias) {
+  let own = null, any = null;
+  for (const b of css) {
+    if (!(alias in b.pairs)) continue;
+    if (b.name === scheme) own = b.pairs[alias];
+    else if (b.name === '*') any = b.pairs[alias];
+  }
+  return own != null ? own : any;
+}
+
+function themeLiteral(v) {
+  let m = /^#([0-9a-fA-F]{6})$/.exec(v);
+  if (m) return '#' + m[1].toLowerCase();
+  m = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(v);
+  if (m) return ('#' + m[1] + m[1] + m[2] + m[2] + m[3] + m[3]).toLowerCase();
+  m = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/.exec(v);
+  if (m) return '#' + [m[1], m[2], m[3]].map(x => Math.min(255, +x).toString(16).padStart(2, '0')).join('');
+  return null;
+}
+
+function themeResolve(ctx, name, depth) {
+  const lit = themeLiteral(name);
+  if (lit || depth >= 8) return lit;
+  const v = themeBlockGet(ctx.app, ctx.scheme, name) ?? themeBlockGet(ctx.sys, ctx.scheme, name) ?? THEME_BUILTIN[ctx.mode][name];
+  const r = v != null ? themeResolve(ctx, v, depth + 1) : null;
+  if (r) return r;
+  const u = name.lastIndexOf('_');
+  return u >= 0 ? themeResolve(ctx, name.slice(u + 1), depth + 1) : null;
+}
+
+/* the schemes the css names (besides day and night) */
+function themeSchemes(...texts) {
+  const names = new Set(['day', 'night']);
+  for (const t of texts) for (const b of themeParse(t)) if (b.name !== '*') names.add(b.name);
+  return [...names];
+}
+
+function themeSelects() {
+  const names = themeSchemes(themeSys, $('th_scope').value === 'sys' ? $('th_css').value : '');
+  for (const [id, key, def] of [['th_day_scheme', 'theme_day', 'day'], ['th_night_scheme', 'theme_night', 'night']]) {
+    const cur = $(id).value || themeCfg[key] || def;
+    $(id).innerHTML = names.map(n => `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}${n === 'day' ? '（内置白天）' : n === 'night' ? '（内置黑夜）' : ''}</option>`).join('');
+  }
+}
+
+function themePreview() {
+  const scope = $('th_scope').value;
+  const sysText = scope === 'sys' ? $('th_css').value : themeSys;
+  const appText = scope === 'sys' ? '' : $('th_css').value;
+  const sys = themeParse(sysText), app = themeParse(appText);
+  const aliases = new Set(Object.keys(THEME_NAMES));
+  for (const b of sys.concat(app)) for (const k of Object.keys(b.pairs)) aliases.add(k);
+  const col = (mode) => {
+    const scheme = $(mode === 'day' ? 'th_day_scheme' : 'th_night_scheme').value || mode;
+    const ctx = {app, sys, scheme, mode};
+    const bg = themeResolve(ctx, 'bg', 0), fg = themeResolve(ctx, 'text_fg', 0);
+    return `<div style="flex:1 1 260px;border:1px solid var(--line);border-radius:8px;padding:8px;background:${bg};color:${fg}">
+      <div style="font-weight:600;margin-bottom:6px">${mode === 'day' ? '白天' : '黑夜'}（${esc(scheme)}）</div>` +
+      [...aliases].map(a => {
+        const c = themeResolve(ctx, a, 0) || '#ff00ff';
+        return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin:2px 0">
+          <span style="width:34px;height:16px;border-radius:3px;border:1px solid ${fg}55;background:${c};flex:none"></span>
+          <span style="flex:1">${esc(a)}${THEME_NAMES[a] ? ' · ' + THEME_NAMES[a] : ''}</span><code>${c}</code></div>`;
+      }).join('') + '</div>';
+  };
+  $('th_preview').innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">${col('day')}${col('night')}</div>`;
+}
+
+function themeFormShow() {
+  const auto = $('th_mode').value === 'auto', how = $('th_switch').value;
+  $('th_switch_box').style.display = auto ? '' : 'none';
+  $('th_light_box').style.display = auto && how === 'light' ? '' : 'none';
+  $('th_time_box').style.display = auto && (how === 'time' || how === 'sun') ? '' : 'none';
+  $('th_sun_box').style.display = auto && how === 'sun' ? '' : 'none';
+}
+
+async function themeLoadCss() {
+  const scope = $('th_scope').value;
+  const path = scope === 'sys' ? '/spiffs/theme.css' : scope + '/theme.css';
+  await loadText(path, 'th_css');
+  themeSelects();
+  themePreview();
+}
+
+async function loadTheme() {
+  const r = await fetch(authUrl('/api/fs/read?path=' + encodeURIComponent('/spiffs/config.ini')));
+  themeCfg = r.ok ? iniValues(await r.text()) : {};
+  const t = await fetch(authUrl('/api/fs/read?path=' + encodeURIComponent('/spiffs/theme.css')));
+  const tt = t.ok ? await t.text() : '';
+  themeSys = !t.ok || /^\{\s*"success"\s*:\s*false/.test(tt) ? '' : tt;
+  $('th_mode').value = themeCfg.theme || 'auto';
+  $('th_switch').value = themeCfg.theme_switch || 'light';
+  for (const [id, key] of [['th_light_day', 'theme_light_day'], ['th_light_night', 'theme_light_night'], ['th_day_start', 'theme_day_start'],
+                          ['th_night_start', 'theme_night_start'], ['th_lat', 'theme_lat'], ['th_lon', 'theme_lon']]) $(id).value = themeCfg[key] || '';
+  $('th_scope').innerHTML = '<option value="sys">系统（/spiffs/theme.css，所有应用）</option>' +
+    apps.filter(a => a.dir).map(a => `<option value="${esc(a.dir)}">${esc(a.name)}（${esc(rel(a.dir))}/theme.css）</option>`).join('');
+  themeFormShow();
+  await themeLoadCss();
+  const st = await api('/api/stats');
+  if (st.success) {
+    $('th_bits').value = String(st.color_bits || 16);
+    $('th_palette').value = st.palette || 'color';
+    const lux = Math.floor((st.light || 0) * 1000 / 4095);
+    $('th_now').textContent = `现在的光感：${lux}`;
+  }
+}
+
+async function themeSaveMode() {
+  try {
+    const f = {'theme.theme': $('th_mode').value, 'theme.theme_switch': $('th_switch').value,
+               'theme.theme_day': $('th_day_scheme').value || 'day', 'theme.theme_night': $('th_night_scheme').value || 'night'};
+    for (const [id, key] of [['th_light_day', 'theme_light_day'], ['th_light_night', 'theme_light_night'], ['th_day_start', 'theme_day_start'],
+                            ['th_night_start', 'theme_night_start'], ['th_lat', 'theme_lat'], ['th_lon', 'theme_lon']]) {
+      const v = $(id).value.trim();
+      if (/[;#&\s]/.test(v)) throw new Error(`${key}：不能含有空格、; # &`);
+      f['theme.' + key] = v;
+    }
+    await post(f);
+    themeCfg = Object.fromEntries(Object.entries(f).map(([k, v]) => [k.slice(6), v]));
+    say('已保存，应用 10 秒内换上', 'ok');
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function themeSaveCss() {
+  const scope = $('th_scope').value;
+  const path = scope === 'sys' ? '/spiffs/theme.css' : scope + '/theme.css';
+  if ($('th_css').value.length > 16384) return say('配色文件不能超过 16 KB', 'bad');
+  await saveText(path, 'th_css');
+  if (scope === 'sys') themeSys = $('th_css').value;
+  themeSelects();
+}
+
+function themeInsert(mode) {
+  const b = THEME_BUILTIN[mode];
+  const text = `${mode} {\n` + Object.entries(b).map(([k, v]) => `  ${k}: ${v};${THEME_NAMES[k] ? '  /* ' + THEME_NAMES[k] + ' */' : ''}`).join('\n') + '\n}\n';
+  const ta = $('th_css');
+  ta.value = (ta.value.trim() ? ta.value.replace(/\s*$/, '\n\n') : '') + text;
+  themeSelects();
+  themePreview();
+}
+
+async function themeSaveDisplay() {
+  try {
+    const r = await apiPost('/api/display?color_bits=' + $('th_bits').value + '&palette=' + encodeURIComponent($('th_palette').value));
+    say(`显示输出：${r.color_bits} 位，${r.palette}，缓冲 ${kb(r.buffer_bytes)}`, 'ok');
+  } catch (e) { say(e.message, 'bad'); }
 }
 
 function kvRows(rows) {

@@ -4,7 +4,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| [v1.7.0.md](v1.7.0.md) | **API 1.7.0 参考**（当前版本）：每个接口的原型、说明、返回值、样例，按组件分组。由 `tools/gen_api.py` 生成，样例都由测试实际运行验证。 |
+| [v1.8.0.md](v1.8.0.md) | **API 1.8.0 参考**（当前版本）：每个接口的原型、说明、返回值、样例，按组件分组。由 `tools/gen_api.py` 生成，样例都由测试实际运行验证。 |
 | [v1.6.0.md](v1.6.0.md) | API 1.6.0 参考（旧版本）。 |
 | [v1.5.0.md](v1.5.0.md) | API 1.5.0 参考（旧版本）。 |
 | [v1.4.0.md](v1.4.0.md) | API 1.4.0 参考（旧版本）。 |
@@ -29,7 +29,7 @@ API 版本号为 `major.minor.patch`：
 
 固件提供的版本可以从三个地方查到：
 
-- `(api-version)` → `"1.7.0"`；
+- `(api-version)` → `"1.8.0"`；
 - `GET /api/info` 里的 `"api"` 字段（以及 `"api_extensions"`）；
 - 硬件信息页“系统”页的“固件”一行。
 
@@ -88,7 +88,7 @@ extensions = esp32 1.0    ; 可选：用到的扩展 API
 
 | 调用 | 结果 |
 |---|---|
-| `(api-version)` | `"1.7.0"` |
+| `(api-version)` | `"1.8.0"` |
 | `(api-compatible? "1.0")` | `#t`：需要该版本的应用能在本固件上运行 |
 | `(api-has? 'gpio-write)` | 本设备是否提供该接口（已实现、扩展存在、确实可调用） |
 | `(api-info 'gpio-write)` | `("gpio" "1.0.0" stable #f all)`：组件、引入版本、状态、扩展、适用范围 |
@@ -184,3 +184,4 @@ persist = 1                   ; 可选（固件 1.0.68+）：重启、崩溃、�
 | 1.5.0 | 2026-10-14 | 新增 `gui-image`、`image-info`：从文件绘制图片（baseline JPEG，以及由 GIF 转换来的 MANI 动图，按帧间隔播放，速度可调）。每个条带只解码它覆盖的 JPEG MCU 行，不需要帧缓冲，打开一张图约占 6 KB。应用网页可以经 `/api/app/file` 读写自己目录里的文件；应用的 meta.ini 可以用 `storage_kb` 申请更大的存储空间。电子相册应用声明 `api = 1.5`。 |
 | 1.6.0 | 2026-10-20 | 合并应用：meta.ini `[combo] members = a, b` 列出它带上的应用，`(config-get key app-id)` 读取成员应用自己的 config.ini，新增 `(app-has-config? app-id)`。旧固件忽略 app-id，合集应用用 `(defined? 'app-has-config?)` 兼容。 |
 | 1.7.0 | 2026-10-22 | 定时唤起：应用目录里的 `schedule.ini` 列出时间点，系统到点启动应用（正在运行则调用 `app-schedule` 钩子）；新增 `(app-scheduled)`、`(app-return)`。新增 `(gui-text-scaled x y str color scale [font-id])`：用现有字体按整数倍放大绘制，不需要单独的大字体。预留的 `(time-local)` 实现为正式接口（仅设备）：本地日期时间 `(年 月 日 时 分 秒 星期)`，用于取年份或按天计数。吃药提醒应用声明 `api = 1.7`。 |
+| 1.8.0 | 2026-10-23 | 配色方案：新增 `theme` 组件的 `(theme-css)`，任何应用都可以只读系统的配色文件 `/spiffs/theme.css`。应用框架（gui.scm）按别名取颜色（函数给的颜色 → 应用目录的 theme.css → 系统的 theme.css → 应用的默认值 → 内置白天 / 黑夜配色，都没有时用别名最后一段的大类），按光感、固定时间或日出日落在白天和黑夜间自动切换，见 [applib.md](applib.md) 4.8。用到框架的应用都声明 `api = 1.8`。 |
