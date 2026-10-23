@@ -1199,7 +1199,7 @@ const char mini_device_config_template[] =
     "[app]\n"
     "; keys every app reads with (config-get \"key\"); an app's own config.ini in its folder\n"
     "; (made from the app's defaults on its first start) overrides them\n"
-    "proxy =                ; the app proxy / protocol converter (tools/app_proxy.py), http://<host>:8087\n"
+    "proxy =                ; the app proxy / protocol converter (minischeme-proxy), http://<host>:8087\n"
     "proxy_password =       ; app service password for that server (plain text): the device registers\n"
     "                       ; with it; bound to the server once registered (change the address first)\n"
     "https_proxy =          ; protocol converter for apps' https:// data (<it>/fetch?url=...); empty: proxy\n"
@@ -1215,7 +1215,7 @@ const char mini_device_config_template[] =
     "[market]\n"
     "; the app market: install and update apps in the system settings (the hardware pages' mid press, or\n"
     "; the web page's \"enter settings mode\"); while an app runs the web page lists what is installed and new\n"
-    "market_url =           ; index.json and app images; empty: <proxy>/market (tools/app_proxy.py)\n"
+    "market_url =           ; index.json and app images; empty: <proxy>/market (the app proxy)\n"
     "market_auto_update = 0 ; 1: an app's boot checks once when the network comes up; with updates the\n"
     ";                        settings install them and return to the app (no network: skipped, no retry)\n";
 
@@ -1241,7 +1241,7 @@ const char mini_device_config_system_section[] =
     "wifi_password =\n"
     "\n"
     "[app]\n"
-    "proxy =                ; tools/app_proxy.py on a PC, http://<pc-ip>:8087: HTTPS sources for the apps\n";
+    "proxy =                ; the app proxy (minischeme-proxy), http://<host>:8087: HTTPS sources for the apps\n";
 
 /* Appended to a config.ini written before the [fonts] options existed */
 const char mini_device_config_fonts_section[] =

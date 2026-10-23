@@ -120,7 +120,7 @@ h2 button.small{margin-top:-4px}
 <input id="device" maxlength="23">
 <label for="boot">启动应用（重启后生效）</label>
 <select id="boot"></select>
-<label for="proxy">应用代理（tools/app_proxy.py 的地址，应用的数据从这里取；单个应用可在自己的配置里用 proxy_url 指定别的服务器）</label>
+<label for="proxy">应用代理（minischeme-proxy 的地址，应用的数据从这里取；单个应用可在自己的配置里用 proxy_url 指定别的服务器）</label>
 <input id="proxy" placeholder="http://电脑IP:8087">
 <label for="proxypw">应用代理的应用服务密码（明文显示；设备每次请求都把它放在请求头里发给这台服务器，服务器第一次收到时用它登记这台设备，以后密码不对就拒绝；也是该服务器用户门户的登录密码）</label>
 <div class="inline"><input id="proxypw" autocomplete="off" spellcheck="false" maxlength="64">

@@ -1669,7 +1669,7 @@ static esp_err_t http_eval(httpd_req_t *req) {
     return r;
 }
 
-/* Compatible with web_repl/server.py: {"bytecode_hex": "4d534243..."} */
+/* Compatible with minischeme-webrepl server.py: {"bytecode_hex": "4d534243..."} */
 static esp_err_t http_exec_hex(httpd_req_t *req) {
     const char *err = NULL;
     size_t len = 0;

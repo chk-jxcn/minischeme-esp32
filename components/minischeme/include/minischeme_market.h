@@ -5,7 +5,7 @@
  * A market is a folder served over HTTP: index.json (written by
  * tools/build_apps.py: an array of {"id","name","description","version",
  * "api","extensions","file","size","hash"}) and the app images next to it.
- * tools/app_proxy.py serves web_repl/apps as /market/; config.ini [market]
+ * the app proxy (minischeme-proxy) serves its apps/ as /market/; config.ini [market]
  * market_url points elsewhere.
  *
  * The engine (shared by the firmware and the WASM simulator) refreshes the

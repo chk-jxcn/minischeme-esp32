@@ -1,7 +1,7 @@
 /**
  * @file minischeme_channel.h
  * @brief The device's requests to app servers and protocol converters
- *        (tools/app_proxy.py, server.py): plain HTTP (no TLS, which needs
+ *        (minischeme-proxy app_proxy.py, server.py): plain HTTP (no TLS, which needs
  *        30-45 KB of RAM per connection on the board, and since firmware
  *        1.0.69 no encryption either: it saves its RAM and code).
  *
