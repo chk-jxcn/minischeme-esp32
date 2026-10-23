@@ -697,35 +697,95 @@ their labels in font 0 (`FONT-SYS-16`), which has few CJK characters.
 | `(list-sum l)` | Sum; `0` for `'()`. | number |
 | `(take l n)` | First `n` elements (fewer when short). | list |
 
-### 4.8 Theme colors (`web_repl/gui.scm`)
+### 4.8 Colors and color schemes (`apps/lib/gui.scm`, API 1.8)
 
-RGB565 integers. Make other colors with `(gui-rgb r g b)` once at the top level, or
-write the integer (as the calendar does).
+Colors are RGB565 integers. The framework's colors are **aliases** resolved
+through color schemes: a built-in **day** scheme (light) and **night** scheme
+(dark, the colors every app had before), switched automatically.
 
-| Name | Value | Hex | Use |
-|---|---|---|---|
-| `theme-bg` | 2179 | #0b1118 | canvas; also text on filled color boxes |
-| `theme-card-bg` | 2179 | #0b1118 | same as the canvas (cards are outlined) |
-| `theme-card-border` | 23442 | #5b7090 | card outlines |
-| `theme-card-hdr` | 4358 | #152030 | header/footer strip, chart backgrounds |
-| `theme-text-main` | 59262 | #e6ecf3 | values, primary text |
-| `theme-text-sub` | 48698 | #bac7d6 | secondary text |
-| `theme-text-muted` | 42392 | #a2b2c6 | labels, hints, axis text |
-| `theme-accent` | 26270 | #62d0f0 | section labels, subtitle, highlights |
-| `theme-accent-dark` | 4586 | #173f52 | page badge, selected-cell fill |
-| `theme-success` | 30386 | #72d696 | good / falling price |
-| `theme-warning` | 62954 | #f0bc55 | caution, errors in the footer |
-| `theme-danger` | 60399 | #ee7c7c | bad / rising price |
-| `theme-purple` | 50462 | #c0a2f2 | extra category color |
-| `theme-dark-gray` | 12809 | #34414f | inactive tracks |
-| `theme-divider` | 27667 | #688098 | rules and grid lines (darker ones vanish on the panel) |
-| `theme-seg-on` | 28271 | #6fcf7f | lit seven-segment digits |
-| `theme-seg-off` | 4419 | #142a1c | unlit segments |
+`(theme-color c)` gives the color to draw with: a number passes as it is; a
+string is a literal (`"#rrggbb"`, `"#rgb"`, `"rgb(r, g, b)"`) or an alias
+(`"titlebar_bg"`) looked up in this order, the first found wins:
 
-Plain palette: `col-black` 0, `col-white` 65535, `col-red` 63488, `col-green` 2016,
-`col-blue` 31, `col-cyan` 2047, `col-magenta` 63519, `col-yellow` 65504,
-`col-orange` 64800, `col-gray` 33808, `col-dark-gray` 12710, `col-light-gray`
-50712. Font ids: `FONT-SYS-16` 0, `FONT-CLOCK-32` 1.
+1. a color given to the call itself (a number or a literal);
+2. the app's own `theme.css` (in its folder), the block of the scheme in use;
+3. the system's `/spiffs/theme.css` (read with `(theme-css)`, API 1.8), the same block;
+4. the app's defaults, `(theme-defaults! scheme alist)`;
+5. the built-in day or night scheme.
+
+An alias no step names falls back to its **category**, the part after the last
+`_` (`titlebar_bg` → `bg`, `text_sub_fg` → `fg`, `card_border` → `border`),
+looked up the same way. A value may name another alias, so users can define
+their own (`my_gold: #ffcc33; accent_fg: my_gold;`).
+
+`theme.css` (system or app, at most 16 KB) is CSS-like:
+
+```css
+/* comments */
+day   { titlebar_bg: #d7e1ec; my_gold: #e0a000; warning_fg: my_gold; }
+night { titlebar_bg: #152030; }
+*     { seg_on_fg: #6fcf7f; }          /* every scheme */
+sakura { bg: #fff0f5; }               /* a scheme of your own */
+```
+
+The mode is set in `config.ini [theme]` (an app's own config.ini may set the
+same keys): `theme` = `auto` (default), `day` or `night`; with `auto`,
+`theme_switch` = `light` (default: `light-lux` at or over `theme_light_day`,
+120, gives day; at or under `theme_light_night`, 50, night; in between the mode
+stays), `time` (`theme_day_start` 07:00 .. `theme_night_start` 19:00) or `sun`
+(sunrise to sunset at `theme_lat` / `theme_lon`, the time zone taken from the
+clock; the time when unknown). `theme_day` / `theme_night` name the scheme
+each mode uses (`day` / `night`, or a block of theme.css). The device page's
+**配色方案** tab edits all of it, with a preview, and the display output
+(`color_bits`, `palette`), which applies after the scheme.
+
+`applib.scm` calls `(theme-tick! utc-second)` once a second: every 10 s it
+checks the mode and both theme.css files and, when anything changed,
+re-resolves the colors and redraws the screen. An app without applib calls it
+from its own `app-tick` (the settings and the PC monitor do).
+
+The `theme-*` variables below are set from their aliases at the start and at
+each change, so code that draws with them follows the scheme without change.
+Code that keeps a color in its own variable at load time does not: use
+`(theme-color "alias")` when drawing instead, and give the alias defaults:
+
+```scheme
+;; the album's surround: black at night, the day scheme's background by day
+(theme-defaults! "night" '(("photo_bg" . "#000000")))
+(theme-defaults! "day" '(("photo_bg" . "bg")))
+(gui-clear (theme-color "photo_bg"))
+```
+
+| Variable | Alias | Night | Day | Use |
+|---|---|---|---|---|
+| `theme-bg` | `bg` | #0b1118 | #ffffff | canvas; also text on filled color boxes |
+| `theme-card-bg` | `card_bg` | `bg` | `bg` | cards (outlined) |
+| `theme-card-border` | `card_border` | #5b7090 | #8d9cae | card outlines |
+| `theme-card-hdr` | `titlebar_bg` | #152030 | #d7e1ec | header/footer strip, chart backgrounds |
+| `theme-text-main` | `text_fg` | #e6ecf3 | #17202b | values, primary text |
+| `theme-text-sub` | `text_sub_fg` | #bac7d6 | #33404f | secondary text |
+| `theme-text-muted` | `text_muted_fg` | #a2b2c6 | #556377 | labels, hints, axis text |
+| `theme-accent` | `accent_fg` | #62d0f0 | #0a6f9c | section labels, highlights |
+| `theme-accent-dark` | `accent_bg` | #173f52 | #c2e0ee | page badge, selected-cell fill |
+| `theme-success` | `success_fg` | #72d696 | #1d7f45 | good / falling price |
+| `theme-warning` | `warning_fg` | #f0bc55 | #b8700a | caution, errors in the footer |
+| `theme-danger` | `danger_fg` | #ee7c7c | #bf3434 | bad / rising price |
+| `theme-purple` | `purple_fg` | #c0a2f2 | #6c49b0 | extra category color |
+| `theme-dark-gray` | `inactive_fg` | #34414f | #c4cdd8 | inactive tracks |
+| `theme-divider` | `divider_border` | #688098 | #a3b0bf | rules and grid lines |
+| `theme-seg-on` | `seg_on_fg` | #6fcf7f | #000000 | lit seven-segment digits |
+| `theme-seg-off` | `seg_off_fg` | #142a1c | `bg` (not shown) | unlit segments |
+| | `bar_fg`, `bar_bg`, `icon_fg` | `accent_fg`, `titlebar_bg`, `accent_fg` | the same | progress bars, icons |
+| | `fg`, `border` (categories) | #e6ecf3, #5b7090 | #17202b, #8d9cae | the default of any `*_fg` / `*_border` |
+
+Apps add their own aliases with defaults: the weather app's `sun_icon_fg`,
+`snow_icon_fg`, `thunder_icon_fg`, the album's `photo_bg`.
+
+Plain palette (fixed, not part of a scheme): `col-black` 0, `col-white` 65535,
+`col-red` 63488, `col-green` 2016, `col-blue` 31, `col-cyan` 2047,
+`col-magenta` 63519, `col-yellow` 65504, `col-orange` 64800, `col-gray` 33808,
+`col-dark-gray` 12710, `col-light-gray` 50712. Font ids: `FONT-SYS-16` 0,
+`FONT-CLOCK-32` 1.
 
 ### 4.9 Framework internals
 
