@@ -1,12 +1,11 @@
 # ESP-IDF Partition Table (4MB flash, fully used)
 # Name,   Type, SubType, Offset,   Size, Flags
-# factory: the firmware (1403 KB) and about 5% free; fontrom: simsun-16
-# (300 KB of 320 KB); approm: two 256 KB app image slots; storage
-# (LittleFS) takes the rest. fontrom and approm need no 64 KB alignment:
-# esp_partition_mmap maps the page around them.
+# factory: the firmware (about 1.4 MB) with room for later versions (about
+# 200 KB); fontrom: simsun-16 (300 KB of 320 KB); approm: two 256 KB app
+# image slots; storage (LittleFS) takes the rest. All on 64 KB boundaries.
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  1476K,
-fontrom,  data, 0x41,    0x181000, 320K,
-approm,   data, 0x40,    0x1d1000, 512K,
-storage,  data, spiffs,  0x251000, 1724K,
+factory,  app,  factory, 0x10000,  1600K,
+fontrom,  data, 0x41,    0x1a0000, 320K,
+approm,   data, 0x40,    0x1f0000, 512K,
+storage,  data, spiffs,  0x270000, 1600K,

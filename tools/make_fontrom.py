@@ -8,7 +8,7 @@ name "<face>-<size>". Layout: minischeme_fontrom.h.
     python tools/make_fontrom.py simsun-16.mfnt kai-20.mfnt -o fontrom.bin
     (firmware/fontrom.bin: minischeme-webrepl/fonts/simsun-16.mfnt, GB2312 levels 1 and 2)
     python tools/make_fontrom.py --font simsun:16:gb2312 --font simhei:24:app.scm -o fontrom.bin
-    python -m esptool --chip esp32 -p COM42 write-flash 0x181000 fontrom.bin
+    python -m esptool --chip esp32 -p COM42 write-flash 0x1a0000 fontrom.bin
 
 A --font spec is face:size[:what], what being gb2312 (all of GB2312), a
 source file whose string literals are included, or omitted (ASCII only);
@@ -22,7 +22,7 @@ import sys
 
 SECTOR = 4096
 NAME = 24
-DEFAULT_OFFSET = 0x181000
+DEFAULT_OFFSET = 0x1a0000
 DEFAULT_SIZE = 320 * 1024
 
 

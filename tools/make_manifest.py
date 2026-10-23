@@ -11,7 +11,7 @@ import os
 import sys
 
 FILES = [("bootloader.bin", 0x1000), ("partition-table.bin", 0x8000), ("minischeme_esp32.bin", 0x10000)]
-FONT_ROM = ("fontrom.bin", 0x181000)   # partitions.csv: fontrom, 320 KB (0x190000 / 512 KB in 1.0.71..1.0.72)
+FONT_ROM = ("fontrom.bin", 0x1a0000)   # partitions.csv: fontrom, 320 KB (0x190000 / 512 KB in 1.0.71..1.0.72)
 
 
 def main():
