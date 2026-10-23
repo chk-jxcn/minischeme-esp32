@@ -758,7 +758,7 @@ Code that keeps a color in its own variable at load time does not: use
 
 | Variable | Alias | Night | Day | Use |
 |---|---|---|---|---|
-| `theme-bg` | `bg` | #0b1118 | #f3f5f8 | canvas; also text on filled color boxes |
+| `theme-bg` | `bg` | #0b1118 | #ffffff | canvas; also text on filled color boxes |
 | `theme-card-bg` | `card_bg` | `bg` | `bg` | cards (outlined) |
 | `theme-card-border` | `card_border` | #5b7090 | #8d9cae | card outlines |
 | `theme-card-hdr` | `titlebar_bg` | #152030 | #d7e1ec | header/footer strip, chart backgrounds |
@@ -773,8 +773,8 @@ Code that keeps a color in its own variable at load time does not: use
 | `theme-purple` | `purple_fg` | #c0a2f2 | #6c49b0 | extra category color |
 | `theme-dark-gray` | `inactive_fg` | #34414f | #c4cdd8 | inactive tracks |
 | `theme-divider` | `divider_border` | #688098 | #a3b0bf | rules and grid lines |
-| `theme-seg-on` | `seg_on_fg` | #6fcf7f | #1f7a35 | lit seven-segment digits |
-| `theme-seg-off` | `seg_off_fg` | #142a1c | #dae6dd | unlit segments |
+| `theme-seg-on` | `seg_on_fg` | #6fcf7f | #000000 | lit seven-segment digits |
+| `theme-seg-off` | `seg_off_fg` | #142a1c | `bg` (not shown) | unlit segments |
 | | `bar_fg`, `bar_bg`, `icon_fg` | `accent_fg`, `titlebar_bg`, `accent_fg` | the same | progress bars, icons |
 | | `fg`, `border` (categories) | #e6ecf3, #5b7090 | #17202b, #8d9cae | the default of any `*_fg` / `*_border` |
 

@@ -225,7 +225,9 @@ h2 button.small{margin-top:-4px}
 <button class="plain" onclick="themeInsert('night')">插入内置黑夜配色</button>
 <button class="plain" onclick="themeLoadCss()">重新读取</button>
 <h3>预览（系统和所选应用的 theme.css 加内置配色；应用自带的默认值不在这里）</h3>
+<div class="desc">点任意一个颜色可以用调色盘修改：改动写进上面编辑的配色文件里对应的块（白天或黑夜用的配色），点“保存”后生效。</div>
 <div id="th_preview"></div>
+<input type="color" id="th_pick" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" oninput="themePicked()">
 </section>
 
 <section>
@@ -1003,10 +1005,10 @@ const THEME_BUILTIN = {
     text_fg: '#e6ecf3', text_sub_fg: '#bac7d6', text_muted_fg: '#a2b2c6', accent_fg: '#62d0f0', accent_bg: '#173f52',
     success_fg: '#72d696', warning_fg: '#f0bc55', danger_fg: '#ee7c7c', purple_fg: '#c0a2f2', inactive_fg: '#34414f',
     divider_border: '#688098', seg_on_fg: '#6fcf7f', seg_off_fg: '#142a1c', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'},
-  day: {bg: '#f3f5f8', fg: '#17202b', border: '#8d9cae', card_bg: 'bg', card_border: '#8d9cae', titlebar_bg: '#d7e1ec',
+  day: {bg: '#ffffff', fg: '#17202b', border: '#8d9cae', card_bg: 'bg', card_border: '#8d9cae', titlebar_bg: '#d7e1ec',
     text_fg: '#17202b', text_sub_fg: '#33404f', text_muted_fg: '#556377', accent_fg: '#0a6f9c', accent_bg: '#c2e0ee',
     success_fg: '#1d7f45', warning_fg: '#b8700a', danger_fg: '#bf3434', purple_fg: '#6c49b0', inactive_fg: '#c4cdd8',
-    divider_border: '#a3b0bf', seg_on_fg: '#1f7a35', seg_off_fg: '#dae6dd', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}
+    divider_border: '#a3b0bf', seg_on_fg: '#000000', seg_off_fg: 'bg', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}
 };
 const THEME_NAMES = {bg: '背景', fg: '文字（大类）', border: '边框（大类）', titlebar_bg: '标题栏、底栏', card_bg: '卡片背景',
   card_border: '卡片边框', text_fg: '正文', text_sub_fg: '次要文字', text_muted_fg: '提示文字', accent_fg: '强调色',
@@ -1095,12 +1097,50 @@ function themePreview() {
       <div style="font-weight:600;margin-bottom:6px">${mode === 'day' ? '白天' : '黑夜'}（${esc(scheme)}）</div>` +
       [...aliases].map(a => {
         const c = themeResolve(ctx, a, 0) || '#ff00ff';
-        return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin:2px 0">
+        const edit = /^[A-Za-z0-9_-]+$/.test(a);   /* other names stay text-only (no quotes in the handler) */
+        return `<div class="th-row"${edit ? ` title="点击用调色盘修改" onclick="themePick('${mode}', '${a}', '${c}')"` : ''}
+          style="display:flex;align-items:center;gap:8px;font-size:12px;margin:2px 0;cursor:${edit ? 'pointer' : 'default'}">
           <span style="width:34px;height:16px;border-radius:3px;border:1px solid ${fg}55;background:${c};flex:none"></span>
           <span style="flex:1">${esc(a)}${THEME_NAMES[a] ? ' · ' + THEME_NAMES[a] : ''}</span><code>${c}</code></div>`;
       }).join('') + '</div>';
   };
   $('th_preview').innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">${col('day')}${col('night')}</div>`;
+}
+
+/* The color picker: the alias of the clicked row in the block of the scheme
+ * that mode uses, written into the css being edited (saved with 保存) */
+let themePickTarget = null;
+
+function themePick(mode, alias, color) {
+  themePickTarget = {scheme: $(mode === 'day' ? 'th_day_scheme' : 'th_night_scheme').value || mode, alias};
+  const pick = $('th_pick');
+  pick.value = color;
+  try { pick.showPicker(); } catch (e) { pick.click(); }
+}
+
+function themePicked() {
+  if (!themePickTarget) return;
+  const {scheme, alias} = themePickTarget;
+  $('th_css').value = themeSetAlias($('th_css').value, scheme, alias, $('th_pick').value);
+  themePreview();
+  say(`${scheme} 的 ${alias} 改成 ${$('th_pick').value}，点“保存”生效`, 'warn');
+}
+
+/* text with `alias: value;` set in the block named scheme alone (added when missing) */
+function themeSetAlias(text, scheme, alias, value) {
+  const re = /([^{}]*)\{([^}]*)\}/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const names = m[1].replace(/\/\*[\s\S]*?\*\//g, '').split(',').map(x => x.trim());
+    if (names.length !== 1 || names[0] !== scheme) continue;
+    const start = m.index + m[1].length + 1, body = m[2];
+    /* aliases are letters, digits, _ and -: no regex escaping needed */
+    const k = new RegExp('(^|[;\\s])(' + alias + ')(\\s*:\\s*)([^;}]*)').exec(body);
+    const nb = k ? body.slice(0, k.index + k[1].length) + k[2] + k[3] + value + body.slice(k.index + k[0].length)
+                 : body.replace(/\s*$/, '') + '\n  ' + alias + ': ' + value + ';\n';
+    return text.slice(0, start) + nb + text.slice(start + body.length);
+  }
+  return (text.trim() ? text.replace(/\s*$/, '\n\n') : '') + scheme + ' {\n  ' + alias + ': ' + value + ';\n}\n';
 }
 
 function themeFormShow() {
