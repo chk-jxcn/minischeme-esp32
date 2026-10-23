@@ -118,6 +118,8 @@ static const char *s_settings_from = "built-in";   /* which settings run: built-
 static long s_app_web_at = 0;
 static size_t s_app_web_len = 0;
 #define APP_ROM_SUBTYPE      0x40                 /* "approm" partition, see partitions.csv */
+#define APP_ROM_SLOT         (256 * 1024)         /* an image slot of approm */
+#define APP_ROM_RECORD       "/spiffs/.approm"    /* what each slot holds */
 
 static char s_app_path[64] = APP_MSBC_PATH; /* the app this boot runs ([system] boot_app) */
 static char s_app_id[32] = "app";
@@ -163,6 +165,12 @@ static RTC_NOINIT_ATTR LastAppStats s_last_app;
  * times = 08:00, 12:30) starts at those times and returns to the boot app
  * with (app-return). The launch, and the apps due at the same time after
  * it, cross the restart in RTC memory; so does the last minute scanned. */
+/* The App ROM slot the app that ran last used (ROM_SLOT_MAGIC | slot):
+ * an app not in a slot is built into another one, so going back costs
+ * nothing. Lost at power-up (then slot 0). */
+#define ROM_SLOT_MAGIC 0x5107A700u
+static RTC_NOINIT_ATTR uint32_t s_rom_last;
+
 #define SCHED_MAGIC 0x5C4ED017u
 #define SCHED_MAX   5
 typedef struct {
@@ -184,6 +192,7 @@ static Value prim_app_return(MiniVM *vm, int argc, Value *argv);
 static const esp_partition_t *s_rom_part;   /* the App ROM partition (defined with the ROM code) */
 static int s_rom_slot;                       /* the slot of the image in use, and its size */
 static size_t s_rom_slot_size;
+static void rom_slots_json(char *out, size_t cap);   /* the slots for /api/hardware */
 
 static bool file_has_magic(const char *path, const char *magic);
 static bool root_app_shadowed(const char *path);
@@ -707,9 +716,13 @@ static void job_reply_hardware(RemoteJob *job) {
     /* the settings run from RAM and never map the App ROM: look the partition up */
     const esp_partition_t *rom = s_rom_part ? s_rom_part
         : esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)APP_ROM_SUBTYPE, NULL);
-    hw_put(job, &n, ",\"app_rom\":{\"partition\":%u,\"image\":%u,\"slot\":%d,\"slot_size\":%u}",
-           (unsigned)(rom ? rom->size : 0), (unsigned)st.rom_bytes, st.rom_bytes ? s_rom_slot : -1,
-           (unsigned)s_rom_slot_size);
+    {
+        char slots[640];
+        rom_slots_json(slots, sizeof(slots));
+        hw_put(job, &n, ",\"app_rom\":{\"partition\":%u,\"image\":%u,\"slot\":%d,\"slot_size\":%u%s}",
+               (unsigned)(rom ? rom->size : 0), (unsigned)st.rom_bytes, st.rom_bytes ? s_rom_slot : -1,
+               (unsigned)(rom ? (rom->size >= 2 * APP_ROM_SLOT ? APP_ROM_SLOT : rom->size) : 0), slots);
+    }
     hw_put(job, &n, ",\"font_rom\":{\"capacity\":%u,\"used\":%u,\"fonts\":[",
            (unsigned)mini_fontrom_capacity(), (unsigned)mini_fontrom_used());
     for (int i = 0; i < mini_fontrom_count(); i++) {
@@ -1393,13 +1406,12 @@ static void http_cors(httpd_req_t *req) {
     bool ok = named && origin_allowed(origin);
     bool app_null = named && strcmp(origin, "null") == 0 && is_app_route(req->uri);
     if (ok || app_null) {
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", ok ? WEBREPL_ORIGIN : "null");
-        if (ok && strcmp(origin, WEBREPL_ORIGIN) != 0) {
-            /* echo this network's origin: the header value must outlive this call */
-            static char s_cors_origin[96];
-            snprintf(s_cors_origin, sizeof(s_cors_origin), "%s", origin);
-            httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", s_cors_origin);
-        }
+        /* one value only: esp_http_server adds a header each call, and a
+         * browser refuses a response that names two origins (the local
+         * WebREPL got both its own and the published one) */
+        static char s_cors_origin[96];   /* the header value must outlive this call */
+        snprintf(s_cors_origin, sizeof(s_cors_origin), "%s", ok ? origin : "null");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", s_cors_origin);
         httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range");
         httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range");
@@ -4843,11 +4855,11 @@ static const esp_partition_t *s_rom_part = NULL;
 static const void *s_rom_ptr = NULL;     /* the partition, mapped */
 static esp_partition_mmap_handle_t s_rom_map;
 
-/* The partition holds 256 KB slots (one on a 256 KB partition): the boot
- * app's image in slot 0, the other app's (a scheduled launch, an app
- * started from the device page) in slot 1. An app whose image is in either
- * slot runs from it: going to the scheduled app and back writes nothing. */
-#define APP_ROM_SLOT (256 * 1024)
+/* The partition holds 256 KB slots (one on a 256 KB partition). An app
+ * whose image is in a slot runs from it; another is built into the slot
+ * after the one the last app ran from, so the two apps used most recently
+ * (the boot app and a scheduled one, or two picked by hand) both stay
+ * built. /spiffs/.approm records each slot: slot|key|bytes|path|name. */
 static int s_rom_slot = 0;
 static size_t s_rom_slot_size = 0;
 static const void *s_rom_slot_ptr = NULL;
@@ -4899,9 +4911,9 @@ static bool rom_flash_write(size_t off, const void *data, size_t len, void *user
 }
 
 /* Maps the image partition; true when a slot holds the image of key (that
- * slot is used), else the slot to build it in is chosen: 0 for the boot
- * app, 1 for any other */
-static bool map_app_rom(uint32_t key, bool boot_app) {
+ * slot is used), else the slot to build it in is chosen: the one after the
+ * slot the last app ran from (slot 0 after a power-up) */
+static bool map_app_rom(uint32_t key) {
     s_rom_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, APP_ROM_SUBTYPE, NULL);
     if (!s_rom_part) {
         mini_lib_set_app_rom_capacity(0);
@@ -4924,9 +4936,82 @@ static bool map_app_rom(uint32_t key, bool boot_app) {
             return true;
         }
     }
-    rom_use_slot(boot_app || n < 2 ? 0 : 1);
+    int last = (s_rom_last & ~0xFFu) == ROM_SLOT_MAGIC ? (int)(s_rom_last & 0xFFu) : -1;
+    rom_use_slot(last >= 0 && last < n ? (last + 1) % n : 0);
     mini_lib_set_app_rom_capacity(s_rom_slot_size);
     return false;
+}
+
+/* /spiffs/.approm: the slot's line replaced by key, bytes, path, name */
+static void rom_record_slot(int slot, uint32_t key, size_t bytes, const char *path, const char *name) {
+    char *old = read_small_file(APP_ROM_RECORD, 2048);
+    FILE *fp = fopen(APP_ROM_RECORD, "w");
+    if (fp) {
+        for (char *line = old; line && *line; ) {
+            char *end = strchr(line, '\n');
+            if (end) *end = '\0';
+            if (line[0] && atoi(line) != slot) fprintf(fp, "%s\n", line);
+            line = end ? end + 1 : NULL;
+        }
+        fprintf(fp, "%d|%08x|%u|%s|%s\n", slot, (unsigned)key, (unsigned)bytes, path, name);
+        fclose(fp);
+    }
+    free(old);
+}
+
+/* Whether /spiffs/.approm already names key for slot */
+static bool rom_record_has(int slot, uint32_t key) {
+    char *rec = read_small_file(APP_ROM_RECORD, 2048);
+    char want[24];
+    snprintf(want, sizeof(want), "%d|%08x|", slot, (unsigned)key);
+    bool has = false;
+    for (char *line = rec; line && *line && !has; ) {
+        has = strncmp(line, want, strlen(want)) == 0;
+        char *end = strchr(line, '\n');
+        line = end ? end + 1 : NULL;
+    }
+    free(rec);
+    return has;
+}
+
+/* ,"slots":[{"slot":0,"app":"...","name":"...","bytes":n,"valid":b,"running":b},...] */
+static void rom_slots_json(char *out, size_t cap) {
+    size_t n = (size_t)snprintf(out, cap, ",\"slots\":[");
+    char *rec = read_small_file(APP_ROM_RECORD, 2048);
+    const esp_partition_t *part = s_rom_part ? s_rom_part
+        : esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)APP_ROM_SUBTYPE, NULL);
+    int slots = !part ? 0 : part->size >= 2 * APP_ROM_SLOT ? (int)(part->size / APP_ROM_SLOT) : 1;
+    size_t slot_size = slots > 1 ? APP_ROM_SLOT : (part ? part->size : 0);
+    for (int i = 0; i < slots && n < cap - 160; i++) {
+        unsigned key = 0, bytes = 0;
+        char path[72] = "", name[72] = "", epath[160], ename[160];
+        for (char *line = rec; line && *line; ) {
+            char *end = strchr(line, '\n');
+            if (end) *end = '\0';
+            int s = -1;
+            if (sscanf(line, "%d|%x|%u|%71[^|]|%71[^\n]", &s, &key, &bytes, path, name) >= 4 && s == i) {
+                if (end) *end = '\n';
+                break;
+            }
+            key = bytes = 0;
+            path[0] = name[0] = '\0';
+            if (end) *end = '\n';
+            line = end ? end + 1 : NULL;
+        }
+        /* valid: the image is there (checked when the partition is mapped, not in the settings) */
+        bool valid = key && s_rom_ptr && mini_rom_check((const uint8_t *)s_rom_ptr + (size_t)i * slot_size, slot_size, key);
+        bool running = s_vm && mini_rom_size(s_vm) && i == s_rom_slot && s_rom_slot_size;
+        json_escape(path, epath, sizeof(epath));
+        json_escape(name, ename, sizeof(ename));
+        int k = snprintf(out + n, cap - n, "%s{\"slot\":%d,\"app\":\"%s\",\"name\":\"%s\",\"bytes\":%u,"
+                         "\"valid\":%s,\"checked\":%s,\"running\":%s}",
+                         i ? "," : "", i, epath, ename, bytes, valid ? "true" : "false",
+                         s_rom_ptr ? "true" : "false", running ? "true" : "false");
+        if (k < 0 || (size_t)k >= cap - n) break;
+        n += (size_t)k;
+    }
+    free(rec);
+    if (n < cap - 2) snprintf(out + n, cap - n, "]");
 }
 
 /* ========================================================================= */
@@ -5035,6 +5120,7 @@ static bool stream_app_rom(uint32_t key, const char *path) {
     if (ok) {
         ESP_LOGI(TAG, "App ROM streamed into slot %d: %u B in %d ms, %u B of memory", s_rom_slot, (unsigned)size,
                  (int)((esp_timer_get_time() - t0) / 1000), (unsigned)peak);
+        rom_record_slot(s_rom_slot, key, size, path, s_app_name[0] ? s_app_name : s_app_id);
         mini_device_progress(1000, now_ms());
         vTaskDelay(pdMS_TO_TICKS(200));  /* the full bar, then the app */
     } else {
@@ -5774,13 +5860,7 @@ void app_main(void) {
     }
     uint32_t rom_key = (fasl_app || s_settings_mode) ? 0 : app_rom_key(app_path);
     if (!s_sys_cfg.app_xip) rom_key = 0; /* app_xip = 0: always load to RAM */
-    bool boot_app = false;
-    {   /* the boot app's image goes in slot 0, any other app's in slot 1 */
-        char bp[64];
-        boot_app = boot_app_path(s_sys_cfg.boot_app, bp, sizeof(bp)) ? strcmp(bp, app_path) == 0
-                                                                    : strcmp(app_path, APP_MSBC_PATH) == 0;
-    }
-    bool rom_ok = rom_key && map_app_rom(rom_key, boot_app);
+    bool rom_ok = rom_key && map_app_rom(rom_key);
     /* The streaming build needs a few KB: it runs while the VM's block is
      * still held, so nothing it allocates can split that block */
     if (rom_key && !rom_ok && s_rom_ptr) {
@@ -5839,6 +5919,12 @@ void app_main(void) {
      * (bytecode, or a heap snapshot restored in place of the whole heap),
      * falling back to the copy embedded in the firmware */
     Value app_root = rom_ok ? mini_rom_attach(s_vm, s_rom_slot_ptr, s_rom_slot_size, rom_key) : mini_void();
+    if (rom_ok) {
+        s_rom_last = ROM_SLOT_MAGIC | (uint32_t)s_rom_slot;   /* the next app not in a slot goes elsewhere */
+        if (!rom_record_has(s_rom_slot, rom_key)) {           /* an image built before the record existed */
+            rom_record_slot(s_rom_slot, rom_key, mini_rom_size(s_vm), app_path, s_app_name[0] ? s_app_name : s_app_id);
+        }
+    }
     /* the app's own code touches only its folder; the settings are the system */
     mini_app_sandbox_set(s_settings_mode ? "" : s_app_dir);
     s_app_quota = (size_t)(s_app_storage_kb > s_sys_cfg.app_storage_kb ? s_app_storage_kb : s_sys_cfg.app_storage_kb) * 1024;

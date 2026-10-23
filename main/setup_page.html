@@ -260,6 +260,17 @@ async function apiPost(path, body) {
 
 function rel(p) { return p && p.startsWith('/spiffs/') ? p.slice(8) : p; }
 function kb(n) { return n == null ? '-' : n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(1) + ' KB'; }
+/* The App ROM slots: what each holds; firmware before 1.0.72 lists none */
+function romSlotRows(r, kb, esc) {
+  const slots = (r && r.slots) || [];
+  if (!slots.length) return [];
+  return slots.map((x) => {
+    let what = x.app ? `${esc(x.name || x.app)}，${kb(x.bytes)}` : '空';
+    if (x.app && x.checked && !x.valid) what += '（镜像已失效，下次运行时重新生成）';
+    if (x.running) what += '（当前运行）';
+    return [`程序 ROM 槽 ${x.slot}`, what];
+  });
+}
 function bar(used, total) { return total ? `<div class="bar"><i style="width:${Math.min(100, used * 100 / total).toFixed(1)}%"></i></div>` : ''; }
 function dur(s) { s = Math.floor(s); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + ' 天 ' : '') + h + ' 小时 ' + m + ' 分'; }
 const on = v => /^(1|true|yes|on)$/i.test(v || '');
@@ -955,7 +966,7 @@ async function loadHardware() {
     ['VM 堆', `${kb(v.used)} / ${kb(v.heap)}` + bar(v.used, v.heap)],
     v.probe ? ['开机测量', `空闲 ${kb(v.probe.free)}，最大连续块 ${kb(v.probe.largest)}，系统预留 ${kb(v.probe.reserved)}` +
                (v.probe.wifi ? '（WiFi 已连上）' : '（WiFi 未连上）') +
-               '<div class="help">VM 堆 = 空闲 − 预留，且不超过最大连续块 − 8 KB</div>'] : null,
+               '<div class="help">VM 堆 = 空闲 − 预留，且不超过最大连续块 − 4 KB</div>'] : null,
     ['存活 / 峰值', `${kb(v.live)} / ${kb(v.peak)}`],
     ['累计分配', `${v.alloc_kb} KB，GC ${v.minor_gcs} 次小回收、${v.major_gcs} 次全回收`],
     ['栈', `峰值 ${v.stack_peak} / ${v.stack_slots} 槽`],
@@ -975,7 +986,9 @@ async function loadHardware() {
   html += '<h3>存储</h3>' + kvRows([
     ['文件系统', `${kb(s.used)} / ${kb(s.total)}` + bar(s.used, s.total)],
     ['文件', `${s.files} 个，其中应用目录 ${s.apps} 个`],
-    ['应用 ROM 分区', `${kb(r.partition)}，当前程序的代码镜像 ${r.image ? kb(r.image) : '未使用'}` + bar(r.image, r.partition)],
+    ['应用 ROM 分区', `${kb(r.partition)}` + ((r.slots || []).length > 1 ? `，${r.slots.length} 个槽，每个 ${kb(r.slot_size)}` : '') +
+      `，当前程序的代码镜像 ${r.image ? kb(r.image) : '未使用'}` + bar(r.image, r.slot_size || r.partition)],
+    ...romSlotRows(r, kb, esc),
   ]);
   html += '<h3>字库</h3>' + kvRows([
     ['系统字库', `${kb(fr.used)} / ${kb(fr.capacity)}` + bar(fr.used, fr.capacity)],
