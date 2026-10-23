@@ -227,7 +227,6 @@ h2 button.small{margin-top:-4px}
 <h3>预览（系统和所选应用的 theme.css 加内置配色；应用自带的默认值不在这里）</h3>
 <div class="desc">点任意一个颜色可以用调色盘修改：改动写进上面编辑的配色文件里对应的块（白天或黑夜用的配色），点“保存”后生效。</div>
 <div id="th_preview"></div>
-<input type="color" id="th_pick" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" oninput="themePicked()">
 </section>
 
 <section>
@@ -1098,32 +1097,25 @@ function themePreview() {
       [...aliases].map(a => {
         const c = themeResolve(ctx, a, 0) || '#ff00ff';
         const edit = /^[A-Za-z0-9_-]+$/.test(a);   /* other names stay text-only (no quotes in the handler) */
-        return `<div class="th-row"${edit ? ` title="点击用调色盘修改" onclick="themePick('${mode}', '${a}', '${c}')"` : ''}
+        /* a real color input per row: the browser opens its own picker on a
+         * direct click (a hidden shared input is refused in some browsers and frames) */
+        return `<label class="th-row" title="${edit ? '点击用调色盘修改' : ''}"
           style="display:flex;align-items:center;gap:8px;font-size:12px;margin:2px 0;cursor:${edit ? 'pointer' : 'default'}">
-          <span style="width:34px;height:16px;border-radius:3px;border:1px solid ${fg}55;background:${c};flex:none"></span>
-          <span style="flex:1">${esc(a)}${THEME_NAMES[a] ? ' · ' + THEME_NAMES[a] : ''}</span><code>${c}</code></div>`;
+          <input type="color" value="${c}" ${edit ? `onchange="themePicked('${mode}', '${a}', this.value)"` : 'disabled'}
+            style="width:34px;height:18px;padding:0;margin:0;border:1px solid ${fg}55;border-radius:3px;background:${c};flex:none;cursor:inherit">
+          <span style="flex:1">${esc(a)}${THEME_NAMES[a] ? ' · ' + THEME_NAMES[a] : ''}</span><code>${c}</code></label>`;
       }).join('') + '</div>';
   };
   $('th_preview').innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap">${col('day')}${col('night')}</div>`;
 }
 
-/* The color picker: the alias of the clicked row in the block of the scheme
- * that mode uses, written into the css being edited (saved with 保存) */
-let themePickTarget = null;
-
-function themePick(mode, alias, color) {
-  themePickTarget = {scheme: $(mode === 'day' ? 'th_day_scheme' : 'th_night_scheme').value || mode, alias};
-  const pick = $('th_pick');
-  pick.value = color;
-  try { pick.showPicker(); } catch (e) { pick.click(); }
-}
-
-function themePicked() {
-  if (!themePickTarget) return;
-  const {scheme, alias} = themePickTarget;
-  $('th_css').value = themeSetAlias($('th_css').value, scheme, alias, $('th_pick').value);
+/* A color picked in the preview: the alias, in the block of the scheme that
+ * mode uses, written into the css being edited (saved with 保存) */
+function themePicked(mode, alias, value) {
+  const scheme = $(mode === 'day' ? 'th_day_scheme' : 'th_night_scheme').value || mode;
+  $('th_css').value = themeSetAlias($('th_css').value, scheme, alias, value);
   themePreview();
-  say(`${scheme} 的 ${alias} 改成 ${$('th_pick').value}，点“保存”生效`, 'warn');
+  say(`${scheme} 的 ${alias} 改成 ${value}，点“保存”生效`, 'warn');
 }
 
 /* text with `alias: value;` set in the block named scheme alone (added when missing) */
