@@ -119,7 +119,7 @@ static const char *s_settings_from = "built-in";   /* which settings run: built-
 static long s_app_web_at = 0;
 static size_t s_app_web_len = 0;
 #define APP_ROM_SUBTYPE      0x40                 /* "approm" partition, see partitions.csv */
-#define APP_ROM_SLOT         (256 * 1024)         /* an image slot of approm */
+#define APP_ROM_SLOT         (180 * 1024)         /* an image slot of approm (360 KB: two) */
 #define APP_ROM_RECORD       "/spiffs/.approm"    /* what each slot holds */
 
 static char s_app_path[64] = APP_MSBC_PATH; /* the app this boot runs ([system] boot_app) */
@@ -3658,6 +3658,7 @@ static bool parse_long(const char *val, long lo, long hi, long *out) {
  * are the network's, [http] password is the API's; elsewhere they are unknown. */
 static bool config_apply(SystemConfig *cfg, const char *section, const char *key, const char *val, int *version) {
     long v;
+    if (strcasecmp(key, "bt_remote") == 0) return true;   /* [bluetooth]: read at boot, see app_main */
     if (strcasecmp(section, "wifi") == 0) {
         if (strcasecmp(key, "ssid") == 0) key = "wifi_ssid";
         else if (strcasecmp(key, "password") == 0 || strcasecmp(key, "wifi_pass") == 0) key = "wifi_password";
@@ -5848,10 +5849,18 @@ void app_main(void) {
         size_t before = esp_get_free_heap_size();
         if (!bt_on) {
             bt_remote_release_memory();
-        } else if (bt_remote_start()) {
-            ESP_LOGI(TAG, "Bluetooth remote: started, %d B of heap", (int)before - (int)esp_get_free_heap_size());
         } else {
-            ESP_LOGW(TAG, "Bluetooth remote: could not start");
+            /* the controller and the host need the room the VM's block holds:
+             * let it go while they start, then hold the largest block again */
+            free(vm_heap_hold);
+            vm_heap_hold = NULL;
+            before = esp_get_free_heap_size();
+            bool started = bt_remote_start();
+            if (started) ESP_LOGI(TAG, "Bluetooth remote: started, %d B of heap", (int)before - (int)esp_get_free_heap_size());
+            else ESP_LOGW(TAG, "Bluetooth remote: could not start");
+            hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
+            vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT) : NULL;
         }
     }
 

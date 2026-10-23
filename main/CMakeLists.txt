@@ -35,8 +35,7 @@ idf_component_register(
         esp_hid
 )
 
-# -O2 like the VM when the IDF is built for size (-Os): its warnings were checked at -O2
-target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -fno-tree-loop-distribute-patterns)
+target_compile_options(${COMPONENT_LIB} PRIVATE -fno-tree-loop-distribute-patterns)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINISCHEME_NO_HELP)
 
 # The settings web page, gzip-compressed into setup_page_html.h in the build

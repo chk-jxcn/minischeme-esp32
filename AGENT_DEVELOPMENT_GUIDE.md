@@ -130,13 +130,13 @@ Each request is one line starting with `@`, answered by `@OK {json}` or `@ERR {j
 |--------|--------|------|---------|
 | Bootloader | `0x1000` | | `bootloader.bin` |
 | Partition table | `0x8000` | | `partition-table.bin` |
-| `factory` (app) | `0x10000` | 1536 KB | `minischeme_esp32.bin` |
-| `fontrom` | `0x190000` | 512 KB | system font ROM (768 KB before 1.0.71; one font, simsun-16, uses 292 KB) |
-| `approm` | `0x210000` | 512 KB | app images (XIP) in two 256 KB slots, written in turn: an app whose image is in a slot runs from it without writing flash; another is built into the slot the last app did not run from (RTC memory; slot 0 after a power-up), so the last two apps stay built; `/spiffs/.approm` records the slots, `/api/hardware` lists them (firmware 1.0.72) |
-| `storage` | `0x290000` | 1472 KB | **LittleFS**, mounted at `/spiffs` (the name is historical; the partition subtype is still `spiffs`) |
+| `factory` (app) | `0x10000` | 1728 KB | `minischeme_esp32.bin` (with Bluetooth 1631 KB; 1536 KB before the Bluetooth layout) |
+| `fontrom` | `0x1c0000` | 320 KB | system font ROM (512 KB at `0x190000` in 1.0.71..1.0.72; one font, simsun-16, uses 292 KB) |
+| `approm` | `0x210000` | 360 KB | app images (XIP) in two 180 KB slots (two 256 KB in 1.0.72; the largest app image, medicine, is 131 KB), written in turn: an app whose image is in a slot runs from it without writing flash; another is built into the slot the last app did not run from (RTC memory; slot 0 after a power-up), so the last two apps stay built; `/spiffs/.approm` records the slots, `/api/hardware` lists them (firmware 1.0.72) |
+| `storage` | `0x26a000` | 1624 KB | **LittleFS** (1472 KB at `0x290000` before), mounted at `/spiffs` (the name is historical; the partition subtype is still `spiffs`) |
 
 - Firmware builds use **ESP-IDF 6.1** (locally and in CI, Docker image `espressif/idf:v6.1`).
-- `firmware/fontrom.bin` (optional in the manifest, `0x190000`): the font ROM with simsun-16, all of GB2312; `[fonts] font_override` empty means `system_16:simsun-16` (built-in font when absent, `none` to keep it).
+- `firmware/fontrom.bin` (optional in the manifest, `0x1c0000`): the font ROM with simsun-16, all of GB2312; `[fonts] font_override` empty means `system_16:simsun-16` (built-in font when absent, `none` to keep it).
 - `firmware/firmware-manifest.json` lists the three images with offset, size and SHA-256; the WebREPL flasher takes the manifest and all three images from one source and refuses files whose SHA-256 differs, and esptool-js verifies each region's MD5 after writing.
 - The ILI9488 8080 bus runs on I2S DMA; the WR clock starts at `lcd_clock_hz` (20 MHz) and is verified at boot by reading pixels back, stepping down until the writes land.
 - `[display] panel = ips | tft` (default ips): an IPS panel needs the driver's display inversion (INVON), a TFT one not. It is chosen on the configuration pages (the settings web page, the WebREPL setup; usually once when the firmware is flashed, not in the on-device menu), set before the panel init and changed at once from the settings page or `(config-set! "display" "panel" ...)`; `/api/hardware` reports it as `display.panel`.

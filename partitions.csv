@@ -1,8 +1,11 @@
 # ESP-IDF Partition Table (4MB flash, fully used)
 # Name,   Type, SubType, Offset,   Size, Flags
+# factory: the firmware with Bluetooth (1631 KB) and about 5% free;
+# fontrom: simsun-16 (292 KB); approm: two 180 KB app image slots (the
+# largest app image, medicine, is 131 KB); storage (LittleFS) gets the rest
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  1536K,
-fontrom,  data, 0x41,    0x190000, 512K,
-approm,   data, 0x40,    0x210000, 512K,
-storage,  data, spiffs,  0x290000, 1472K,
+factory,  app,  factory, 0x10000,  1728K,
+fontrom,  data, 0x41,    0x1c0000, 320K,
+approm,   data, 0x40,    0x210000, 360K,
+storage,  data, spiffs,  0x26a000, 1624K,
