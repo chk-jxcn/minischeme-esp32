@@ -3,21 +3,24 @@
 How to write an app for the 320x480 (portrait) ESP32 display board on the shared
 app framework. Read it together with:
 
-- [v1.0.0.md](v1.0.0.md): every device procedure (`gui-*`, `font-*`, `json-feed-*`,
+- [v1.9.0.md](v1.9.0.md): every device procedure (`gui-*`, `font-*`, `json-feed-*`,
   `config-get`, ...), generated from `api/spec`.
+- minischeme-apps' `docs/APP_DEVELOPMENT_GUIDE.md`: the whole workflow (language subset,
+  layout, servers, simulator, board debugging, memory, image size, pull requests), and
+  `docs/app-template/hello`, a working app to copy.
 - [README.md](README.md): API versions, the firmware hooks, resource limits.
 
-The framework is two Scheme files that `tools/build_apps.py` compiles **into each
-app image**, after `web_repl/gui.scm`:
+The framework is Scheme files in minischeme-apps that `tools/build_apps.py` compiles **into
+each app image**, before the app's own code:
 
 | File | What it gives |
 |---|---|
-| `web_repl/gui.scm` | Theme colors (`theme-*`, `col-*`), font ids `FONT-SYS-16` / `FONT-CLOCK-32`, a few widgets. |
+| `apps/lib/gui.scm` | Colors and color schemes (`theme-*`, `theme-color`, `col-*`), font ids `FONT-SYS-16` / `FONT-CLOCK-32`, a few widgets. |
 | `apps/lib/infopages.scm` | The hardware info pages (memory, storage, network, system) that a long press opens over any app. |
 | `apps/lib/applib.scm` | Pages, data from the app proxy, header/footer, layout and text helpers, charts, carousel, clock fields, and every firmware hook. |
 
 There is no `init.scm` library on the device: an app may use only the procedures
-in v1.0.0.md, the definitions of these three files, and its own definitions.
+in the API reference, the definitions of these files, and its own definitions.
 
 Contents:
 
@@ -219,27 +222,30 @@ Then:
 python tools/build_apps.py hello          # one app; no names: every app
 ```
 
-The source is `gui.scm + infopages.scm + applib.scm + hello.scm`, compiled with the
-WebREPL's compiler. Output: `web_repl/apps/hello.msbc` with `meta.ini` appended
-(and `web_repl/apps/index.json` updated). The build prints the API the code needs
-(`hello: API 1.0 (N procedures)`), fills in `[app] api` when missing, fails when
-`api` is declared lower than needed, and warns about reserved (unimplemented) APIs.
+The source is `gui.scm + infopages.scm + applib.scm (+ appweb.scm) + hello.scm`, compiled
+with the core's compiler (`tools/compile_to_hex`). Output: `apps/hello.msbc` (and `dist/`) with
+the gzipped `web.html` and `meta.ini` appended, `index.json` updated. The image is MSBC version 2
+(each symbol name once, in a table), which needs firmware API 1.9; `--msbc1` writes version 1
+for older firmware. The build prints the API the code needs (`hello: API 1.9 (N procedures)`),
+fills in `[app] api` when missing, fails when `api` is declared lower than needed, and warns
+about reserved (unimplemented) APIs.
 
 Fonts: each literal `(use-font ID "face" [SIZE] ['embed|'system])` form is replaced
 by an embedded subset of that face holding ASCII plus the characters of the app's
 string literals, unless the form ends in `'system` (or the build runs with
 `--system-fonts`). See [section 5](#fonts).
 
-For regression coverage, `tests/test_apps.c` runs each app against a fixture
-document in `tests/data/apps/` (the `DOCS` table maps URL substrings to files) and
-checks, among other things, that the live heap stays under 32 KB.
+`python -m unittest discover -s tests` checks every app's metadata, web page and built
+image (CI runs it); memory is measured in the simulator and on a board (the guide's
+section 16).
 
 ### Install on the board
 
 ```bash
-python tools/install_apps.py <board-ip | COMn> hello              # upload /spiffs/apps/hello/app.msbc
-python tools/install_apps.py <board-ip> hello --boot hello        # also make it the boot app and restart
-python tools/install_apps.py <board-ip> --list                    # apps on the board
+# minischeme-apps; MS_PASSWORD = the board's hardware password, if it has one
+python tools/board.py <board-ip> install hello                    # upload /spiffs/apps/hello/app.msbc
+python tools/board.py <board-ip> install hello --boot             # also make it the boot app and restart
+python tools/board.py <board-ip> info                             # firmware API, memory
 ```
 
 An app needing a newer API than the board's firmware is refused. On the board, the
@@ -247,14 +253,9 @@ boot app can also be chosen in the system settings ("启动应用"; KEY 18 held 
 mid press on the hardware pages), or on the
 board's settings web page.
 
-The board fetches data from `tools/app_proxy.py` running on a PC:
-
-```bash
-python tools/app_proxy.py [--port 8087]
-```
-
-and `config.ini [app] proxy = http://<pc-ip>:8087` on the board (also settable on its
-settings page).
+The board fetches data from the app server in `config.ini [app] proxy` (the public one, or
+one on a PC: `python app_proxy.py [--port 8087]` in minischeme-proxy, or the WebREPL's
+`python server.py`, which includes it), also settable on its settings page.
 
 ### Test in the WebREPL simulator
 
@@ -263,10 +264,10 @@ cd minischeme-webrepl && python server.py --port 8087    # http://localhost:8087
 ```
 
 Open the page, click "📦 App 管理", install the app from the list of built apps
-(`web_repl/apps/index.json`), then "设为启动并重启". The simulator runs the same C
-runtime as the firmware (band rendering, JSON feed, fonts, clock tick). `server.py`
-answers any `http://.../app/...` URL itself by importing `tools/app_proxy.py`, so no
-proxy process is needed; restart `server.py` after editing `app_proxy.py`. The "KEY
+(minischeme-webrepl's `apps/index.json`, copied by `build_apps.py --sync`), then
+"设为启动并重启". The simulator runs the same C runtime as the firmware (band rendering, JSON
+feed, fonts, clock tick). `server.py` answers any `http://.../app/...` URL itself with its copy
+of the proxy (`proxy/`), so no proxy process is needed; restart `server.py` after editing it. The "KEY
 18" button gives short and long presses; a click on the screen calls `app-touch`.
 The app manager's form edits the app's settings (see below).
 
@@ -452,7 +453,7 @@ The render procedure is called only when the page's URL has a cached document:
 | State | Body | Footer (left) |
 |---|---|---|
 | no document yet, fetching | "正在获取数据..." and the URL | "加载中..." |
-| fetch failed (HTTP, network) | the same, plus a hint to run `app_proxy.py` | "连接失败: <error>" in the warning color |
+| fetch failed (HTTP, network) | the same, plus a hint about the app server | "连接失败: <error>" in the warning color |
 | proxy answered an `error` item | (old data if any) | "代理: <message>" in the warning color |
 | refetching after a page switch | render with the cached items | "刷新中..." |
 | data | render with the items | "更新于 HH:MM" |
@@ -672,7 +673,7 @@ table in [section 3](#clock-fields).
 | `(progress-bar x y w h pct color)` | Rounded track in `theme-dark-gray`, filled `pct` % (clamped 0..100, at least 6 px when non-zero). | |
 | `(rise-color v)` | Chinese market colors: `v > 0` `theme-danger` (red), `v < 0` `theme-success` (green), `0` `theme-text-sub`, `#f` `theme-text-muted`. | color |
 
-`web_repl/gui.scm` also provides `gui-box`, `gui-badge`, `gui-progress-bar`,
+`apps/lib/gui.scm` also provides `gui-box`, `gui-badge`, `gui-progress-bar`,
 `gui-button`, `gui-stat-tile`, `gui-grid-cell`, `gui-content-box`,
 `gui-text-align`, `gui-with-clip`, `gui-with-buffer`, `gui-draw-wifi-icon`,
 `make-widget` / `gui-hit-test` / `gui-dispatch-touch`, `rgb`, and a few aliases.
@@ -885,8 +886,8 @@ y   0 +--------------------------------+
 
 ### Memory and speed
 
-- The board's VM heap is about 101 KB (firmware 1.0.64). Keep the app's live heap under about 32 KB
-  (the test suite checks this with the cached documents). Each cached document is up
+- The board's VM heap is about 115 KB (firmware 1.0.70+). Keep the app's live heap under about 32 KB
+  (measure it: the guide's section 16). Each cached document is up
   to 4 KB of strings plus a 6-slot vector per item; up to 3 are kept (all pages'
   with a carousel), so keep documents small.
 - Bytecode, constants and string literals stay in Flash: big constant tables cost
@@ -905,10 +906,21 @@ y   0 +--------------------------------+
 
 ## 6. Writing a proxy endpoint
 
-`tools/app_proxy.py` turns upstream APIs (HTTPS, large JSON) into small documents the
-board's JSON feed can hold. Endpoints are plain functions `app_<name>(q)`, where `q`
-is the query as `{key: string}`, returning a list of item dicts. `handle()` wraps it
-as `{"items": [...]}` at `GET /app/<name>`.
+The app server is the **minischeme-proxy** repository (the WebREPL's `server.py` carries an
+identical copy in its `proxy/` folder, so the simulator answers every endpoint too). It turns
+upstream APIs (HTTPS, large JSON) into small documents the board's JSON feed can hold. The
+step-by-step for a new endpoint is in minischeme-apps' `docs/APP_DEVELOPMENT_GUIDE.md`,
+section 11.4; in short:
+
+1. Write `proxy/<name>.py` with a function that returns `{"items": [...]}` (see
+   `proxy/tide.py`: `get_tide(place)` builds the items, caches the document 10 minutes and turns
+   upstream failures into an error item).
+2. Route it in `handle_app_query` in `proxy/endpoints.py`
+   (`elif path == "/app/<name>": data = ...`); the query arrives as `qs` (`parse_qs`), the
+   device as `plain_device` (`X-MiniScheme-Device`), the server's database as `db`.
+3. Add `tests/test_<name>.py` (pytest) that builds the items from synthetic upstream data,
+   without network.
+4. Copy the changed files into minischeme-webrepl's `proxy/` and restart `server.py`.
 
 ### Item format
 
@@ -917,61 +929,49 @@ as `{"items": [...]}` at `GET /app/<name>`.
 - `t` is required; an object without it is dropped.
 - Values: strings. Numbers work (the device sees their text) but `None`, `True` and
   `False` arrive as the text `"null"`, `"true"`, `"false"`: send `''` instead.
-- At most 255 bytes per value (`clip()` keeps 250), about 4 KB of values per document
-  (each value + 1 byte), at most 64 items. Beyond that the device drops the rest
-  silently (`(app-status 'truncated)` is `#t`).
-- Series: `series(values, scale=1)` -> `"12,-3,7"` (integers, rounded after scaling).
-- Data time: `upd(when=None)` -> `{"t":"upd","a":"HH:MM"}`; pass the upstream's ISO
-  time when it has one.
-- Failure: `raise ProxyError('message')`. `handle()` turns it (and `ValueError`,
-  `KeyError`, `IndexError`) into `[{"t":"error","a":message}]`; the device keeps its
-  old data and shows the message in the footer. Other exceptions are not caught.
+- Keep a document to what the page shows: about 4 KB of values and at most 64 items (beyond
+  that `(app-status 'truncated)` is `#t`), values up to about 250 bytes.
+- Series: `series(values, scale=1)` in `proxy/endpoints.py` -> `"12,-3,7"` (integers,
+  rounded after scaling).
+- Data time: an item `{"t": "upd", "a": "HH:MM"}` (the upstream's time when it has one).
+- Failure: the **first** item `{"t": "error", "a": "message"}`; the device keeps its old
+  data and shows the message in the footer.
 
-### Helpers
+### Helpers in `proxy/endpoints.py`
 
 | Helper | Use |
 |---|---|
-| `cached(key, ttl, fn)` | `fn()` at most once per `ttl` seconds per key (a tuple of the endpoint and its parameters); on `ProxyError` returns the last good value if any. |
-| `http_get(url, headers=None, timeout=10)` | Body bytes, gzip/deflate decoded; `ProxyError` on failure. |
-| `get_json(url, headers=None, timeout=10)` | Parsed JSON; `ProxyError` when not JSON. |
-| `parallel({name: fn})` | Runs functions concurrently; returns `get(name)`. |
-| `clip(text, n=None)` | Folds whitespace; cuts with "…" past `n` characters or the value byte limit. |
-| `series(values, scale=1)`, `upd(when=None)`, `hhmm(t=None)` | As above; `hhmm` formats a time as `HH:MM`. |
-| `fmt_count(n)`, `fmt_tokens(n)` | `1.2万` / `1.2亿`; `1.2K` / `3.4M` / `1.20B`. |
-| `locate(loc)` | `auto` (public IP's city), a city name, or `lon,lat` -> a place (weather, calendar). |
+| `cache.get(key)`, `cache.set(key, value, ttl_seconds)` | The module's `TTLCache` (`proxy/cache.py`): keep an upstream answer for a few minutes; many boards may ask at once. |
+| `series(values, scale=1)` | A list of numbers as `"12,-3,7"`. |
+| `locate_place(loc, client_ip)` | `auto` (the public IP's place), a city name, or `lon,lat` -> `{name, lat, lon}` (weather, tide, calendar). |
 
 ### Example: `/app/hello` for the two-page app
 
 ```python
-def app_hello(q):
-    name = q.get('name', 'World')
+# proxy/hello.py
+import time
+from datetime import date
 
-    def build():
-        today = dt.date.today()
-        items = [{'t': 'greet', 'a': clip(f'你好，{name}！'), 'b': str(today.timetuple().tm_yday),
-                  'c': clip(name, 8)}]
-        for label, change in (('甲', 1.25), ('乙', -0.4), ('丙', 0.0)):
-            items.append({'t': 'row', 'a': label, 'b': f'{change:+.2f}'})
-        items.append({'t': 'series', 'a': series([3, 5, 2, 8, 6, 9, 7])})
-        items.append(upd())
-        return items
-    return cached(('hello', name), 60, build)
+
+def get_hello(name: str) -> dict:
+    items = [{"t": "greet", "a": f"你好，{name}！", "b": str(date.today().timetuple().tm_yday), "c": name[:8]}]
+    for label, change in (("甲", 1.25), ("乙", -0.4), ("丙", 0.0)):
+        items.append({"t": "row", "a": label, "b": f"{change:+.2f}"})
+    items.append({"t": "series", "a": "3,5,2,8,6,9,7"})
+    items.append({"t": "upd", "a": time.strftime("%H:%M")})
+    return {"items": items}
 ```
-
-Register it in the `APPS` table near the end of the file:
 
 ```python
-APPS = {'weather': app_weather, 'news': app_news, 'stocks': app_stocks, 'usage': app_usage, 'calendar': app_calendar,
-        'hello': app_hello,
-        'ping': lambda q: [{'t': 'ok', 'a': hhmm()}]}
+# proxy/endpoints.py, in handle_app_query
+    elif path == "/app/hello":
+        from .hello import get_hello
+        data = get_hello(qs.get("name", ["World"])[0])
 ```
 
-Names must match `\w+` (the route is `/app/(\w+)`). Check it in a browser:
-`http://localhost:8087/app/hello?name=Ada` (the proxy's status page at `/` lists the
-requests and the cache). The board sends non-ASCII query text as raw UTF-8 or
-percent-encoded (`url-encode`); both decode. Keep the endpoint's cache time and the
-page's `interval-ms` in step, and add the endpoint to the module docstring and
-`status_page()` list. `tests/test_app_proxy.py` holds the proxy's tests.
+Check it in a browser: `http://localhost:8087/app/hello?name=Ada`. The board sends non-ASCII
+query text percent-encoded (`url-encode`). Keep the endpoint's cache time and the page's
+`interval-ms` in step.
 
 ---
 
@@ -1142,7 +1142,7 @@ Notes:
 
 | Folder | What |
 |---|---|
-| `/spiffs/apps/<id>/` | Installed from the app market (and by `tools/install_apps.py`): `app.msbc`, `config.ini`, the app's data |
+| `/spiffs/apps/<id>/` | Installed from the app market (and by `tools/board.py install`): `app.msbc`, `config.ini`, the app's data |
 | `/spiffs/user/<id>/` | Uploaded by the user on the board's web page (system settings mode): not managed by the market; the same id may be installed both ways |
 | `/spiffs/app.msbc` | The built-in app (the firmware's default); its data and settings go to `/spiffs/apps/<id>/` |
 

@@ -49,7 +49,7 @@ extensions = esp32 1.0    ; 可选：用到的扩展 API
   - 写得比实际需要的低：构建报错；
   - 用到预留接口：给出警告，提示用 `(api-has? 'name)` 判断。
   - 构建输出示例：`calendar: API 1.0 (140 procedures)`。
-- **安装时**（`tools/install_apps.py`）：读取板子 `/api/info` 的版本，不兼容的应用拒绝安装，并提示升级固件。
+- **安装时**（应用市场、上传应用）：按固件的 API 版本检查，不兼容的应用拒绝安装（市场里标为不兼容），并提示升级固件。
 - **启动时**：固件和 WASM 模拟器在构建 ROM 镜像之前检查元数据。不兼容时屏幕显示“应用与固件不兼容”和原因（例如 `app needs API 1.1, the firmware provides 1.0.0`），5 秒后进入系统设置。设置页开机时同样显示这个原因。
 - 没有 `api` 键的旧镜像视为需要 1.0。
 
@@ -117,11 +117,11 @@ apps/<id>/<id>.scm      程序（通常基于 applib：前面会拼上 apps/lib/
 **工作流程**：
 
 ```bash
-python tools/build_apps.py <id>                        # 编译成 web_repl/apps/<id>.msbc，元数据附在镜像末尾
-python tools/install_apps.py <板子IP> <id> --boot <id>  # 安装、设为开机应用并重启
+python tools/build_apps.py <id>                        # （minischeme-apps）编译成 apps/<id>.msbc，网页和元数据附在镜像末尾
+python tools/board.py <板子IP> install <id> --boot        # 安装、设为开机应用并重启
 ```
 
-新应用要加入 `tools/build_apps.py` 的应用表。需要的数据放在 PC 上的代理 `tools/app_proxy.py`（端口 8087）中转，格式为 `{"items":[{"t":类型,"a":…,"e":…}]}`，设备用 JSON feed 拉取。也可以先在 WebREPL 的 WASM 模拟器中运行验证，它与固件使用同一套 C 运行时。
+新应用要加入 minischeme-apps `tools/build_apps.py` 的应用表。需要的数据由应用服务器（minischeme-proxy，WebREPL 的 `server.py` 里带同样的代理）中转，格式为 `{"items":[{"t":类型,"a":…,"e":…}]}`，设备用 JSON feed 拉取。也可以先在 WebREPL 的 WASM 模拟器中运行验证，它与固件使用同一套 C 运行时。完整流程见 minischeme-apps 的 `docs/APP_DEVELOPMENT_GUIDE.md`。
 
 ## 7. 固件调用应用的钩子
 
@@ -167,7 +167,7 @@ persist = 1                   ; 可选（固件 1.0.68+）：重启、崩溃、�
 ## 8. 资源约束
 
 - 板子：ESP32-D0WDQ6，320×480 ILI9488，RGB565 颜色值（用 `(gui-rgb r g b)` 生成）。
-- 应用 VM 堆约 88 KB，应用常驻堆应低于约 32 KB。
+- 应用 VM 堆约 115 KB（固件 1.0.70 起），应用常驻堆应低于约 32 KB。
 - 字节码和常量从 Flash 的代码 ROM 中原地执行（XIP），不占 RAM。
 - 中文字体来自系统字库分区，见 `font-use`、`fontrom-list`。
 - 设备上没有 `init.scm` 库：只能使用参考文件中列出的接口。PC REPL 独有的过程（如 `print`）在设备上不存在。
