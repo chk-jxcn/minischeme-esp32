@@ -51,5 +51,6 @@ idf_component_register(
         soc
 )
 
-target_compile_options(${COMPONENT_LIB} PRIVATE -fno-tree-loop-distribute-patterns)
+# the VM stays fast when the rest of the firmware is built for size (-Os)
+target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -fno-tree-loop-distribute-patterns)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE MINISCHEME_NO_HELP)

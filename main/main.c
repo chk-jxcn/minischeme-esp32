@@ -71,6 +71,7 @@
 #include "minischeme_channel.h"
 #include "minischeme_jsonfeed.h"
 #include "market_host.h"
+#include "bt_remote.h"
 #include "minischeme.h"
 #include "minischeme_internal.h"
 #include "minischeme_lib.h"
@@ -707,6 +708,10 @@ static void job_reply_hardware(RemoteJob *job) {
                esc, (unsigned)s_last_app.heap, (unsigned)s_last_app.live, (unsigned)s_last_app.peak,
                (unsigned)s_last_app.alloc_kb, (unsigned)s_last_app.rom, (unsigned)s_last_app.uptime_s,
                (unsigned)s_last_app.free_heap, (unsigned)s_last_app.min_free);
+    }
+    {   /* the Bluetooth remote (config.ini [bluetooth] bt_remote) */
+        char bt[640];
+        if (bt_remote_status_json(bt, sizeof(bt))) hw_put(job, &n, ",\"bluetooth\":%s", bt);
     }
     size_t total = 0, used = 0;
     lfsvfs_info(&total, &used);
@@ -2297,6 +2302,20 @@ static esp_err_t http_hardware(httpd_req_t *req) {
     return r;
 }
 
+/* GET /api/bluetooth: the remote's state and what the last scan saw;
+ * POST /api/bluetooth?action=forget: unpair it and look for a remote again */
+static esp_err_t http_bluetooth(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char action[16] = "";
+        http_query(req, "action", action, sizeof(action));
+        if (strcmp(action, "forget") != 0) return http_error(req, "action: forget");
+        bt_remote_forget();
+    }
+    char out[700];
+    if (!bt_remote_status_json(out, sizeof(out))) return http_error(req, "status too long");
+    return http_send_json(req, out);
+}
+
 /* GET /api/market: the market's state and apps; POST /api/market?action=
  * refresh | install&id=<id>|updates | cancel, answered with the same JSON */
 static esp_err_t http_market(httpd_req_t *req) {
@@ -3072,6 +3091,8 @@ static void start_http_server(void) {
         { .uri = "/api/channel/test",    .method = HTTP_POST,    .handler = http_channel_test },
         { .uri = "/api/apps",            .method = HTTP_GET,     .handler = http_apps },
         { .uri = "/api/hardware",        .method = HTTP_GET,     .handler = http_hardware },
+        { .uri = "/api/bluetooth",       .method = HTTP_GET,     .handler = http_bluetooth },
+        { .uri = "/api/bluetooth",       .method = HTTP_POST,    .handler = http_bluetooth },
         { .uri = "/api/market",          .method = HTTP_GET,     .handler = http_market },
         { .uri = "/api/market",          .method = HTTP_POST,    .handler = http_market },
         { .uri = "/api/wifi/scan",       .method = HTTP_GET,     .handler = http_wifi_scan },
@@ -5363,6 +5384,25 @@ static void app_failed(const char *phase, const char *reason) {
 }
 
 /* After an app hook: an error counts towards a crash (see mini_device_app_error) */
+/* A key of the Bluetooth remote: (app-remote 'next | 'prev | 'ok | 'back)
+ * when the app defines it; else next = a short press, ok = a long press,
+ * prev and back = a mid press (the system settings: next item, confirm,
+ * back). On the hardware pages next and ok turn them, prev and back close them. */
+static void remote_key(BtRemoteKey k) {
+    if (!s_vm) return;
+    if (mini_device_has_hook(s_vm, "info-active?") &&
+        !mini_is_false(mini_device_call_hook(s_vm, "info-active?", NULL, 0, NULL))) {
+        mini_device_call_hook(s_vm, k == BT_KEY_NEXT || k == BT_KEY_OK ? "info-button" : "info-long-press", NULL, 0, NULL);
+    } else if (mini_device_has_hook(s_vm, "app-remote")) {
+        Value key = mini_make_symbol(s_vm, bt_remote_key_name(k));
+        mini_device_call_hook(s_vm, "app-remote", NULL, 1, &key);
+    } else {
+        mini_device_call_hook(s_vm, k == BT_KEY_NEXT ? "app-button" : k == BT_KEY_OK ? "app-long-press" : "app-mid-press",
+                              NULL, 0, NULL);
+    }
+    mini_ws2812_set(0, 0, 255);   /* a blue blink: the key arrived */
+}
+
 static void check_app_error(const char *where) {
     const char *err = mini_get_error(s_vm);
     if (err && !s_settings_mode && mini_device_app_error(where, err, now_ms())) {
@@ -5799,6 +5839,22 @@ void app_main(void) {
     }
 #endif
 
+    /* 3b. The Bluetooth remote: started before the VM heap is sized, so the
+     * controller and the host take their RAM out of the VM's share; unused,
+     * the controller's reserved DRAM goes back to the heap */
+    {
+        char bt[8] = "";
+        bool bt_on = ini_file_value("/spiffs/config.ini", "bt_remote", bt, sizeof(bt)) && bt[0] == '1';
+        size_t before = esp_get_free_heap_size();
+        if (!bt_on) {
+            bt_remote_release_memory();
+        } else if (bt_remote_start()) {
+            ESP_LOGI(TAG, "Bluetooth remote: started, %d B of heap", (int)before - (int)esp_get_free_heap_size());
+        } else {
+            ESP_LOGW(TAG, "Bluetooth remote: could not start");
+        }
+    }
+
     /* 4. Peripherals */
     esp32_backlight_init();
     mini_backlight_set((uint8_t)s_sys_cfg.backlight);
@@ -6070,6 +6126,10 @@ void app_main(void) {
         MiniButtonEvent btn_ev = mini_device_button_update(s_vm, btn_pressed, (uint32_t)(loop_t0 / 1000));
         check_app_error("button");
         if (btn_ev == MINI_BUTTON_SYSTEM) open_system_settings();
+        for (BtRemoteKey k; (k = bt_remote_poll()) != BT_KEY_NONE; ) {
+            remote_key(k);
+            check_app_error("remote");
+        }
 
         mini_device_call_hook(s_vm, "app-step", NULL, 0, NULL);
         check_app_error("app-step");
