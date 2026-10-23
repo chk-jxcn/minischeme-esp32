@@ -5905,6 +5905,14 @@ void app_main(void) {
     s_probe.reserved = (uint32_t)reserved;
 
     s_vm = create_app_vm(avail);
+    /* sized up to the largest block, the heap can leave too little for the
+     * eden and the stacks (a fresh board: no WiFi joined, more seems free):
+     * smaller steps, so the board never ends here without a VM or a console */
+    while (!s_vm && avail > 32 * 1024) {
+        avail -= 8 * 1024;
+        ESP_LOGW(TAG, "MiniVM did not fit; trying a %u KB heap", (unsigned)(avail / 1024));
+        s_vm = create_app_vm(avail);
+    }
     if (!s_vm) {
         ESP_LOGE(TAG, "Failed to initialize MiniVM!");
         return;
