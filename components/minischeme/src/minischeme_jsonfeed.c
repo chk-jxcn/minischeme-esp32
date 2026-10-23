@@ -12,6 +12,7 @@
  */
 
 #include "minischeme_jsonfeed.h"
+#include "minischeme_device.h"
 #include "minischeme_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -665,18 +666,135 @@ void mini_json_feed_end(bool ok, const char *error) {
 }
 
 /* ========================================================================= */
+/* fs-download: a file from the network into the app's folder                */
+/* ========================================================================= */
+/* One download at a time. The ESP32 runs it in the feed's task, before the
+ * next document (the same plain HTTP fetch, so the device headers and the
+ * https converter apply); the body goes to <path>.part, which replaces path
+ * when it is complete. The WebREPL fetches it for the WASM device
+ * (mini_download_take / mini_download_done). */
+
+#define DL_MAX_BYTES  (256 * 1024)
+#define DL_TIMEOUT_MS 15000
+enum { DL_IDLE, DL_QUEUED, DL_RUNNING, DL_DONE, DL_ERROR };
+static volatile int s_dl_state = DL_IDLE;
+static char *s_dl_url = NULL;          /* the queued request, malloc'd */
+static char s_dl_path[96];             /* the file in the app's folder (full path) */
+static char s_dl_rel[96];              /* the path as the app gave it */
+static uint32_t s_dl_max, s_dl_bytes, s_dl_seq;
+static char s_dl_err[64];
+
+static void dl_finish(bool ok, uint32_t bytes, const char *err) {
+    JF_LOCK();
+    s_dl_bytes = bytes;
+    copy_str(s_dl_err, sizeof(s_dl_err), ok ? "" : (err && err[0] ? err : "download failed"));
+    s_dl_state = ok ? DL_DONE : DL_ERROR;
+    s_dl_seq++;
+    free(s_dl_url);
+    s_dl_url = NULL;
+    JF_UNLOCK();
+}
+
+const char *mini_download_take(void) {
+    if (s_dl_state != DL_QUEUED || !s_dl_url) return NULL;
+    s_dl_state = DL_RUNNING;
+    return s_dl_url;
+}
+
+const char *mini_download_path(void) { return s_dl_path; }
+uint32_t mini_download_max(void) { return s_dl_max; }
+void mini_download_done(bool ok, uint32_t bytes, const char *error) { dl_finish(ok, bytes, error); }
+
+/* ========================================================================= */
 /* ESP32 polling task                                                        */
 /* ========================================================================= */
 
 #if defined(ESP_PLATFORM)
+static bool jf_wifi_up(void) {
+    esp_netif_ip_info_t ip;
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    return sta && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0;
+}
+
+/* The queued fs-download, written through <path>.part */
+static void jf_download(char *buf, int cap) {
+    JF_LOCK();
+    char *url = s_dl_url ? jf_strdup(s_dl_url, strlen(s_dl_url)) : NULL;
+    char path[96], part[104];
+    copy_str(path, sizeof(path), s_dl_path);
+    uint32_t max = s_dl_max;
+    s_dl_state = DL_RUNNING;
+    JF_UNLOCK();
+    snprintf(part, sizeof(part), "%s.part", path);
+    char err[64] = "cannot connect";
+    uint32_t total = 0;
+    bool ok = false;
+    if (!url) {
+        copy_str(err, sizeof(err), "out of memory");
+    } else if (!jf_wifi_up()) {
+        copy_str(err, sizeof(err), "WiFi not connected");
+    } else {
+        int status = 0;
+        int64_t length = -1;
+        MiniFetch *h = mini_fetch_open(url, DL_TIMEOUT_MS, MINI_FETCH_REDIRECTS, &status, &length, err, sizeof(err));
+        if (h) {
+            if (status != 200) {
+                snprintf(err, sizeof(err), "HTTP status %d", status);
+            } else if (length > (int64_t)max) {
+                snprintf(err, sizeof(err), "larger than %u KB", (unsigned)(max / 1024));
+            } else {
+                FILE *f = fopen(part, "wb");
+                if (!f) {
+                    copy_str(err, sizeof(err), "cannot create the file");
+                } else {
+                    bool bad = false;
+                    int n;
+                    while (!bad && (n = mini_fetch_read(h, buf, cap)) > 0) {
+                        if (total + (uint32_t)n > max) {
+                            snprintf(err, sizeof(err), "larger than %u KB", (unsigned)(max / 1024));
+                            bad = true;
+                        } else if (fwrite(buf, 1, (size_t)n, f) != (size_t)n) {
+                            copy_str(err, sizeof(err), "write failed (storage full?)");
+                            bad = true;
+                        } else {
+                            total += (uint32_t)n;
+                        }
+                    }
+                    if (!bad && n < 0) {
+                        snprintf(err, sizeof(err), "read error after %u bytes", (unsigned)total);
+                        bad = true;
+                    }
+                    if (fclose(f) != 0 && !bad) {
+                        copy_str(err, sizeof(err), "write failed (storage full?)");
+                        bad = true;
+                    }
+                    if (!bad) {
+                        remove(path);
+                        ok = rename(part, path) == 0;
+                        if (!ok) copy_str(err, sizeof(err), "rename failed");
+                    }
+                    if (!ok) remove(part);
+                }
+            }
+            mini_fetch_close(h);
+        }
+    }
+    free(url);
+    dl_finish(ok, ok ? total : 0, err);
+}
+
 static void jf_task(void *arg) {
     (void)arg;
     char buf[512];
     for (;;) {
+        if (s_dl_state == DL_QUEUED) {     /* a download goes before the next document */
+            jf_download(buf, (int)sizeof(buf));
+            continue;
+        }
         char *url = NULL;
         uint32_t interval = 1000;
         JF_LOCK();
-        const JfConfig *c = S->pending ? S->pending : S->cfg;
+        const JfConfig *c = S ? (S->pending ? S->pending : S->cfg) : NULL;
         if (c && c->url[0]) {
             url = jf_strdup(c->url, strlen(c->url));
             interval = c->interval_ms;
@@ -1117,8 +1235,76 @@ static Value prim_json_feed_dump(MiniVM *vm, int argc, Value *argv) {
     return r;
 }
 
+/* (fs-download url path) => #t: queued; #f: another download is running */
+static Value prim_fs_download(MiniVM *vm, int argc, Value *argv) {
+    if (argc < 2 || !mini_is_string(argv[0]) || !mini_is_string(argv[1])) {
+        vm_error(vm, "fs-download: expected (fs-download url path)");
+        return mini_void();
+    }
+    const char *url = mini_string_data(argv[0]);
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        vm_error(vm, "fs-download: the URL must start with http:// or https://");
+        return mini_void();
+    }
+    char full[96];
+    if (!mini_access_file(vm, "fs-download", mini_string_data(argv[1]), true, full, sizeof(full))) return mini_void();
+    if (s_dl_state == DL_QUEUED || s_dl_state == DL_RUNNING) return mini_false();
+    size_t room = mini_app_storage_room();
+    if (room < 1024) {
+        vm_error(vm, "fs-download: the app's storage is full");
+        return mini_void();
+    }
+    char *copy = jf_strdup(url, strlen(url));
+    if (!copy) {
+        vm_error(vm, "fs-download: out of memory");
+        return mini_void();
+    }
+#if defined(ESP_PLATFORM)
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+#endif
+    JF_LOCK();
+    free(s_dl_url);
+    s_dl_url = copy;
+    copy_str(s_dl_path, sizeof(s_dl_path), full);
+    copy_str(s_dl_rel, sizeof(s_dl_rel), mini_string_data(argv[1]));
+    s_dl_max = room < DL_MAX_BYTES ? (uint32_t)room : DL_MAX_BYTES;
+    s_dl_bytes = 0;
+    s_dl_err[0] = '\0';
+    s_dl_state = DL_QUEUED;
+    JF_UNLOCK();
+#if defined(ESP_PLATFORM)
+    if (!s_task) xTaskCreate(jf_task, "jsonfeed", 4096, NULL, 4, &s_task);
+    else xTaskNotifyGive(s_task);
+#endif
+    return mini_true();
+}
+
+/* (fs-download-status) => ((state . s) (path . p) (bytes . n) (error . e) (seq . k)) */
+static Value prim_fs_download_status(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    static const char *const states[] = { "idle", "queued", "running", "done", "error" };
+    char err[64], rel[96];
+    JF_LOCK();
+    int state = s_dl_state;
+    uint32_t bytes = s_dl_bytes, seq = s_dl_seq;
+    copy_str(err, sizeof(err), s_dl_err);
+    copy_str(rel, sizeof(rel), s_dl_rel);
+    JF_UNLOCK();
+    Value lst = mini_nil();
+    mini_push_root(vm, &lst);
+    alist_push(vm, &lst, "seq", mini_make_fixnum((int64_t)seq));
+    alist_push(vm, &lst, "error", mini_make_string(vm, err));
+    alist_push(vm, &lst, "bytes", mini_make_fixnum((int64_t)bytes));
+    alist_push(vm, &lst, "path", mini_make_string(vm, rel));
+    alist_push(vm, &lst, "state", mini_make_symbol(vm, states[state]));
+    mini_pop_root(vm);
+    return lst;
+}
+
 void mini_register_json_feed_lib(MiniVM *vm) {
     static const MiniPrimEntry funcs[] = {
+        { "fs-download",        prim_fs_download },
+        { "fs-download-status", prim_fs_download_status },
         { "json-feed-start",    prim_json_feed_start },
         { "json-feed-stop",     prim_json_feed_stop },
         { "json-feed-seq",      prim_json_feed_seq },

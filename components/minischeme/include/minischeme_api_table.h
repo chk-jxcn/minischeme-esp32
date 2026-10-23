@@ -4,9 +4,9 @@
 
 #include <stdint.h>
 
-#define MINI_API_VERSION       "1.9.0"
+#define MINI_API_VERSION       "1.10.0"
 #define MINI_API_VERSION_MAJOR 1
-#define MINI_API_VERSION_MINOR 9
+#define MINI_API_VERSION_MINOR 10
 #define MINI_API_VERSION_PATCH 0
 
 enum { MINI_API_STABLE, MINI_API_RESERVED, MINI_API_ALIAS };
@@ -85,7 +85,7 @@ typedef struct MiniApiEntry {
     uint8_t where;       /* MINI_API_ALL / _DEVICE / _PC */
 } MiniApiEntry;
 
-#define MINI_API_ENTRY_COUNT 434
+#define MINI_API_ENTRY_COUNT 436
 /* sorted by name (strcmp) for a binary search */
 static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "*", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -167,8 +167,8 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "char>=?", 0x010000, -1, 5, MINI_API_STABLE, 0, MINI_API_ALL },
     { "char>?", 0x010000, -1, 5, MINI_API_STABLE, 0, MINI_API_ALL },
     { "char?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "chip-info", 0x010000, 371, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "chip-model", 0x010000, 372, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "chip-info", 0x010000, 373, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "chip-model", 0x010000, 374, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "cond", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "config-get", 0x010000, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "config-set!", 0x010000, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
@@ -176,15 +176,15 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "cos", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "crc32", 0x010000, -1, 49, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "dac-write", 0x010000, -1, 24, MINI_API_RESERVED, 0, MINI_API_ALL },
-    { "deep-sleep", 0x010000, 320, 15, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "deep-sleep", 0x010000, 322, 15, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "define", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "define-macro", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "define-syntax", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "defined?", 0x010000, -1, 9, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "delay-ms", 0x010000, 384, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "delay-us", 0x010000, 385, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "digital-read", 0x010000, 157, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "digital-write", 0x010000, 159, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "delay-ms", 0x010000, 386, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "delay-us", 0x010000, 387, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "digital-read", 0x010000, 159, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "digital-write", 0x010000, 161, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "display", 0x010000, -1, 8, MINI_API_STABLE, 0, MINI_API_ALL },
     { "display-bench", 0x010000, 47, 21, MINI_API_ALIAS, 0, MINI_API_DEVICE },
     { "display-dma-ram", 0x010000, -1, 35, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -231,8 +231,10 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "fontrom-list", 0x010000, -1, 38, MINI_API_STABLE, 0, MINI_API_ALL },
     { "fontrom-remove", 0x010000, -1, 38, MINI_API_STABLE, 0, MINI_API_ALL },
     { "for-each", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "free-heap", 0x010000, 293, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "free-heap", 0x010000, 295, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "fs-append", 0x010000, -1, 45, MINI_API_RESERVED, 0, MINI_API_ALL },
+    { "fs-download", 0x010a00, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
+    { "fs-download-status", 0x010a00, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "fs-exists?", 0x010000, -1, 45, MINI_API_STABLE, 0, MINI_API_ALL },
     { "fs-info", 0x010000, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "fs-list", 0x010000, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
@@ -314,7 +316,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "gui-touch-poll", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
     { "gui-visible?", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
     { "gui-width", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "heap-total", 0x010000, 297, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "heap-total", 0x010000, 299, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "help", 0x010000, -1, 9, MINI_API_STABLE, 0, MINI_API_ALL },
     { "http-get", 0x010000, -1, 43, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "http-post", 0x010000, -1, 43, MINI_API_RESERVED, 0, MINI_API_ALL },
@@ -380,7 +382,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "market-refresh", 0x010100, -1, 20, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "market-status", 0x010100, -1, 20, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "max", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "max-alloc-heap", 0x010000, 294, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "max-alloc-heap", 0x010000, 296, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "mem-free", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mem-max-block", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mem-min-free", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -389,10 +391,10 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "member", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "memq", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "memv", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "micros", 0x010000, 387, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "millis", 0x010000, 382, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "micros", 0x010000, 389, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "millis", 0x010000, 384, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "min", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "min-free-heap", 0x010000, 295, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "min-free-heap", 0x010000, 297, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "modulo", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mqtt-connect", 0x010000, -1, 44, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "mqtt-disconnect", 0x010000, -1, 44, MINI_API_RESERVED, 0, MINI_API_ALL },
@@ -406,7 +408,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "number?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
     { "or", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "pair?", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "pin-mode", 0x010000, 154, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "pin-mode", 0x010000, 156, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "power-battery-mv", 0x010000, -1, 15, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "power-deep-sleep", 0x010000, -1, 15, MINI_API_STABLE, 0, MINI_API_ALL },
     { "power-light-sleep", 0x010000, -1, 15, MINI_API_RESERVED, 0, MINI_API_ALL },
@@ -421,7 +423,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "random-seed!", 0x010000, -1, 50, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "real?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
     { "remainder", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "restart", 0x010000, 374, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "restart", 0x010000, 376, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "reverse", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "round", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "set!", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -464,7 +466,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "sys-info", 0x010000, -1, 12, MINI_API_STABLE, 0, MINI_API_ALL },
     { "sys-restart", 0x010000, -1, 12, MINI_API_STABLE, 0, MINI_API_ALL },
     { "system", 0x010000, -1, 52, MINI_API_STABLE, 0, MINI_API_PC },
-    { "system-info", 0x010000, 373, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "system-info", 0x010000, 375, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "tan", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "theme-css", 0x010800, -1, 40, MINI_API_STABLE, 0, MINI_API_ALL },
     { "tick-bench", 0x010000, 48, 21, MINI_API_ALIAS, 0, MINI_API_DEVICE },
@@ -514,12 +516,12 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "wifi-ip", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
     { "wifi-rssi", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
     { "wifi-ssid", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "wifi-status", 0x010000, 421, 41, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "wifi-status", 0x010000, 423, 41, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "write", 0x010000, -1, 8, MINI_API_STABLE, 0, MINI_API_ALL },
     { "write-file-string", 0x010000, -1, 52, MINI_API_STABLE, 0, MINI_API_PC },
-    { "ws2812-clear", 0x010000, 262, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "ws2812-get", 0x010000, 263, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "ws2812-set", 0x010000, 264, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "ws2812-clear", 0x010000, 264, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "ws2812-get", 0x010000, 265, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "ws2812-set", 0x010000, 266, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "xip-active?", 0x010000, -1, 10, MINI_API_STABLE, 0, MINI_API_ALL },
     { "xip-stats", 0x010000, -1, 10, MINI_API_STABLE, 0, MINI_API_ALL },
 };

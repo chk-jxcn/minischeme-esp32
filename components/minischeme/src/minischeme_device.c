@@ -414,6 +414,12 @@ bool mini_app_storage_ok(size_t bytes, size_t old, char *why, size_t cap) {
     return false;
 }
 
+size_t mini_app_storage_room(void) {
+    if (!mini_app_sandboxed() || !s_dir_used) return (size_t)-1;
+    size_t used = s_dir_used(s_box);
+    return used < s_quota ? s_quota - used : 0;
+}
+
 /* No "..", backslashes, empty parts or control characters */
 static bool path_clean(const char *p) {
     for (const char *c = p; *c; c++) {

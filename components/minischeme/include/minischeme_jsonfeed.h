@@ -65,6 +65,15 @@ uint32_t mini_json_feed_interval(void);
  * WebREPL) fetches again when it changes, even for the same URL */
 uint32_t mini_json_feed_generation(void);
 
+/* (fs-download url path) for hosts that fetch for it (the WebREPL): the
+ * queued URL (marked as running), NULL when none; the full path the body
+ * goes to and its size limit; then mini_download_done with the outcome
+ * (the host writes the file itself). The ESP32 downloads in the feed's task. */
+const char *mini_download_take(void);
+const char *mini_download_path(void);
+uint32_t mini_download_max(void);
+void mini_download_done(bool ok, uint32_t bytes, const char *error);
+
 #ifdef __cplusplus
 }
 #endif

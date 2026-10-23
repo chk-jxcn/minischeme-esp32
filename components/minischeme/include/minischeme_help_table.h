@@ -401,6 +401,8 @@
     { "fs-remove", "(fs-remove path)", "Storage / File system", "Delete a file." }, \
     { "fs-info", "(fs-info)", "Storage / File system", "Total and used bytes of the file system: (total used)." }, \
     { "fs-list", "(fs-list dir)", "Storage / File system", "Files directly in a directory with their sizes: ((\"name\" . bytes) ...)." }, \
+    { "fs-download", "(fs-download url path)", "Storage / File system", "Download a file from the network into the app's folder, in the background (an image for gui-image, for example); one download at a time." }, \
+    { "fs-download-status", "(fs-download-status)", "Storage / File system", "The state of the last fs-download: (state path bytes error seq) as an alist." }, \
     { "cfasl-compress", "(cfasl-compress byte-str)", "Storage / Compressed bytecode", "Compress a byte string with LZSS (4 KB window, matches of 3..18 bytes)." }, \
     { "cfasl-decompress", "(cfasl-decompress comp-str uncomp-size)", "Storage / Compressed bytecode", "Decompress LZSS bytes made by cfasl-compress; uncomp-size is the original length." }, \
     { "cfasl-make-stub", "(cfasl-make-stub comp-code code-bytes nparams max-stack variadic? inner-lambdas? constants)", "Storage / Compressed bytecode", "Make a demand-paged procedure stub from compressed bytecode; cfasl-call decompresses and runs it." }, \

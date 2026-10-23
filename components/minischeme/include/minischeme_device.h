@@ -189,6 +189,8 @@ void mini_app_privileged_end(void);
 void mini_app_set_storage(size_t quota, size_t (*dir_used)(const char *dir));
 /* Whether writing `bytes` to a file of `old` bytes fits the quota; why if not */
 bool mini_app_storage_ok(size_t bytes, size_t old, char *why, size_t cap);
+/** @brief Bytes left in the running app's folder quota ((size_t)-1 without a sandbox). */
+size_t mini_app_storage_room(void);
 /* Whether (config-get key) may fall back to config.ini for the running code */
 bool mini_app_config_key_ok(const char *key);
 

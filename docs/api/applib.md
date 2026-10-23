@@ -3,7 +3,7 @@
 How to write an app for the 320x480 (portrait) ESP32 display board on the shared
 app framework. Read it together with:
 
-- [v1.9.0.md](v1.9.0.md): every device procedure (`gui-*`, `font-*`, `json-feed-*`,
+- [v1.10.0.md](v1.10.0.md): every device procedure (`gui-*`, `font-*`, `json-feed-*`,
   `config-get`, ...), generated from `api/spec`.
 - minischeme-apps' `docs/APP_DEVELOPMENT_GUIDE.md`: the whole workflow (language subset,
   layout, servers, simulator, board debugging, memory, image size, pull requests), and
