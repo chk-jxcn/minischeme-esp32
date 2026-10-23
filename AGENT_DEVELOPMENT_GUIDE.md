@@ -61,6 +61,24 @@ Pointers into an object (e.g. a bigint's digits) never survive an allocation.
 
 ## 3. MSBC images and the metadata trailer (`MSMD`)
 
+The bytecode part (`msbc.h`, the same file in minischeme/include, minischeme-esp32 and
+minischeme-apps/tools): u32 magic `MSBC`, u16 version, u16 reserved, then
+
+- **version 2** (written by default since API 1.9): the symbol table (u16 count, each name as
+  u16 length + bytes, the names used most first), then the top-level code object. A constant
+  that is a symbol is `MSBC_CONST_SYMREF` + its table index as a LEB128 varint (one byte for the
+  128 most used names); a code object's header is varints (code length, parameters, stack size,
+  a flags byte: 1 variadic, 2 inner lambdas, then the constant count). About a quarter smaller
+  than version 1: every constant pool used to repeat the full names of the globals it uses.
+- **version 1**: no table, names inline in every constant pool, fixed-size headers (u32, u16,
+  u16, u8, u8, u16). Still read by the firmware, the simulator and the Code ROM builder;
+  `msbc_serialize_version(..., 1)`, `compile_to_hex --msbc1` and `build_apps.py --msbc1` write it
+  for firmware before API 1.9.
+
+The on-board Code ROM image (XIP) has its own format and already stores each symbol once: the
+MSBC version changes the file size (storage, downloads), not the App ROM slot use.
+
+
 Each app image ends with a trailer that the firmware, the WebREPL and the market read without running the app:
 
 ```
