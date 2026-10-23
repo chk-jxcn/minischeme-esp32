@@ -45,6 +45,16 @@ python -m esptool --chip esp32 -p COM42 write-flash 0x1a0000 firmware/fontrom.bi
 ```
 It replaces the whole font ROM (fonts installed earlier with the font manager are removed; add them again afterwards). With `[fonts] font_override` empty the firmware draws all 16 px system and app text with simsun-16 when the font ROM has it, else with the built-in font (~700 characters); `font_override = none` keeps the built-in font. The image is made with `tools/make_fontrom.py` from `minischeme-webrepl/fonts/simsun-16.mfnt`.
 
+### Font server (characters the font ROM lacks)
+Emoji, Korean, traditional and rare characters are fetched on demand from a font server (`font_server.py` in minischeme-proxy: a service of its own, no password, no app server needed) and kept in `/spiffs/fonts/net-<face>-<size>.mgh`; text is redrawn when they arrive (a box until then, or without network). `[fonts]` in config.ini (also on the device page, applied at once):
+```ini
+font_server = http://124.222.231.186:8090 ; the server (empty: off)
+font_server_on = 1     ; 0: never ask it
+font_server_first = 0  ; 1: the server's face first for system-font text (any face it has)
+font_server_face =     ; the face asked for (empty: the system font's, simsun), e.g. msyh
+```
+RAM: about 1.3 KB while it fills gaps, 4.8 KB with `font_server_first` (measured on a board), plus up to 4 KB during a request. `(font-server)` reports its state.
+
 ## Configuration (`/spiffs/config.ini`)
 The firmware writes a commented default file on first boot; the WebREPL's setup dialog and the device web page edit it. Main keys:
 ```ini
@@ -70,7 +80,7 @@ stack_trace = 0
 ```
 
 ## Documentation
-- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.10.0](docs/api/v1.10.0.md)
+- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.11.0](docs/api/v1.11.0.md)
 - [Development guide](AGENT_DEVELOPMENT_GUIDE.md)
 
 ## License

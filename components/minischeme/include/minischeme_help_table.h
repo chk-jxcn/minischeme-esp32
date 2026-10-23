@@ -367,6 +367,8 @@
     { "font-unload", "(font-unload id)", "Display / Fonts", "Empty font slot 2..7; its text falls back to the system font." }, \
     { "font-info", "(font-info id)", "Display / Fonts", "(name height glyphs source bytes) of a font slot; #f for an empty slot." }, \
     { "font-config", "(font-config [order [overrides]])", "Display / Fonts", "Font sources and replacements (config.ini [fonts] font_order, font_override); with arguments set them and resolve every font again." }, \
+    { "font-server", "(font-server)", "Display / Fonts", "The font server: glyphs the fonts lack (or, with font_server_first, all system-font text) fetched on demand and kept on the board." }, \
+    { "font-server-clear", "(font-server-clear)", "Display / Fonts", "Drops the glyphs downloaded from the font server (they are asked for again when drawn)." }, \
     { "font-sources", "(font-sources id)", "Display / Fonts", "The chain searched for each glyph of slot id, in order, as ((source name height glyphs bits) ...)." }, \
     { "font-use", "(font-use id face [size])", "Display / Fonts", "Font slot 2..7 for this app: face-size from the app's embedded subset, the font ROM or a file (config.ini [fonts] font_order). #f when no source has it." }, \
     { "use-font", "(use-font id face [size])", "Display / Fonts", "Older name of font-use (same procedure, kept for compatibility). Font slot 2..7 for this app: face-size from the app's embedded subset, the font ROM or a file (config.ini [fonts] font_order). #f when no source has it." }, \

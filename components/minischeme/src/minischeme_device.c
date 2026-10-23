@@ -7,6 +7,7 @@
 #include "minischeme_internal.h"
 #include "minischeme_gui.h"
 #include "minischeme_fonts.h"
+#include "minischeme_fontnet.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1186,6 +1187,14 @@ const char mini_device_config_template[] =
     ";   system_16:simsun-16  built-in 16 px font (0) drawn with simsun-16\n"
     ";   clock_32:digit-32    built-in clock font (1)\n"
     ";   simhei-24:kaiti-24   an app's simhei-24 replaced by kaiti-24\n"
+    "font_server = http://124.222.231.186:8090 ; font server (minischeme-proxy font_server.py, no\n"
+    ";                        password): glyphs the board's fonts lack (traditional and rare\n"
+    ";                        characters, Korean, emoji) are fetched there and kept in /spiffs/fonts\n"
+    "font_server_on = 1     ; 0: never ask the font server\n"
+    "font_server_first = 0  ; 0: the board's fonts first, the server fills gaps; 1: the server's face\n"
+    ";                        first for system-font text (any face it has; the board's glyphs stand\n"
+    ";                        in until the server's arrive)\n"
+    "font_server_face =     ; the face asked for, e.g. msyh (empty: the system font's, simsun)\n"
     "\n"
     "[app]\n"
     "; keys every app reads with (config-get \"key\"); an app's own config.ini in its folder\n"
@@ -1249,7 +1258,15 @@ const char mini_device_config_fonts_section[] =
     ";                        replacement. Examples:\n"
     ";   system_16:simsun-16  built-in 16 px font (0) drawn with simsun-16\n"
     ";   clock_32:digit-32    built-in clock font (1)\n"
-    ";   simhei-24:kaiti-24   an app's simhei-24 replaced by kaiti-24\n";
+    ";   simhei-24:kaiti-24   an app's simhei-24 replaced by kaiti-24\n"
+    "font_server = http://124.222.231.186:8090 ; font server (minischeme-proxy font_server.py, no\n"
+    ";                        password): glyphs the board's fonts lack (traditional and rare\n"
+    ";                        characters, Korean, emoji) are fetched there and kept in /spiffs/fonts\n"
+    "font_server_on = 1     ; 0: never ask the font server\n"
+    "font_server_first = 0  ; 0: the board's fonts first, the server fills gaps; 1: the server's face\n"
+    ";                        first for system-font text (any face it has; the board's glyphs stand\n"
+    ";                        in until the server's arrive)\n"
+    "font_server_face =     ; the face asked for, e.g. msyh (empty: the system font's, simsun)\n";
 
 /* Appended to a config.ini written before the [text] options existed */
 const char mini_device_config_text_section[] =
@@ -1334,7 +1351,20 @@ const char *mini_device_apply_font_config(const char *ini) {
     } else if (strcmp(overrides, "none") == 0) {
         overrides[0] = '\0';
     }
-    return mini_font_configure(has_order ? order : NULL, overrides);
+    const char *why = mini_font_configure(has_order ? order : NULL, overrides);
+    mini_device_apply_fontnet_config(ini);
+    return why;
+}
+
+void mini_device_apply_fontnet_config(const char *ini) {
+    /* the font server: on by default, at the project's server unless set */
+    char url[128], on[8], first[8], face[24];
+    bool has_url = ini && mini_device_config_value(ini, "font_server", url, sizeof(url));
+    bool has_on = ini && mini_device_config_value(ini, "font_server_on", on, sizeof(on));
+    bool has_first = ini && mini_device_config_value(ini, "font_server_first", first, sizeof(first));
+    bool has_face = ini && mini_device_config_value(ini, "font_server_face", face, sizeof(face));
+    mini_fontnet_configure(has_url ? url : NULL, !has_on || strcmp(on, "0") != 0,
+                           has_first && strcmp(first, "1") == 0, has_face ? face : "");
 }
 
 static bool key_equals(const char *p, size_t n, const char *key) {

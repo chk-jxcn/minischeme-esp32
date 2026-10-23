@@ -7,6 +7,7 @@
 #include "minischeme_gui.h"
 #include "minischeme_internal.h"
 #include "minischeme_fonts.h"
+#include "minischeme_fontnet.h"
 #include "minischeme_ili9488.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,7 +187,6 @@ static void gui_anim_forget(int y0, int y1);
 static void gui_anim_add(int x0, int y0, int x1, int y1, uint32_t period_ms);
 static uint32_t gui_epoch_start(const char *str, int x, int y, int w, int h, int dir);
 static void gui_epoch_sweep(void);
-static uint16_t utf8_next(const unsigned char **pp);
 
 /* When each marquee box appeared: its cycle (the hold, then the steps)
  * counts from then, not from the clock, so a page that has just come up
@@ -202,7 +202,7 @@ typedef struct {
     bool     stale;     /* its rows are being rendered again: still drawn? */
 } GuiEpoch;
 static GuiEpoch s_epoch[GUI_EPOCH_MAX];
-static int gui_char_width(const MiniFont *font, uint16_t cp);
+static int gui_char_width(const MiniFont *font, uint32_t cp);
 
 /* Text too big for its box, config.ini [text]: one-line text (gui-text-fit)
  * and wrapped text (gui-text-area) each have a mode, refreshes per second
@@ -2713,24 +2713,10 @@ void mini_gui_text_styled(int x, int y, const char *str, uint16_t color, int fon
             continue;
         }
 
-        uint16_t cp = c;
-        if ((c & 0xF8) == 0xF0) {
-            if (*(p + 1) && *(p + 2) && *(p + 3)) p += 3;
-            continue;
-        } else if ((c & 0xF0) == 0xE0) {
-            unsigned char c1 = *(p + 1);
-            unsigned char c2 = c1 ? *(p + 2) : 0;
-            if (c1 && c2) {
-                p += 2;
-                cp = (uint16_t)(((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
-            }
-        } else if ((c & 0xE0) == 0xC0) {
-            unsigned char c1 = *(p + 1);
-            if (c1) {
-                p++;
-                cp = (uint16_t)(((c & 0x1F) << 6) | (c1 & 0x3F));
-            }
-        }
+        /* one code point (emoji included); p ends on its last byte */
+        const unsigned char *q = p;
+        uint32_t cp = mini_utf8_next(&q);
+        p = q - 1;
 
         /* Every source of the font's chain, then the system font (font 0,
          * maybe replaced in config.ini), then the built-in one. A glyph of
@@ -2750,7 +2736,7 @@ void mini_gui_text_styled(int x, int y, const char *str, uint16_t color, int fon
                 draw_glyph_fast(g, cur_x, cur_y + y_offset, used->height, color);
             }
             cur_x += g->advance;
-        } else {
+        } else if (!mini_font_ignorable(cp)) {   /* a selector or joiner no font has: nothing */
             int pw = (cp < 128) ? 8 : 16;
             mini_gui_rect(cur_x, cur_y, pw - 2, font->height - 2, color, false);
             cur_x += pw;
@@ -2811,24 +2797,10 @@ void mini_gui_text_scaled(int x, int y, const char *str, uint16_t color, int fon
             cur_y += (font->height + 2) * scale;
             continue;
         }
-        uint16_t cp = c;
-        if ((c & 0xF8) == 0xF0) {
-            if (*(p + 1) && *(p + 2) && *(p + 3)) p += 3;
-            continue;
-        } else if ((c & 0xF0) == 0xE0) {
-            unsigned char c1 = *(p + 1);
-            unsigned char c2 = c1 ? *(p + 2) : 0;
-            if (c1 && c2) {
-                p += 2;
-                cp = (uint16_t)(((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
-            }
-        } else if ((c & 0xE0) == 0xC0) {
-            unsigned char c1 = *(p + 1);
-            if (c1) {
-                p++;
-                cp = (uint16_t)(((c & 0x1F) << 6) | (c1 & 0x3F));
-            }
-        }
+        /* one code point (emoji included); p ends on its last byte */
+        const unsigned char *q = p;
+        uint32_t cp = mini_utf8_next(&q);
+        p = q - 1;
         const MiniFont *used = font;
         const MiniGlyph *g = mini_font_glyph(font, cp, &used);
         if (g) {
@@ -2842,7 +2814,7 @@ void mini_gui_text_scaled(int x, int y, const char *str, uint16_t color, int fon
                 draw_glyph_scaled(g, cur_x, cur_y + y_offset * scale, used->height, color, scale);
             }
             cur_x += g->advance * scale;
-        } else {
+        } else if (!mini_font_ignorable(cp)) {
             int pw = (cp < 128) ? 8 : 16;
             mini_gui_rect(cur_x, cur_y, (pw - 2) * scale, (font->height - 2) * scale, color, false);
             cur_x += pw * scale;
@@ -3039,7 +3011,7 @@ static int gui_char_pos(const MiniFont *font, const char *str, int n, int c, int
     const unsigned char *p = (const unsigned char *)str;
     int x = 0;
     while (c > 0 && *p) {
-        x += gui_char_width(font, utf8_next(&p));
+        x += gui_char_width(font, mini_utf8_next(&p));
         c--;
     }
     return x;
@@ -3051,27 +3023,8 @@ static int gui_char_count(const char *str) {
     return n;
 }
 
-/* Next code point of a UTF-8 string; 0 for a skipped 4-byte sequence */
-static uint16_t utf8_next(const unsigned char **pp) {
-    const unsigned char *p = *pp;
-    unsigned char c = *p++;
-    uint16_t cp = c;
-    if ((c & 0xF8) == 0xF0) {
-        cp = 0;
-        for (int i = 0; i < 3 && *p; i++) p++;
-    } else if ((c & 0xF0) == 0xE0 && p[0] && p[1]) {
-        cp = (uint16_t)(((c & 0x0F) << 12) | ((p[0] & 0x3F) << 6) | (p[1] & 0x3F));
-        p += 2;
-    } else if ((c & 0xE0) == 0xC0 && p[0]) {
-        cp = (uint16_t)(((c & 0x1F) << 6) | (p[0] & 0x3F));
-        p += 1;
-    }
-    *pp = p;
-    return cp;
-}
-
 /* Same widths as mini_font_text_width */
-static int gui_char_width(const MiniFont *font, uint16_t cp) {
+static int gui_char_width(const MiniFont *font, uint32_t cp) {
     return cp == 0 ? 0 : mini_font_advance(font, cp);
 }
 
@@ -3079,11 +3032,13 @@ static int gui_char_width(const MiniFont *font, uint16_t cp) {
  * space, or between two characters when either is CJK; Latin words and
  * numbers ("4.5", "U17") stay whole. Closing punctuation never starts a
  * line and opening punctuation never ends one (kinsoku). */
-static bool gui_is_cjk(uint16_t cp) {
-    return (cp >= 0x2E80 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFF00 && cp <= 0xFFEF);
+static bool gui_is_cjk(uint32_t cp) {
+    /* CJK, Hangul syllables and emoji: a line may break between any two */
+    return (cp >= 0x2E80 && cp <= 0x9FFF) || (cp >= 0xAC00 && cp <= 0xD7AF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x2600 && cp <= 0x27BF) || cp >= 0x1F000;
 }
 
-static bool gui_no_line_start(uint16_t cp) {
+static bool gui_no_line_start(uint32_t cp) {
     static const uint16_t list[] = {
         0xFF0C, 0x3002, 0x3001, 0xFF1B, 0xFF1A, 0xFF1F, 0xFF01, 0xFF09, 0x300D, 0x300F, 0x3011,
         0x300B, 0x3009, 0x201D, 0x2019, 0x2026, 0x00B7, 0xFF0E, 0xFF05, 0xFF5D, 0xFF3D,
@@ -3095,7 +3050,7 @@ static bool gui_no_line_start(uint16_t cp) {
     return false;
 }
 
-static bool gui_no_line_end(uint16_t cp) {
+static bool gui_no_line_end(uint32_t cp) {
     static const uint16_t list[] = {
         0xFF08, 0x300C, 0x300E, 0x3010, 0x300A, 0x3008, 0x201C, 0x2018, 0xFF5B, 0xFF3B,
         '(', '[', '{',
@@ -3113,11 +3068,11 @@ static bool gui_no_line_end(uint16_t cp) {
 static const char *gui_wrap_line(const char *s, const MiniFont *font, int w, const char **next) {
     const unsigned char *p = (const unsigned char *)s;
     const unsigned char *brk_end = NULL, *brk_next = NULL;  /* the last allowed break */
-    uint16_t prev = 0;
+    uint32_t prev = 0;
     int width = 0;
     while (*p && *p != '\n') {
         const unsigned char *q = p;
-        uint16_t cp = utf8_next(&q);
+        uint32_t cp = mini_utf8_next(&q);
         int cw = gui_char_width(font, cp);
         if (p != (const unsigned char *)s) {
             if (prev == ' ' && cp != ' ') {

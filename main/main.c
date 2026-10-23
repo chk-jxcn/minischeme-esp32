@@ -70,6 +70,7 @@
 #include "minischeme_market.h"
 #include "minischeme_channel.h"
 #include "minischeme_jsonfeed.h"
+#include "minischeme_fontnet.h"
 #include "market_host.h"
 #include "minischeme.h"
 #include "minischeme_internal.h"
@@ -1930,6 +1931,7 @@ static bool ini_file_value(const char *path, const char *key, char *val, size_t 
 /* Set by the HTTP task when a server address or the hardware password
  * changes; the main loop rebuilds the server list from the files */
 static volatile bool s_channel_dirty = false;
+static volatile bool s_fontnet_dirty = false;   /* [fonts] font_server* changed: the main loop applies it */
 static char s_chan_id[16] = "";   /* this device at the converters: its WiFi MAC, 12 hex digits */
 
 /* Values naming a protocol converter: the device's key for it is kept in
@@ -1977,7 +1979,7 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                         "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
-                                        "panel" };
+                                        "panel", "font_server", "font_server_on", "font_server_first", "font_server_face" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
     char (*vals)[200] = (char (*)[200])malloc(NKEYS * 200);
     if (!cfg || !out || !esc || !vals) {
@@ -1985,7 +1987,12 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
         return http_error(req, "out of memory");
     }
     for (int i = 0; i < NKEYS; i++) {
-        if (!mini_device_config_value(cfg, keys[i], vals[i], sizeof(vals[i]))) vals[i][0] = '\0';
+        if (!mini_device_config_value(cfg, keys[i], vals[i], sizeof(vals[i]))) {
+            /* the font server's defaults where the key is missing (an older config.ini) */
+            const char *def = strcmp(keys[i], "font_server") == 0 ? MINI_FONTNET_DEFAULT_URL :
+                              strcmp(keys[i], "font_server_on") == 0 ? "1" : "";
+            snprintf(vals[i], sizeof(vals[i]), "%s", def);
+        }
         const char *url = mini_chan_url_of(vals[i]);   /* the address, never the key */
         if (url != vals[i]) memmove(vals[i], url, strlen(url) + 1);
     }
@@ -2008,7 +2015,7 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                          "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                          "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
-                                         "panel" };
+                                         "panel", "font_server", "font_server_on", "font_server_first", "font_server_face" };
     /* the servers this device uses: with a password or not, the last outcome */
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
     n += mini_chan_status_json(out + n, 1100);
@@ -2023,6 +2030,15 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                               i ? "https_proxy" : "proxy", esc);
     }
     mini_wipe(srv_pw, sizeof(srv_pw));
+    {   /* the font server's state */
+        uint32_t got = 0, absent = 0;
+        const char *ferr = "";
+        const char *fstate = mini_fontnet_status(&got, &absent, &ferr);
+        json_escape(ferr, esc, 200);
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n,
+                              ",\"font_server_state\":\"%s\",\"font_server_received\":%u,\"font_server_absent\":%u,"
+                              "\"font_server_error\":\"%s\"", fstate, (unsigned)got, (unsigned)absent, esc);
+    }
     json_escape(s_settings_mode ? "settings" : s_app_path, esc, 200);
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app\":\"%s\",\"settings_from\":\"%s\"", esc,
                           s_settings_mode ? s_settings_from : "");
@@ -2217,6 +2233,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strncmp(key, "button_", 7) == 0) buttons = true;
         if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
         if (panel_ips >= 0) s_panel_request = panel_ips;   /* the main loop owns the LCD bus */
+        if (strncmp(key, "font_server", 11) == 0) s_fontnet_dirty = true;
         if (is_server_key(key) || server_pw || strcmp(key, "hardware_password") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
@@ -5191,6 +5208,7 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_help_lib(vm);
     mini_register_device_lib(vm);
     mini_register_json_feed_lib(vm);
+    mini_register_fontnet_lib(vm);
     mini_register_c_func(vm, "config-get", prim_config_get);
     mini_register_c_func(vm, "app-has-config?", prim_app_has_config);
     mini_register_c_func(vm, "config-set!", prim_config_set);
@@ -6051,6 +6069,12 @@ void app_main(void) {
             apply_panel(s_panel_request == 1);
             s_panel_request = -1;
         }
+        if (s_fontnet_dirty) {   /* [fonts] font_server* from the settings page */
+            s_fontnet_dirty = false;
+            char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+            mini_device_apply_fontnet_config(cfg);
+            free(cfg);
+        }
         if (s_channel_dirty) {
             s_channel_dirty = false;
             char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
@@ -6084,6 +6108,7 @@ void app_main(void) {
         backlight_save_pending();
         /* the app market: downloads in progress; the automatic update round */
         mini_market_poll();
+        mini_fontnet_poll();   /* glyphs from the font server: a due request, a finished one */
         if (!s_settings_restart_at) mini_market_auto((uint32_t)(loop_t0 / 1000));
         if (s_factory_restart_at && esp_timer_get_time() >= s_factory_restart_at) {
             ESP_LOGW(TAG, "Restarting into the built-in settings after a factory reset");

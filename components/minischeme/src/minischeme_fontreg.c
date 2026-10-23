@@ -32,6 +32,7 @@
  */
 
 #include "minischeme_fonts.h"
+#include "minischeme_fontnet.h"
 #include "minischeme_fontrom.h"
 #include "minischeme_gui.h"
 #include "minischeme_internal.h"
@@ -90,7 +91,7 @@ typedef struct {
     uint32_t nblocks;
     uint8_t *block;
     int32_t block_no;
-    uint16_t miss[MFNT_MISSES];
+    uint32_t miss[MFNT_MISSES];
     uint8_t nmiss, next_miss;
     /* memory fonts: rotating glyph views pointing into the data (the other
      * kinds copy their bitmaps into the shared glyph cache) */
@@ -175,7 +176,7 @@ static GEntry *s_gc = NULL;   /* GCACHE_ENTRIES, allocated with the buffer on fi
 static uint32_t s_gc_head = 0;
 static int s_gc_next = 0;
 
-static MiniGlyph *gcache_find(const void *src, uint16_t cp) {
+static MiniGlyph *gcache_find(const void *src, uint32_t cp) {
     if (!s_gc) return NULL;
     for (int i = 0; i < GCACHE_ENTRIES; i++) {
         if (s_gc[i].src == src && s_gc[i].g.codepoint == cp) return &s_gc[i].g;
@@ -192,7 +193,7 @@ static void gcache_forget(const void *src) {
 
 /* Room for up to cap bytes of a new glyph; gcache_commit then keeps the
  * bytes really used. NULL when cap does not fit or there is no RAM. */
-static GEntry *gcache_reserve(uint16_t cp, size_t cap, uint8_t **dst) {
+static GEntry *gcache_reserve(uint32_t cp, size_t cap, uint8_t **dst) {
     if (!s_gc) s_gc = (GEntry *)calloc(GCACHE_ENTRIES, sizeof(GEntry));
     if (s_gc && !s_gc_buf) s_gc_buf = (uint8_t *)malloc(GCACHE_BYTES);
     if (!s_gc || !s_gc_buf || cap == 0 || cap > GCACHE_BYTES / 2) return NULL;
@@ -443,7 +444,7 @@ static Source *source_file(const char *path, size_t ram_limit, const char **err_
 /* ========================================================================= */
 
 /* Binary search of n sorted index entries; the entry or NULL */
-static const uint8_t *index_search(const uint8_t *entries, uint32_t n, uint16_t cp) {
+static const uint8_t *index_search(const uint8_t *entries, uint32_t n, uint32_t cp) {
     uint32_t lo = 0, hi = n;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
@@ -456,7 +457,7 @@ static const uint8_t *index_search(const uint8_t *entries, uint32_t n, uint16_t 
 }
 
 /* Index entry of cp in a file font: one block read at most */
-static const uint8_t *file_entry(Source *s, uint16_t cp) {
+static const uint8_t *file_entry(Source *s, uint32_t cp) {
     uint32_t lo = 0, hi = s->nblocks; /* last block whose first code point <= cp */
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo + 1) / 2;
@@ -475,14 +476,14 @@ static const uint8_t *file_entry(Source *s, uint16_t cp) {
     return index_search(s->block, n, cp);
 }
 
-static bool known_miss(Source *s, uint16_t cp) {
+static bool known_miss(Source *s, uint32_t cp) {
     for (int i = 0; i < s->nmiss; i++) {
         if (s->miss[i] == cp) return true;
     }
     return false;
 }
 
-static void note_miss(Source *s, uint16_t cp) {
+static void note_miss(Source *s, uint32_t cp) {
     s->miss[s->next_miss] = cp;
     s->next_miss = (uint8_t)((s->next_miss + 1) % MFNT_MISSES);
     if (s->nmiss < MFNT_MISSES) s->nmiss++;
@@ -495,8 +496,8 @@ static MiniGlyph *next_view(Source *s) {
     return g;
 }
 
-static const MiniGlyph *source_find(Source *s, uint16_t cp) {
-    if (!s || s->kind == K_NONE) return NULL;
+static const MiniGlyph *source_find(Source *s, uint32_t cp) {
+    if (!s || s->kind == K_NONE || cp > 0xFFFF) return NULL;   /* MFNT holds 16-bit code points */
     MiniGlyph *g;
     uint8_t *dst;
     GEntry *ce;
@@ -532,7 +533,7 @@ static const MiniGlyph *source_find(Source *s, uint16_t cp) {
 }
 
 /* Every source of the chain, in order */
-static const MiniGlyph *chain_find(Chain *c, uint16_t cp, const MiniFont **used) {
+static const MiniGlyph *chain_find(Chain *c, uint32_t cp, const MiniFont **used) {
     for (int i = 0; i < c->n; i++) {
         const MiniGlyph *g = source_find(c->src[i], cp);
         if (g) {
@@ -543,7 +544,7 @@ static const MiniGlyph *chain_find(Chain *c, uint16_t cp, const MiniFont **used)
     return NULL;
 }
 
-static const MiniGlyph *builtin_find(const MiniFont *font, uint16_t cp) {
+static const MiniGlyph *builtin_find(const MiniFont *font, uint32_t cp) {
     if (!font || !font->glyphs) return NULL;
     int low = 0, high = font->glyph_count - 1;
     while (low <= high) {
@@ -555,7 +556,7 @@ static const MiniGlyph *builtin_find(const MiniFont *font, uint16_t cp) {
     return NULL;
 }
 
-const MiniGlyph *mini_font_find_glyph(const MiniFont *font, uint16_t codepoint) {
+const MiniGlyph *mini_font_find_glyph(const MiniFont *font, uint32_t codepoint) {
     if (!font) return NULL;
     Chain *c = chain_of(font);
     if (c) return chain_find(c, codepoint, NULL);
@@ -572,7 +573,7 @@ const MiniFont *mini_font_get(int font_id) {
     return mini_font_get(MINI_FONT_SYSTEM_16);
 }
 
-static const MiniGlyph *font_lookup(const MiniFont *font, uint16_t cp, const MiniFont **used) {
+static const MiniGlyph *font_lookup(const MiniFont *font, uint32_t cp, const MiniFont **used) {
     Chain *c = chain_of(font);
     if (c) return chain_find(c, cp, used);
     const MiniGlyph *g = mini_font_find_glyph(font, cp);
@@ -581,20 +582,36 @@ static const MiniGlyph *font_lookup(const MiniFont *font, uint16_t cp, const Min
 }
 
 /* The font (its whole chain), then the system font (font 0, maybe
- * replaced), then the built-in 16 px font */
-const MiniGlyph *mini_font_glyph(const MiniFont *font, uint16_t codepoint, const MiniFont **used) {
+ * replaced), then the built-in 16 px font, then the glyphs downloaded from
+ * the font server (a glyph no one has yet is asked for there) */
+/* Text in the system font (font 0, or the built-in one it replaces) */
+static bool is_system_font(const MiniFont *font) {
+    return font == mini_font_get(MINI_FONT_SYSTEM_16) || font == mini_font_builtin(MINI_FONT_SYSTEM_16);
+}
+
+const MiniGlyph *mini_font_glyph(const MiniFont *font, uint32_t codepoint, const MiniFont **used) {
+    /* font_server_first: the server's face for system-font text; the
+     * board's glyph stands in until the server's has arrived */
+    if (mini_fontnet_first() && is_system_font(font)) {
+        const MiniGlyph *g = mini_fontnet_glyph(codepoint, used);
+        if (g) return g;
+    }
     const MiniFont *chain[3] = { font, mini_font_get(MINI_FONT_SYSTEM_16), mini_font_builtin(MINI_FONT_SYSTEM_16) };
     for (int i = 0; i < 3; i++) {
         if (!chain[i] || (i > 0 && (chain[i] == chain[0] || chain[i] == chain[i - 1]))) continue;
         const MiniGlyph *g = font_lookup(chain[i], codepoint, used);
         if (g) return g;
     }
-    return NULL;
+    return codepoint >= 0x20 ? mini_fontnet_glyph(codepoint, used) : NULL;
 }
 
 /* Width text layout uses: a missing glyph takes the replaced system font's
  * advance when there is one, else 8 (ASCII) or the font height */
-int mini_font_advance(const MiniFont *font, uint16_t codepoint) {
+int mini_font_advance(const MiniFont *font, uint32_t codepoint) {
+    if (mini_fontnet_first() && is_system_font(font)) {
+        int net = mini_fontnet_advance(codepoint);
+        if (net >= 0) return net;
+    }
     const MiniGlyph *g = font_lookup(font, codepoint, NULL);
     if (g) return g->advance;
     const MiniFont *sys = mini_font_get(MINI_FONT_SYSTEM_16);
@@ -602,35 +619,36 @@ int mini_font_advance(const MiniFont *font, uint16_t codepoint) {
         g = font_lookup(sys, codepoint, NULL);
         if (g) return g->advance;
     }
+    int net = codepoint >= 128 ? mini_fontnet_advance(codepoint) : -1;
+    if (net >= 0) return net;
+    if (mini_font_ignorable(codepoint)) return 0;
     return codepoint < 128 ? 8 : font->height;
+}
+
+uint32_t mini_utf8_next(const unsigned char **pp) {
+    const unsigned char *p = *pp;
+    unsigned char c = *p++;
+    uint32_t cp = c;
+    if ((c & 0xF8) == 0xF0 && (p[0] & 0xC0) == 0x80 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+        cp = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(p[0] & 0x3F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+        p += 3;
+    } else if ((c & 0xF0) == 0xE0 && (p[0] & 0xC0) == 0x80 && (p[1] & 0xC0) == 0x80) {
+        cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(p[0] & 0x3F) << 6) | (p[1] & 0x3F);
+        p += 2;
+    } else if ((c & 0xE0) == 0xC0 && (p[0] & 0xC0) == 0x80) {
+        cp = ((uint32_t)(c & 0x1F) << 6) | (p[0] & 0x3F);
+        p += 1;
+    }
+    *pp = p;
+    return cp;
 }
 
 int mini_font_text_width(int font_id, const char *utf8_str) {
     if (!utf8_str) return 0;
     const MiniFont *font = mini_font_get(font_id);
     int total_w = 0;
-    for (const unsigned char *p = (const unsigned char *)utf8_str; *p; p++) {
-        unsigned char c = *p;
-        uint16_t cp = c;
-        if ((c & 0xF8) == 0xF0) {
-            if (*(p + 1) && *(p + 2) && *(p + 3)) p += 3;
-            continue;
-        } else if ((c & 0xF0) == 0xE0) {
-            unsigned char c1 = *(p + 1);
-            unsigned char c2 = c1 ? *(p + 2) : 0;
-            if (c1 && c2) {
-                p += 2;
-                cp = (uint16_t)(((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
-            }
-        } else if ((c & 0xE0) == 0xC0) {
-            unsigned char c1 = *(p + 1);
-            if (c1) {
-                p++;
-                cp = (uint16_t)(((c & 0x1F) << 6) | (c1 & 0x3F));
-            }
-        }
-        total_w += mini_font_advance(font, cp);
-    }
+    const unsigned char *p = (const unsigned char *)utf8_str;
+    while (*p) total_w += mini_font_advance(font, mini_utf8_next(&p));
     return total_w;
 }
 
@@ -760,6 +778,18 @@ static void builtin_requests(void) {
             request_clear(id);
         }
     }
+}
+
+const char *mini_font_system_face(int *height) {
+    static char face[NAME_MAX_LEN];
+    const Chain *c = &s_chain[MINI_FONT_SYSTEM_16];
+    int size = 0;
+    if (c->n > 0 && split_name(c->name, face, sizeof(face), &size)) {
+        if (height) *height = c->font.height ? c->font.height : size;
+        return face;
+    }
+    if (height) *height = mini_font_builtin(MINI_FONT_SYSTEM_16)->height;
+    return "system";
 }
 
 void mini_font_rebuild(void) {

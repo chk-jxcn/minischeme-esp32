@@ -134,6 +134,16 @@ h2 button.small{margin-top:-4px}
 <div id="hproxytest" class="help"></div>
 <label for="murl">应用市场地址（留空：应用代理的 /market）</label>
 <input id="murl" placeholder="http://电脑IP:8087/market">
+<div class="desc" style="margin-top:10px">字体服务器（独立的服务，不需要密码，没有应用代理也能用）：板载字库没有的字（繁体、生僻字、韩文、emoji）从这里取，保存在板子上，以后不再下载。保存后立即生效。</div>
+<label><input type="checkbox" id="fson"> 使用字体服务器</label>
+<label for="fsurl">字体服务器地址</label>
+<div class="inline"><input id="fsurl" placeholder="http://124.222.231.186:8090">
+<button class="plain" onclick="openFontServer()">打开字体服务器</button></div>
+<label for="fsfirst">优先级</label>
+<select id="fsfirst"><option value="0">板载字体优先：服务器只补板载字库没有的字</option><option value="1">服务器字体优先：系统文字用服务器的字体（字形下载到之前先显示板载字体）</option></select>
+<label for="fsface">向服务器要的字体（留空：板载系统字体，即 simsun；服务器字体优先时可以填服务器上有的字体，如 msyh、simhei）</label>
+<input id="fsface" placeholder="simsun" maxlength="15">
+<div class="desc" id="fsstate"></div>
 <div class="desc" id="chstate"></div>
 <div class="desc">连接方式：明文 HTTP。设备 ID（WiFi MAC）和这台服务器的应用服务密码（base64 编码，不是加密）放在请求头里，网络上的人能看到，请不要用在别处用过的密码。没有设置密码时只带设备 ID。硬件密码只保护本网页和 HTTP 接口，可以随时修改。</div>
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
@@ -493,6 +503,11 @@ async function refresh() {
   keep('proxypw', state.proxy_password);
   keep('hproxypw', state.https_proxy_password);
   keep('murl', state.market_url);
+  keep('fsurl', state.font_server);
+  keep('fsface', state.font_server_face);
+  keep('fsfirst', state.font_server_first === '1' ? '1' : '0');
+  if (document.activeElement !== $('fson')) $('fson').checked = !/^(0|false|no|off)$/i.test(state.font_server_on || '1');
+  $('fsstate').innerHTML = fontServerText(state);
   $('chstate').innerHTML = channelText(state);
   if (document.activeElement !== $('webapp')) $('webapp').checked = !/^(0|false|no|off)$/i.test(state.web_in_app || '');
   if (document.activeElement !== $('mauto')) $('mauto').checked = on(state.market_auto_update);
@@ -924,6 +939,23 @@ function channelText(state) {
   }).join('<br>') + (state.device_id ? `<br>设备 ID：${esc(state.device_id)}（WiFi MAC）` : '');
 }
 
+/* The font server line: its state and what it has sent since boot */
+function fontServerText(state) {
+  const names = {off: '未使用', idle: '空闲', queued: '等待请求', fetching: '正在取字形', waiting: '上次失败，稍后重试'};
+  if (!state.font_server_state) return '';
+  let t = '状态：' + (names[state.font_server_state] || esc(state.font_server_state));
+  if (state.font_server_received) t += `，开机以来取到 ${state.font_server_received} 个字形` +
+    (state.font_server_absent ? `（其中 ${state.font_server_absent} 个服务器也没有）` : '');
+  if (state.font_server_error) t += `，<span class="warn">${esc(state.font_server_error)}</span>`;
+  return t;
+}
+
+function openFontServer() {
+  const url = $('fsurl').value.trim();
+  if (!/^https?:\/\//i.test(url)) { say('请先填写字体服务器地址', 'bad'); return; }
+  window.open(url.replace(/\/+$/, '') + '/', '_blank', 'noopener');
+}
+
 async function saveCommon(andRestart) {
   try {
     const [blong, bmid, bhold] = [buttonMs('blong'), buttonMs('bmid'), buttonMs('bhold')];
@@ -933,11 +965,15 @@ async function saveCommon(andRestart) {
     const blmax = String(Math.max(0, Math.min(255, parseInt($('blmax').value || '255', 10) || 255)));
     const servers = {'app.proxy': $('proxy').value.trim(), 'app.proxy_password': $('proxypw').value.trim(),
                      'app.https_proxy': $('hproxy').value.trim(), 'app.https_proxy_password': $('hproxypw').value.trim()};
+    servers['fonts.font_server'] = $('fsurl').value.trim();
+    servers['fonts.font_server_face'] = $('fsface').value.trim();
     for (const [k, v] of Object.entries(servers)) if (/[;#&\s]/.test(v)) throw new Error(`${k}：不能含有空格、; # &`);
     await post({'system.boot_app': $('boot').value, 'system.device_name': $('device').value.trim(),
                 ...servers,
                 'market.market_url': $('murl').value.trim(),
                 'market.market_auto_update': $('mauto').checked ? '1' : '0',
+                'fonts.font_server_on': $('fson').checked ? '1' : '0',
+                'fonts.font_server_first': $('fsfirst').value,
                 'system.web_in_app': $('webapp').checked ? '1' : '0',
                 'system.factory_reset_key': $('frkey').checked ? '1' : '0',
                 'display.panel': $('panel').value,

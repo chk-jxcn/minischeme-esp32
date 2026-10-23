@@ -21,7 +21,7 @@
 #define MINI_FONT_SLOTS     8   /* ids 0..7; 2..7 can be registered or loaded */
 
 typedef struct {
-    uint16_t codepoint;
+    uint32_t codepoint;        /* Unicode scalar value (emoji are above 0xFFFF) */
     uint8_t  advance;
     uint8_t  bytes_per_row;
     const uint8_t *bitmap;
@@ -43,7 +43,7 @@ const MiniFont *mini_font_builtin(int font_id);
 /* Any font id: the slot's font (0 and 1: a replacement of the built-in font),
  * else the built-in font; unknown ids fall back to the system font */
 const MiniFont *mini_font_get(int font_id);
-const MiniGlyph *mini_font_find_glyph(const MiniFont *font, uint16_t codepoint);
+const MiniGlyph *mini_font_find_glyph(const MiniFont *font, uint32_t codepoint);
 int mini_font_text_width(int font_id, const char *utf8_str);
 
 /* MFNT fonts (version 1, or 2 with coverage bits and a baseline). register:
@@ -70,9 +70,15 @@ const uint8_t *mini_font_data(int font_id);
 /* The glyph of codepoint for text in font: the font (every source of its
  * chain), else the system font (font 0, maybe replaced), else the built-in
  * 16 px font; *used: the font it came from (its height and baseline) */
-const MiniGlyph *mini_font_glyph(const MiniFont *font, uint16_t codepoint, const MiniFont **used);
+const MiniGlyph *mini_font_glyph(const MiniFont *font, uint32_t codepoint, const MiniFont **used);
 /* Advance used for layout (missing glyphs as the text drawing falls back) */
-int mini_font_advance(const MiniFont *font, uint16_t codepoint);
+int mini_font_advance(const MiniFont *font, uint32_t codepoint);
+/* The next code point of a UTF-8 string, advancing *pp past it (1 to 4
+ * bytes; a broken sequence gives its first byte) */
+uint32_t mini_utf8_next(const unsigned char **pp);
+/* The system font's face and height ("simsun", 16 for simsun-16; "system"
+ * for the built-in font): what the font server is asked for */
+const char *mini_font_system_face(int *height);
 /* Where fonts come from (config.ini [fonts]): order lists app, fontrom,
  * cache (glyphs from the font server) and spiffs (NULL/empty: "app, fontrom,
  * cache, spiffs"); overrides is "name:other, ..." where name may be

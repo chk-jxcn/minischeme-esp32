@@ -13,6 +13,7 @@
 
 #include "minischeme_jsonfeed.h"
 #include "minischeme_device.h"
+#include "minischeme_fontnet.h"
 #include "minischeme_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -706,6 +707,58 @@ uint32_t mini_download_max(void) { return s_dl_max; }
 void mini_download_done(bool ok, uint32_t bytes, const char *error) { dl_finish(ok, bytes, error); }
 
 /* ========================================================================= */
+/* Font server requests (minischeme_fontnet.h)                               */
+/* ========================================================================= */
+/* The main loop (mini_fontnet_poll) takes a due request and queues it; the
+ * feed task fetches it before the next document and leaves the reply; the
+ * main loop delivers it. */
+
+#if defined(ESP_PLATFORM)
+#define FN_TIMEOUT_MS 6000
+#define FN_REPLY_MAX  (16 * 1024)
+enum { FN_IDLE, FN_QUEUED, FN_RUNNING, FN_DONE };
+static volatile int s_fn_state = FN_IDLE;
+static char *s_fn_url = NULL;
+static uint8_t *s_fn_body = NULL;
+static size_t s_fn_len = 0;
+static int s_fn_status = 0;
+static char s_fn_err[48];
+
+static void jf_task(void *arg);
+
+static void jf_kick(void) {
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+    if (!s_task) xTaskCreate(jf_task, "jsonfeed", 4096, NULL, 4, &s_task);
+    else xTaskNotifyGive(s_task);
+}
+#endif
+
+void mini_fontnet_poll(void) {
+#if defined(ESP_PLATFORM)
+    if (s_fn_state == FN_DONE) {
+        __sync_synchronize();
+        mini_fontnet_deliver(s_fn_body, s_fn_len, s_fn_status, s_fn_err);
+        free(s_fn_body);
+        free(s_fn_url);
+        s_fn_body = NULL;
+        s_fn_url = NULL;
+        s_fn_state = FN_IDLE;
+    }
+    if (s_fn_state != FN_IDLE) return;
+    const char *url = mini_fontnet_take();
+    if (!url) return;
+    s_fn_url = jf_strdup(url, strlen(url));
+    if (!s_fn_url) {
+        mini_fontnet_deliver(NULL, 0, 0, "out of memory");
+        return;
+    }
+    __sync_synchronize();
+    s_fn_state = FN_QUEUED;
+    jf_kick();
+#endif
+}
+
+/* ========================================================================= */
 /* ESP32 polling task                                                        */
 /* ========================================================================= */
 
@@ -783,16 +836,73 @@ static void jf_download(char *buf, int cap) {
     dl_finish(ok, ok ? total : 0, err);
 }
 
+/* The queued font server request: the reply in memory for the main loop */
+static void jf_fontnet(void) {
+    s_fn_state = FN_RUNNING;
+    char err[48] = "cannot connect";
+    int status = 0;
+    int64_t length = -1;
+    uint8_t *body = NULL;
+    size_t len = 0;
+    if (!jf_wifi_up()) {
+        copy_str(err, sizeof(err), "WiFi not connected");
+    } else {
+        MiniFetch *h = mini_fetch_open(s_fn_url, FN_TIMEOUT_MS, MINI_FETCH_REDIRECTS, &status, &length, err, sizeof(err));
+        if (h) {
+            if (status == 200) {
+                size_t cap = length > 0 && length <= FN_REPLY_MAX ? (size_t)length : 4096;
+                body = (uint8_t *)malloc(cap);
+                int n = 0;
+                while (body && len < cap && (n = mini_fetch_read(h, (char *)body + len, (int)(cap - len))) > 0) {
+                    len += (size_t)n;
+                    if (len == cap && cap < FN_REPLY_MAX) {
+                        size_t bigger = cap * 2 < FN_REPLY_MAX ? cap * 2 : FN_REPLY_MAX;
+                        uint8_t *nb = (uint8_t *)realloc(body, bigger);
+                        if (!nb) break;
+                        body = nb;
+                        cap = bigger;
+                    }
+                }
+                if (!body || n < 0) {
+                    copy_str(err, sizeof(err), body ? "read error" : "out of memory");
+                    status = 0;
+                }
+            } else {
+                snprintf(err, sizeof(err), "HTTP status %d", status);
+            }
+            mini_fetch_close(h);
+        }
+    }
+    if (status != 200) {
+        free(body);
+        body = NULL;
+        len = 0;
+    }
+    s_fn_body = body;
+    s_fn_len = len;
+    s_fn_status = status;
+    copy_str(s_fn_err, sizeof(s_fn_err), err);
+    __sync_synchronize();
+    s_fn_state = FN_DONE;
+}
+
 static void jf_task(void *arg) {
     (void)arg;
     char buf[512];
+    int64_t next_feed = 0;       /* when the document is fetched next */
+    uint32_t feed_gen = 0;       /* the configuration it was fetched for */
     for (;;) {
         if (s_dl_state == DL_QUEUED) {     /* a download goes before the next document */
             jf_download(buf, (int)sizeof(buf));
             continue;
         }
+        if (s_fn_state == FN_QUEUED) {     /* glyphs too; the document keeps its time */
+            jf_fontnet();
+            continue;
+        }
         char *url = NULL;
         uint32_t interval = 1000;
+        uint32_t gen = s_latest_gen;
         JF_LOCK();
         const JfConfig *c = S ? (S->pending ? S->pending : S->cfg) : NULL;
         if (c && c->url[0]) {
@@ -802,6 +912,12 @@ static void jf_task(void *arg) {
         JF_UNLOCK();
         if (!url) {
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+            continue;
+        }
+        int64_t early = next_feed - jf_now_ms();
+        if (gen == feed_gen && early > 0) {   /* woken for a download or glyphs: not due yet */
+            free(url);
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(early));
             continue;
         }
         int64_t t0 = jf_now_ms();
@@ -853,6 +969,8 @@ static void jf_task(void *arg) {
         /* a failed fetch is retried within JF_RETRY_MS, not after a long interval */
         int64_t period = ok || interval < JF_RETRY_MS ? (int64_t)interval : JF_RETRY_MS;
         int64_t wait = period - (jf_now_ms() - t0);
+        feed_gen = gen;
+        next_feed = t0 + period;
         /* json-feed-start notifies the task: a new URL (an app page switch)
          * is fetched at once instead of after the old interval */
         vTaskDelay(pdMS_TO_TICKS(50));

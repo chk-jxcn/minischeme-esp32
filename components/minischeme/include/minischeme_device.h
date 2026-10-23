@@ -222,6 +222,9 @@ char *mini_device_config_set(const char *text, const char *section, const char *
  * defaults) applied to the font registry; NULL or an error message.
  * mini_device_config_fonts_section is appended to older files that lack it. */
 const char *mini_device_apply_font_config(const char *ini);
+/* Only its font server part (font_server, font_server_on, _first, _face):
+ * the settings page applies it without a restart */
+void mini_device_apply_fontnet_config(const char *ini);
 extern const char mini_device_config_fonts_section[];
 /* config.ini [text]: marquee / marquee_fps / marquee_step for one-line text
  * and wrap_marquee / wrap_marquee_fps / wrap_marquee_step for wrapped text
