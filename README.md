@@ -41,7 +41,7 @@ python -m esptool --chip esp32 -p COM42 -b 460800 --before default_reset --after
 ### System font (Chinese text without generating fonts)
 `firmware/fontrom.bin` is a ready font ROM image with **simsun-16** (Song 16 px, all of GB2312: levels 1 and 2, 7539 glyphs, 300 KB). Write it once to the `fontrom` partition; the WebREPL flasher does it by default ("写入系统字库"):
 ```bash
-python -m esptool --chip esp32 -p COM42 write-flash 0x190000 firmware/fontrom.bin
+python -m esptool --chip esp32 -p COM42 write-flash 0x181000 firmware/fontrom.bin
 ```
 It replaces the whole font ROM (fonts installed earlier with the font manager are removed; add them again afterwards). With `[fonts] font_override` empty the firmware draws all 16 px system and app text with simsun-16 when the font ROM has it, else with the built-in font (~700 characters); `font_override = none` keeps the built-in font. The image is made with `tools/make_fontrom.py` from `minischeme-webrepl/fonts/simsun-16.mfnt`.
 

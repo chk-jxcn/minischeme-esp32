@@ -8,7 +8,7 @@ name "<face>-<size>". Layout: minischeme_fontrom.h.
     python tools/make_fontrom.py simsun-16.mfnt kai-20.mfnt -o fontrom.bin
     (firmware/fontrom.bin: minischeme-webrepl/fonts/simsun-16.mfnt, GB2312 levels 1 and 2)
     python tools/make_fontrom.py --font simsun:16:gb2312 --font simhei:24:app.scm -o fontrom.bin
-    python -m esptool --chip esp32 -p COM42 write-flash 0x190000 fontrom.bin
+    python -m esptool --chip esp32 -p COM42 write-flash 0x181000 fontrom.bin
 
 A --font spec is face:size[:what], what being gb2312 (all of GB2312), a
 source file whose string literals are included, or omitted (ASCII only);
@@ -22,8 +22,8 @@ import sys
 
 SECTOR = 4096
 NAME = 24
-DEFAULT_OFFSET = 0x190000
-DEFAULT_SIZE = 768 * 1024
+DEFAULT_OFFSET = 0x181000
+DEFAULT_SIZE = 320 * 1024
 
 
 def fnv(data, h=2166136261):
@@ -76,7 +76,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('mfnt', nargs='*', help='.mfnt files (named by the name stored in them)')
     ap.add_argument('--font', action='append', default=[], help='face:size[:gb2312|source-file] rendered here')
-    ap.add_argument('--size', default='512K', help='partition size (default 512K, firmware 1.0.71+)')
+    ap.add_argument('--size', default='320K', help='partition size (default 320K; 512K for firmware 1.0.71..1.0.72)')
     ap.add_argument('-o', '--output', required=True)
     a = ap.parse_args()
     fonts = []
