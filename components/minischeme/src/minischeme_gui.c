@@ -344,6 +344,8 @@ static void gui_rec_bitmap(int x, int y, int w, int h, const uint8_t *bits, int 
 /* Rows [y, y+h) entirely outside the effective clip: skip the whole primitive
  * (every band replays every command, so this is the common case) */
 #define GUI_ROWS_HIDDEN(y, h) ((y) >= s_clip_y1 || (y) + (h) <= s_clip_y0)
+/* Columns [x, x+w) outside it (a box redrawn on its own: a scrolling title) */
+#define GUI_COLS_HIDDEN(x, w) ((x) >= s_clip_x1 || (x) + (w) <= s_clip_x0)
 
 /* Sub-buffer table */
 #define MAX_SUB_BUFFERS 16
@@ -1778,7 +1780,13 @@ static void gui_dl_replay(void) {
             case GUI_OP_TEXT_SCROLL: mini_gui_text_scroll(c->x, c->y, c->w, c->h, str, c->c1, c->p, (int16_t)c->c2, c->b); break;
             case GUI_OP_BITMAP:      mini_gui_bitmap(c->x, c->y, c->w, c->h, (const uint8_t *)str, c->p, c->c1,
                                                      c->b ? (int)c->c2 : -1); break;
-            case GUI_OP_IMAGE:       if (str) mini_gui_image(c->x, c->y, str, c->p, c->c1); break;
+            /* an image outside the band or box is not even opened (one is
+             * cached: a list of covers reopened every file in every band and
+             * in every step of the scrolling titles beside them) */
+            case GUI_OP_IMAGE:
+                if (str && !GUI_ROWS_HIDDEN(c->y, c->h) && !GUI_COLS_HIDDEN(c->x, c->w))
+                    mini_gui_image(c->x, c->y, str, c->p, c->c1);
+                break;
             default: break;
         }
     }
