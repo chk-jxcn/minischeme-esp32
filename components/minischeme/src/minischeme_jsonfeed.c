@@ -673,7 +673,10 @@ void mini_json_feed_end(bool ok, const char *error) {
  * next document (the same plain HTTP fetch, so the device headers and the
  * https converter apply); the body goes to <path>.part, which replaces path
  * when it is complete. The WebREPL fetches it for the WASM device
- * (mini_download_take / mini_download_done). */
+ * (mini_download_take / mini_download_done). The optional on-done procedure
+ * waits in a hidden global of the app's VM (a GC root, and gone with the VM
+ * when another app starts); the host's main loop calls mini_download_poll,
+ * which calls it once the download ended. */
 
 #define DL_MAX_BYTES  (256 * 1024)
 #define DL_TIMEOUT_MS 15000
@@ -684,6 +687,8 @@ static char s_dl_path[96];             /* the file in the app's folder (full pat
 static char s_dl_rel[96];              /* the path as the app gave it */
 static uint32_t s_dl_max, s_dl_bytes, s_dl_seq;
 static char s_dl_err[64];
+static volatile bool s_dl_notify = false;   /* an on-done waits for the queued download */
+#define DL_DONE_GLOBAL "%fs-download-done"
 
 static void dl_finish(bool ok, uint32_t bytes, const char *err) {
     JF_LOCK();
@@ -1353,10 +1358,14 @@ static Value prim_json_feed_dump(MiniVM *vm, int argc, Value *argv) {
     return r;
 }
 
-/* (fs-download url path) => #t: queued; #f: another download is running */
+/* (fs-download url path [on-done]) => #t: queued; #f: another download is running */
 static Value prim_fs_download(MiniVM *vm, int argc, Value *argv) {
     if (argc < 2 || !mini_is_string(argv[0]) || !mini_is_string(argv[1])) {
-        vm_error(vm, "fs-download: expected (fs-download url path)");
+        vm_error(vm, "fs-download: expected (fs-download url path [on-done])");
+        return mini_void();
+    }
+    if (argc > 2 && !mini_is_closure(argv[2]) && !mini_is_cfunc(argv[2])) {
+        vm_error(vm, "fs-download: on-done must be a procedure");
         return mini_void();
     }
     const char *url = mini_string_data(argv[0]);
@@ -1377,6 +1386,9 @@ static Value prim_fs_download(MiniVM *vm, int argc, Value *argv) {
         vm_error(vm, "fs-download: out of memory");
         return mini_void();
     }
+    /* may collect: argv stays rooted on the VM stack, url is not read again */
+    mini_set_global(vm, DL_DONE_GLOBAL, argc > 2 ? argv[2] : mini_false());
+    s_dl_notify = argc > 2;
 #if defined(ESP_PLATFORM)
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
 #endif
@@ -1417,6 +1429,26 @@ static Value prim_fs_download_status(MiniVM *vm, int argc, Value *argv) {
     alist_push(vm, &lst, "state", mini_make_symbol(vm, states[state]));
     mini_pop_root(vm);
     return lst;
+}
+
+void mini_download_poll(MiniVM *vm) {
+    if (!s_dl_notify || (s_dl_state != DL_DONE && s_dl_state != DL_ERROR)) return;
+    s_dl_notify = false;
+    Value fn = mini_get_global(vm, DL_DONE_GLOBAL);
+    if (!mini_is_closure(fn) && !mini_is_cfunc(fn)) return;   /* another app's VM by now */
+    char rel[96];
+    JF_LOCK();
+    bool ok = s_dl_state == DL_DONE;
+    copy_str(rel, sizeof(rel), s_dl_rel);
+    JF_UNLOCK();
+    Value args[2] = { ok ? mini_true() : mini_false(), mini_nil() };
+    mini_push_root(vm, &fn);
+    mini_push_root(vm, &args[1]);
+    mini_set_global(vm, DL_DONE_GLOBAL, mini_false());   /* once; on-done may queue the next one */
+    args[1] = mini_make_string(vm, rel);
+    mini_call(vm, fn, 2, args);
+    mini_pop_root(vm);
+    mini_pop_root(vm);
 }
 
 void mini_register_json_feed_lib(MiniVM *vm) {

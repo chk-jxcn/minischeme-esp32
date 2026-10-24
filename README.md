@@ -80,7 +80,7 @@ stack_trace = 0
 ```
 
 ## Documentation
-- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.11.0](docs/api/v1.11.0.md)
+- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.12.0](docs/api/v1.12.0.md)
 - [Development guide](AGENT_DEVELOPMENT_GUIDE.md)
 
 ## License

@@ -73,6 +73,9 @@ const char *mini_download_take(void);
 const char *mini_download_path(void);
 uint32_t mini_download_max(void);
 void mini_download_done(bool ok, uint32_t bytes, const char *error);
+/* The main loop, after app-step: calls the app's (fs-download url path
+ * on-done) procedure once its download ended (check the app error after it) */
+void mini_download_poll(MiniVM *vm);
 
 #ifdef __cplusplus
 }

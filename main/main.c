@@ -6105,6 +6105,8 @@ void app_main(void) {
 
         mini_device_call_hook(s_vm, "app-step", NULL, 0, NULL);
         check_app_error("app-step");
+        mini_download_poll(s_vm);   /* an fs-download's on-done */
+        check_app_error("fs-download");
         backlight_save_pending();
         /* the app market: downloads in progress; the automatic update round */
         mini_market_poll();

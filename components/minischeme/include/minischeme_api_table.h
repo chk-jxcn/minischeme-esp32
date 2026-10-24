@@ -4,9 +4,9 @@
 
 #include <stdint.h>
 
-#define MINI_API_VERSION       "1.11.0"
+#define MINI_API_VERSION       "1.12.0"
 #define MINI_API_VERSION_MAJOR 1
-#define MINI_API_VERSION_MINOR 11
+#define MINI_API_VERSION_MINOR 12
 #define MINI_API_VERSION_PATCH 0
 
 enum { MINI_API_STABLE, MINI_API_RESERVED, MINI_API_ALIAS };
