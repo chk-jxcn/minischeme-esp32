@@ -387,6 +387,24 @@ carousel_seconds = 10
   `app-page-title-only` are cleared (the combined app titles each page "app page").
 - Short press: next entry. Long press: the entry app's own long press.
 - The combined app needs API 1.6 (the build declares it); older firmware does not install it.
+- **Files and schedules** (API 1.13): while a member's code runs, also while it loads (the
+  build puts `(combo-loading! id)` before it), relative paths and the storage quota are the
+  member's own folder (`app-member-folder`), so it shares its files with the app running
+  alone; its `schedule.ini` times reach its `app-schedule` hook here (the firmware calls
+  `(app-schedule at id)` on the combined app). Firmware callbacks: wrap them with
+  `(app-callback proc)` to run as the member.
+- **More hooks kept per member**: `app-step-proc`, `app-schedule`, `app-web`,
+  `app-hold-proc` (`#t`: the carousel waits on the member's entry while its own screens turn;
+  it goes on at once when it says `#f`), `app-show-proc` (the entry came on screen).
+  `gui-render-proc` stays the combined app's.
+- **Alerts** (4.11): a member's alerts take the screen over any entry, run as its code; its
+  watched feeds are fetched in the background. The setting `alerts` overrides the members'
+  own: `id:priority[:exit[:seconds]]`, comma separated; priority 0: none of that member's.
+- **Web pages**: the combined app's own page (`apps/lib/combo_web.html`) edits `entries` (a
+  page may come several times), the carousel and `alerts`, taking effect at once. A member's
+  page comes from its installed image (`/app?member=<id>`); the board's settings answer lists
+  them (`app_pages`) and its device page offers them in a dropdown; their calls run
+  `(app-web name body id)`, which the combined app gives to that member.
 
 ---
 
@@ -570,6 +588,11 @@ item vector, `items` a list of item vectors, `k` a field index 1..5 (`a`..`e`).
 | `(app-button)` | Firmware hook, short press: `(app-next-page!)`. Not called while the info pages are open. | |
 | `(app-touch x y)` | Hook for a touch: `(app-button)`. Only the WASM simulator calls it (screen click). | |
 | `(app-resume)` | Hook after a FASL snapshot restore: reloads fonts, restarts the feed, invalidates. | |
+
+| `app-step-proc` | `() -> #t` when it used the feed stream itself; called first by `app-step` on every pass (sub-second work, a sync). | |
+| `app-hold-proc`, `app-show-proc` | A combined app's carousel waits on the page while `(app-hold-proc)` is `#t`; `(app-show-proc)` after `app-goto!`. | |
+| `app-schedule` | `(at)`: a time of the app's schedule.ini came while it runs. | |
+| `(app-callback proc)` | `proc` wrapped to run as the code that made it (a combined app's member). | procedure |
 
 applib defines no `app-long-press` or `app-mid-press`: define them to use the long press
 (0.8 s) and the mid press (3.5 s), which are the app's (the hardware pages open with an
@@ -807,6 +830,24 @@ Used by applib itself; read or call them only as noted.
 | `(app-header-sub items)` | Subtitle on page 1, page name elsewhere. |
 | `(app-render-countdown xr)`, `(carousel-px secs)`, `(carousel-bar-w secs)` | The carousel bar. |
 | `(app-carousel-config)`, `(app-carousel-tick!)` | Reads the carousel settings; one second of countdown. |
+
+### 4.11 Alerts (强提醒)
+
+| Definition | Description | Returns |
+|---|---|---|
+| `(app-alert! key title render [opts])` | Raises (or updates) an alert; `render` draws its body (`(full . #t)`: the whole screen). opts: `(ack . thunk)` `(priority . 1..9)` `(exit . button\|time\|both\|app)` `(seconds . n)` `(snooze . minutes)` `(full . #t)`. | `#t`, `#f` when off or ended already |
+| `(app-alert-done! key)` | Ends it (exit `app` ends only so). | whether it existed |
+| `(app-alert-active? key)` | Whether it waits or shows. | boolean |
+| `(app-alert-current)` | The alert on screen. | vector or `#f` |
+| `(app-watch! url-proc interval proc)` | A feed fetched in the background at its interval while no fetch is in flight; its documents go to `proc`. | |
+
+The highest priority shows over the pages (equal ones in arrival order); a higher one goes in
+front, the covered one comes back with the seconds it had left; the carousel waits. Short
+press: its `ack`, then it closes (exit `time`: nothing; `app`: `ack` only). Long press: put
+off for its snooze minutes. Settings (first found): a combined app's `alerts` for the member,
+the app's `alert` (0 off), `alert_priority`, `alert_exit`, `alert_seconds`, `alert_snooze`,
+then the options, then 5 / both / 30 / 5. A key that ended is not raised again until the app
+restarts.
 
 ### 4.10 Info pages (`apps/lib/infopages.scm`)
 

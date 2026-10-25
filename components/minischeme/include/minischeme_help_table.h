@@ -252,6 +252,7 @@
     { "app-return", "(app-return)", "System / Apps", "A scheduled launch is done: the next app due at that time, else the boot app, starts after this call (#t); #f when there is nothing to return to." }, \
     { "config-get", "(config-get key [app-id])", "System / Configuration", "Value of a key in the running app's own config.ini (its folder), else in /spiffs/config.ini, as a string; #f when neither has it. app-id: a member of the running combined app." }, \
     { "app-has-config?", "(app-has-config? app-id)", "System / Configuration", "Whether a member of the running combined app ([combo] members) has its own config.ini." }, \
+    { "app-member-folder", "(app-member-folder app-id)", "System / Configuration", "Make the relative file paths of the running combined app's code those of member app-id's own folder (apps/<id>), #f: its own again." }, \
     { "config-set!", "(config-set! section key value)", "System / Configuration", "Write key = value into /spiffs/config.ini (the line replaced in place with its comment kept, else added to [section]); #t when saved. Read again at the next boot." }, \
     { "app-config-set!", "(app-config-set! key value)", "System / Configuration", "Store a setting in the running app's own config.ini ([config] section, in its folder)." }, \
     { "setup-mode-start", "(setup-mode-start)", "System / Setup mode", "Start the setup access point and its web page. Not for apps: only the system settings and the REPL may (an app gets an error)." }, \

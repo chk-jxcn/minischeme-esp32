@@ -496,6 +496,7 @@ typedef struct {
     int bits;       /* JOB_DISPLAY: color bits (0: unchanged) */
     int scheme;     /* JOB_DISPLAY: color scheme (-1: unchanged) */
     bool failed;    /* JOB_APP_CALL: the hook failed (out is the JSON error) */
+    char member[32];/* JOB_APP_CALL: a member's page of a combined app ("" the app's own) */
 } RemoteJob;
 
 /* WebREPL input (POST /api/input): KEY 18 and the light sensor of the page.
@@ -802,13 +803,18 @@ static void run_job(RemoteJob *job) {
             job_reply_error(job, "no app runs (system settings)");
             return;
         }
-        Value args[2] = { mini_void(), mini_void() };
+        /* a member's page of a combined app: (app-web name body member) */
+        Value args[3] = { mini_void(), mini_void(), mini_void() };
         mini_push_root(vm, &args[0]);
         mini_push_root(vm, &args[1]);
+        mini_push_root(vm, &args[2]);
         args[0] = mini_make_string(vm, job->path);
         args[1] = mini_make_string_len(vm, (const char *)(job->buf ? job->buf : (const uint8_t *)""), job->len);
+        if (job->member[0]) args[2] = mini_make_string(vm, job->member);
         Value fn = mini_get_global(vm, "app-web");
-        Value res = (mini_is_closure(fn) || mini_is_cfunc(fn)) ? mini_call(vm, fn, 2, args) : mini_void();
+        Value res = (mini_is_closure(fn) || mini_is_cfunc(fn)) ? mini_call(vm, fn, job->member[0] ? 3 : 2, args)
+                                                                : mini_void();
+        mini_pop_root(vm);
         mini_pop_root(vm);
         mini_pop_root(vm);
         if (mini_get_error(vm)) {
@@ -2045,6 +2051,34 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
     json_escape(s_settings_mode ? "" : (s_app_name[0] ? s_app_name : s_app_id), esc, 200);
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app_name\":\"%s\",\"app_web\":%s", esc,
                           (!s_settings_mode && s_app_web_len) ? "true" : "false");
+    if (!s_settings_mode && s_app_members[0]) {   /* a combined app: the members with a page of their own */
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"app_pages\":[");
+        bool first = true;
+        for (const char *p = s_app_members; *p && n < SETTINGS_JSON_CAP - 160;) {
+            while (*p == ' ' || *p == ',') p++;
+            const char *e = p;
+            while (*e && *e != ',' && *e != ' ') e++;
+            char id[32], image[80], name[48] = "";
+            long at = 0;
+            size_t len = 0;
+            if (e > p && (size_t)(e - p) < sizeof(id)) {
+                memcpy(id, p, (size_t)(e - p));
+                id[e - p] = '\0';
+                snprintf(image, sizeof(image), APPS_DIR "/%s/app.msbc", id);
+                if (mini_app_web_locate_file(image, &at, &len) && len) {
+                    char *meta = mini_app_meta_read_file(image);
+                    if (meta) mini_device_config_value(meta, "name", name, sizeof(name));
+                    free(meta);
+                    json_escape(name[0] ? name : id, esc, 200);
+                    n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, "%s{\"id\":\"%s\",\"name\":\"%s\"}",
+                                          first ? "" : ",", id, esc);
+                    first = false;
+                }
+            }
+            p = e;
+        }
+        n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, "]");
+    }
     json_escape(ssid, esc, 200);
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"sta_connected\":%s,\"sta_ssid\":\"%s\",\"sta_ip\":\"%s\",\"rssi\":%d",
                           sta ? "true" : "false", esc, ip, rssi);
@@ -2489,15 +2523,37 @@ static void app_files_changed(void) {
     submit_job_and_wait(&job);
 }
 
+static bool app_member_ok(const char *id);
+static size_t member_quota(const char *id);
+
+/* member=<id> of a request from a combined app's member page: that member's
+ * folder and quota (the app's own without it); false: not a member */
+static bool app_request_folder(httpd_req_t *req, char *dir, size_t cap, size_t *quota) {
+    char member[32] = "";
+    if (http_query(req, "member", member, sizeof(member)) && member[0]) {
+        if (!app_member_ok(member)) return false;
+        snprintf(dir, cap, APPS_DIR "/%s", member);
+        mkdir(dir, 0775);
+        *quota = member_quota(member);
+        return true;
+    }
+    snprintf(dir, cap, "%s", s_app_dir);
+    *quota = s_app_quota;
+    return true;
+}
+
 static esp_err_t http_app_file(httpd_req_t *req) {
     if (s_settings_mode || !s_app_dir[0]) return http_error(req, "no app is running");
+    char base[64];
+    size_t quota = 0;
+    if (!app_request_folder(req, base, sizeof(base), &quota)) return http_error(req, "member: not a member of this combined app");
     char name[72] = "", del[4] = "";
     if (!http_query(req, "name", name, sizeof(name)) || !app_file_name_ok(name)) {
         return http_error(req, "name: a file of the app's folder (letters, digits, _ - ., one folder level)");
     }
     http_query(req, "delete", del, sizeof(del));
     char path[160];
-    snprintf(path, sizeof(path), "%s/%s", s_app_dir, name);
+    snprintf(path, sizeof(path), "%s/%s", base, name);
     if (req->method == HTTP_GET) {
         FILE *fp = fopen(path, "rb");
         if (!fp) {
@@ -2528,18 +2584,18 @@ static esp_err_t http_app_file(httpd_req_t *req) {
     if (total == 0 || total > APP_FILE_MAX) return http_error(req, "a file of 1 byte to 512 KB");
     struct stat st;
     size_t old = stat(path, &st) == 0 ? (size_t)st.st_size : 0;
-    size_t used = dir_used_bytes(s_app_dir);
+    size_t used = dir_used_bytes(base);
     used = used > old ? used - old : 0;
-    if (used + total > s_app_quota) {
+    if (used + total > quota) {
         char out[128];
         snprintf(out, sizeof(out), "{\"success\":false,\"error\":\"the app's storage is full (%u of %u KB)\"}",
-                 (unsigned)((used + 1023) / 1024), (unsigned)(s_app_quota / 1024));
+                 (unsigned)((used + 1023) / 1024), (unsigned)(quota / 1024));
         return http_send_json(req, out);
     }
     char *slash = strchr(name, '/');
     if (slash) {   /* its folder */
         char dir[160];
-        snprintf(dir, sizeof(dir), "%s/%.*s", s_app_dir, (int)(slash - name), name);
+        snprintf(dir, sizeof(dir), "%s/%.*s", base, (int)(slash - name), name);
         mkdir(dir, 0775);
     }
     char tmp[168];
@@ -2576,22 +2632,33 @@ static esp_err_t http_app_file(httpd_req_t *req) {
  * sandbox gives the page an origin of its own ("null"): it cannot read the
  * settings page or call the board's API, only its app (/api/app/call). */
 static esp_err_t http_app_page(httpd_req_t *req) {
-    if (s_settings_mode || !s_app_web_len) {
+    /* member=<id>: that member's page of the running combined app, from its own image */
+    char member[32] = "", image[80];
+    long web_at = s_app_web_at;
+    size_t web_len = s_app_web_len;
+    const char *path = s_app_path;
+    if (!s_settings_mode && http_query(req, "member", member, sizeof(member)) && member[0]) {
+        web_len = 0;
+        snprintf(image, sizeof(image), APPS_DIR "/%s/app.msbc", member);
+        if (!app_member_ok(member) || !mini_app_web_locate_file(image, &web_at, &web_len)) web_len = 0;
+        path = image;
+    }
+    if (s_settings_mode || !web_len) {
         httpd_resp_set_status(req, "404 Not Found");
         httpd_resp_set_type(req, "text/html; charset=utf-8");
         return httpd_resp_sendstr(req, "<p style=\"font-family:sans-serif\">This app has no web page.</p>");
     }
     if (!app_token_ok(req)) {   /* the page's calls send the token back (appweb.js) */
-        static char location[32];
-        snprintf(location, sizeof(location), "/app?t=%s", app_page_token());
+        static char location[80];
+        snprintf(location, sizeof(location), member[0] ? "/app?t=%s&member=%s" : "/app?t=%s", app_page_token(), member);
         httpd_resp_set_status(req, "302 Found");
         httpd_resp_set_hdr(req, "Location", location);
         httpd_resp_set_hdr(req, "Cache-Control", "no-store");
         return httpd_resp_send(req, NULL, 0);
     }
-    FILE *fp = fopen(s_app_path, "rb");
+    FILE *fp = fopen(path, "rb");
     uint8_t *buf = fp ? (uint8_t *)malloc(2048) : NULL;
-    if (!fp || !buf || fseek(fp, s_app_web_at, SEEK_SET) != 0) {
+    if (!fp || !buf || fseek(fp, web_at, SEEK_SET) != 0) {
         if (fp) fclose(fp);
         free(buf);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot read the app's page");
@@ -2601,7 +2668,7 @@ static esp_err_t http_app_page(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "Content-Security-Policy", "sandbox allow-scripts allow-forms allow-modals allow-popups");
     httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
-    size_t left = s_app_web_len;
+    size_t left = web_len;
     esp_err_t r = ESP_OK;
     while (left > 0 && r == ESP_OK) {
         size_t n = fread(buf, 1, left < 2048 ? left : 2048, fp);
@@ -2623,6 +2690,9 @@ static esp_err_t http_app_page(httpd_req_t *req) {
 static esp_err_t http_app_call(httpd_req_t *req) {
     RemoteJob job = { .kind = JOB_APP_CALL, .out_cap = APP_CALL_OUT_MAX };
     if (!http_query(req, "fn", job.path, sizeof(job.path)) || !job.path[0]) return http_error(req, "fn: the call's name");
+    if (http_query(req, "member", job.member, sizeof(job.member)) && job.member[0] && !app_member_ok(job.member)) {
+        return http_error(req, "member: not a member of this combined app");
+    }
     uint8_t *body = NULL;
     if (req->method == HTTP_POST && req->content_len > 0) {
         if (req->content_len > APP_CALL_BODY_MAX) return http_error(req, "body too large (4 KB at most)");
@@ -4021,6 +4091,55 @@ static Value prim_app_has_config(MiniVM *vm, int argc, Value *argv) {
     return member_ini_path(mini_string_data(argv[0]), path, sizeof(path)) ? mini_true() : mini_false();
 }
 
+/* A member's storage quota: its own meta's [app] storage_kb (apps/<id>/app.msbc)
+ * against the system's app_storage_kb, as when it runs alone; kept per id */
+static struct { char id[32]; size_t quota; } s_member_quota[8];
+static int s_member_quota_next = 0;
+
+static size_t member_quota(const char *id) {
+    for (int i = 0; i < 8; i++) {
+        if (s_member_quota[i].id[0] && strcmp(s_member_quota[i].id, id) == 0) return s_member_quota[i].quota;
+    }
+    char path[80], kb[12] = "";
+    snprintf(path, sizeof(path), APPS_DIR "/%s/app.msbc", id);
+    char *meta = mini_app_meta_read_file(path);
+    long v = 0;
+    int k = (meta && mini_device_config_value(meta, "storage_kb", kb, sizeof(kb)) && parse_long(kb, 64, 1024, &v)) ? (int)v : 0;
+    free(meta);
+    size_t quota = (size_t)(k > s_sys_cfg.app_storage_kb ? k : s_sys_cfg.app_storage_kb) * 1024;
+    int i = s_member_quota_next;
+    s_member_quota_next = (s_member_quota_next + 1) % 8;
+    snprintf(s_member_quota[i].id, sizeof(s_member_quota[i].id), "%s", id);
+    s_member_quota[i].quota = quota;
+    return quota;
+}
+
+/* (app-member-folder app-id): from now on the relative paths of the running
+ * combined app's code are member app-id's folder (apps/<id>, made when
+ * missing) and its storage quota that member's, as when it runs alone (the
+ * medicine records stay the medicine app's); (app-member-folder #f): the
+ * combined app's own again. combo.scm switches around each member's code. */
+static Value prim_app_member_folder(MiniVM *vm, int argc, Value *argv) {
+    if (s_settings_mode) return mini_false();
+    if (argc < 1 || mini_is_false(argv[0])) {
+        mini_app_sandbox_set(s_app_dir);
+        mini_app_set_storage(s_app_quota, dir_used_bytes);
+        return mini_true();
+    }
+    if (!mini_is_string(argv[0]) || !app_member_ok(mini_string_data(argv[0]))) {
+        vm_error(vm, "app-member-folder: expected a member of this combined app or #f");
+        return mini_void();
+    }
+    const char *id = mini_string_data(argv[0]);
+    char dir[64];
+    struct stat st;
+    snprintf(dir, sizeof(dir), APPS_DIR "/%s", id);
+    if (stat(dir, &st) != 0) mkdir(dir, 0775);
+    mini_app_sandbox_set(dir);
+    mini_app_set_storage(member_quota(id), dir_used_bytes);
+    return mini_true();
+}
+
 /* (config-get "key" [app-id]) => the value in the app's own config.ini (its
  * folder), else in /spiffs/config.ini, as a string; #f when neither has it.
  * An app gets no secrets of config.ini (Wi-Fi, *password*, ...:
@@ -4087,7 +4206,9 @@ static Value prim_app_info(MiniVM *vm, int argc, Value *argv) {
     Value list = mini_nil(), tmp = mini_nil();
     mini_push_root(vm, &list);
     mini_push_root(vm, &tmp);
-    const char *fields[4] = { s_app_dir, s_app_ini, s_app_id, s_app_path };
+    /* the folder: the one the running code's files are in (a combined app's member: its own) */
+    const char *box = mini_app_sandbox_dir();
+    const char *fields[4] = { box[0] ? box : s_app_dir, s_app_ini, s_app_id, s_app_path };
     for (int i = 0; i < 4; i++) {
         tmp = mini_make_string(vm, fields[i]);
         list = mini_make_cons(vm, tmp, list);
@@ -5211,6 +5332,7 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_fontnet_lib(vm);
     mini_register_c_func(vm, "config-get", prim_config_get);
     mini_register_c_func(vm, "app-has-config?", prim_app_has_config);
+    mini_register_c_func(vm, "app-member-folder", prim_app_member_folder);
     mini_register_c_func(vm, "config-set!", prim_config_set);
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
@@ -5546,6 +5668,35 @@ static bool sched_return(void) {
     return true;
 }
 
+/* Whether schedule.ini times ("08:00, 12:30") list a minute in from..minute
+ * (minutes since the epoch, now_mod the local minute of the day); at: "HH:MM" */
+static bool sched_times_hit(const char *times, int32_t from, int32_t minute, int now_mod, char at[6]) {
+    for (const char *p = times; *p;) {
+        while (*p && !isdigit((unsigned char)*p)) p++;
+        if (!*p) break;
+        int h = 0, m = -1;
+        while (isdigit((unsigned char)*p)) h = h < 100 ? h * 10 + (*p - '0') : h, p++;
+        if (*p == ':' && isdigit((unsigned char)p[1])) {
+            p++;
+            m = 0;
+            while (isdigit((unsigned char)*p)) m = m < 100 ? m * 10 + (*p - '0') : m, p++;
+        }
+        if (h > 23 || m < 0 || m > 59) continue;
+        int t = h * 60 + m;
+        bool hit = false;
+        for (int32_t k = from; k <= minute && !hit; k++) hit = ((now_mod - (minute - k)) % 1440 + 1440) % 1440 == t;
+        if (!hit) continue;
+        at[0] = (char)('0' + h / 10);
+        at[1] = (char)('0' + h % 10);
+        at[2] = ':';
+        at[3] = (char)('0' + m / 10);
+        at[4] = (char)('0' + m % 10);
+        at[5] = 0;
+        return true;
+    }
+    return false;
+}
+
 /* The minute's launches: every installed app whose schedule.ini lists the
  * time (a restart in between: up to two minutes back). The running app is
  * told with its app-schedule hook; others start now, or after the running
@@ -5565,6 +5716,8 @@ static void sched_scan(const MiniWallTime *wt, time_t wall_now) {
     SchedState due;
     memset(&due, 0, sizeof(due));
     char hook_at[6] = "";
+    char member_at[4][6], member_id[4][32];   /* members of the running combined app that are due */
+    int members_due = 0;
     for (int i = 0; i < n; i++) {
         char dir[64], ini_path[80], times[160] = "";
         snprintf(dir, sizeof(dir), "%s", paths[i]);
@@ -5576,40 +5729,51 @@ static void sched_scan(const MiniWallTime *wt, time_t wall_now) {
         char *ini = read_small_file(ini_path, 4096);
         bool listed = ini && mini_device_config_value(ini, "times", times, sizeof(times));
         free(ini);
-        if (!listed) continue;
-        for (const char *p = times; *p;) {
-            while (*p && !isdigit((unsigned char)*p)) p++;
-            if (!*p) break;
-            int h = 0, m = -1;
-            while (isdigit((unsigned char)*p)) h = h < 100 ? h * 10 + (*p - '0') : h, p++;
-            if (*p == ':' && isdigit((unsigned char)p[1])) {
-                p++;
-                m = 0;
-                while (isdigit((unsigned char)*p)) m = m < 100 ? m * 10 + (*p - '0') : m, p++;
+        char at[6];
+        if (!listed || !sched_times_hit(times, from, minute, now_mod, at)) continue;   /* one launch per app and minute */
+        const char *base = strrchr(dir, '/');
+        if (strcmp(paths[i], s_app_path) == 0) {
+            snprintf(hook_at, sizeof(hook_at), "%s", at);
+        } else if (base && s_app_members[0] && app_member_ok(base + 1)) {
+            /* a member of the running combined app: told there, not started alone */
+            if (members_due < 4) {
+                memcpy(member_at[members_due], at, 6);
+                snprintf(member_id[members_due], sizeof(member_id[0]), "%s", base + 1);
+                members_due++;
             }
-            if (h > 23 || m < 0 || m > 59) continue;
-            int t = h * 60 + m;
-            bool hit = false;
-            for (int32_t k = from; k <= minute && !hit; k++) hit = ((now_mod - (minute - k)) % 1440 + 1440) % 1440 == t;
-            if (!hit) continue;
-            char at[6];
-            at[0] = (char)('0' + h / 10);
-            at[1] = (char)('0' + h % 10);
-            at[2] = ':';
-            at[3] = (char)('0' + m / 10);
-            at[4] = (char)('0' + m % 10);
-            at[5] = 0;
-            if (strcmp(paths[i], s_app_path) == 0) {
-                snprintf(hook_at, sizeof(hook_at), "%s", at);
-            } else if (due.n < SCHED_MAX) {
-                memcpy(due.path[due.n], paths[i], 64);
-                memcpy(due.at[due.n], at, 6);
-                due.n++;
-            }
-            break;   /* one launch per app and minute */
+        } else if (due.n < SCHED_MAX) {
+            memcpy(due.path[due.n], paths[i], 64);
+            memcpy(due.at[due.n], at, 6);
+            due.n++;
         }
     }
     free(paths);
+    /* members of the running combined app that are not installed alone (no image
+     * in their folder): their folders' schedule.ini too */
+    for (const char *p = s_app_members; *p && members_due < 4;) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *e = p;
+        while (*e && *e != ',' && *e != ' ') e++;
+        if (e > p && (size_t)(e - p) < sizeof(member_id[0])) {
+            char id[32], path[96], times[160] = "", at[6];
+            struct stat st;
+            memcpy(id, p, (size_t)(e - p));
+            id[e - p] = '\0';
+            snprintf(path, sizeof(path), APPS_DIR "/%s/app.msbc", id);
+            if (stat(path, &st) != 0) {
+                snprintf(path, sizeof(path), APPS_DIR "/%s/schedule.ini", id);
+                char *ini = read_small_file(path, 4096);
+                bool listed = ini && mini_device_config_value(ini, "times", times, sizeof(times));
+                free(ini);
+                if (listed && sched_times_hit(times, from, minute, now_mod, at)) {
+                    memcpy(member_at[members_due], at, 6);
+                    snprintf(member_id[members_due], sizeof(member_id[0]), "%s", id);
+                    members_due++;
+                }
+            }
+        }
+        p = e;
+    }
 
     if (hook_at[0] && mini_device_has_hook(s_vm, "app-schedule")) {
         ESP_LOGI(TAG, "Schedule %s: the running app's app-schedule hook", hook_at);
@@ -5617,6 +5781,17 @@ static void sched_scan(const MiniWallTime *wt, time_t wall_now) {
         mini_clear_error(s_vm);
         Value arg = mini_make_string(s_vm, hook_at);
         mini_device_call_hook(s_vm, "app-schedule", NULL, 1, &arg);
+        check_app_error("app-schedule");
+    }
+    for (int k = 0; k < members_due && mini_device_has_hook(s_vm, "app-schedule"); k++) {
+        ESP_LOGI(TAG, "Schedule %s: member %s of the running combined app", member_at[k], member_id[k]);
+        memcpy(s_sched_at, member_at[k], sizeof(s_sched_at));   /* "HH:MM" and its 0 */
+        mini_clear_error(s_vm);
+        Value args[2] = { mini_make_string(s_vm, member_at[k]), mini_nil() };
+        mini_push_root(s_vm, &args[0]);
+        args[1] = mini_make_string(s_vm, member_id[k]);
+        mini_pop_root(s_vm);
+        mini_device_call_hook(s_vm, "app-schedule", NULL, 2, args);
         check_app_error("app-schedule");
     }
     if (due.n == 0) return;

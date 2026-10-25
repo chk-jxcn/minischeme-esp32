@@ -45,6 +45,7 @@ header .name{font-size:17px;font-weight:600;padding-bottom:8px;white-space:nowra
 .tabs button{flex:none;min-height:0;margin:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:8px 12px}
 .tabs button.on{color:var(--text);border-bottom-color:var(--accent)}
 #appframe{display:block;width:100%;max-width:752px;margin:0 auto;border:0;min-height:300px;background:var(--bg)}
+#apppick-box{display:none;max-width:752px;margin:8px auto 0;padding:0 16px}
 button.small{min-height:30px;padding:0 10px;margin:0 0 0 8px;font-size:13px}
 h2 button.small{margin-top:-4px}
 .pane{display:none}
@@ -63,6 +64,7 @@ h2 button.small{margin-top:-4px}
 <button id="tab-info" onclick="showTab('info')">系统信息</button>
 </nav>
 </div></header>
+<div id="apppick-box"><select id="apppick" onchange="pickAppPage()" title="合集里的应用网页"></select></div>
 <iframe id="appframe" title="应用网页" style="display:none" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
 <main>
 <div id="msg"></div>
@@ -446,8 +448,16 @@ const TABS = ['app', 'manage', 'config', 'system', 'theme', 'info'];
 let tab = '';
 const loaded = {};
 
+/* the running app's page, or a page of one of its members (a combined app: /app?member=<id>) */
+function hasAppPage() { return !!(state.app_web || (state.app_pages || []).length); }
+function appPageUrl(id) { return id ? '/app?member=' + encodeURIComponent(id) : '/app'; }
+function pickAppPage() {
+  $('appframe').style.height = '';
+  $('appframe').src = appPageUrl($('apppick').value);   /* one page at a time: the one picked */
+}
+
 function showTab(which) {
-  if (which === 'app' && !state.app_web) which = 'manage';
+  if (which === 'app' && !hasAppPage()) which = 'manage';
   tab = which;
   try { localStorage.setItem('tab', which); } catch (e) { /* private window */ }
   for (const t of TABS) {
@@ -455,7 +465,8 @@ function showTab(which) {
     if (t !== 'app') $('pane-' + t).style.display = t === which ? 'block' : 'none';
   }
   $('appframe').style.display = which === 'app' ? 'block' : 'none';
-  if (which === 'app' && !$('appframe').src) $('appframe').src = '/app';
+  $('apppick-box').style.display = which === 'app' && (state.app_pages || []).length ? 'block' : 'none';
+  if (which === 'app' && !$('appframe').src) $('appframe').src = appPageUrl($('apppick').value);
   if (!loaded[which]) {
     loaded[which] = true;
     if (which === 'manage') loadApps().then(() => market());
@@ -477,13 +488,18 @@ async function refresh() {
   state = await api('/api/settings');
   $('devname').textContent = state.device_name || '';
   document.title = state.device_name || '设备';
-  $('tab-app').style.display = state.app_web ? '' : 'none';
+  $('tab-app').style.display = hasAppPage() ? '' : 'none';
   $('tab-app').textContent = state.app_name || '应用';
+  const picks = (state.app_web ? [['', (state.app_name || '应用') + '（设置）']] : [])
+    .concat((state.app_pages || []).map(p => [p.id, p.name]));
+  const keep = $('apppick').value;
+  $('apppick').innerHTML = picks.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
+  if (picks.some(([id]) => id === keep)) $('apppick').value = keep;
   if (!tab) {
     let saved = '';
     try { saved = localStorage.getItem('tab') || ''; } catch (e) { /* private window */ }
-    showTab(state.app_web && (!saved || saved === 'app') ? 'app' : (TABS.includes(saved) && saved !== 'app' ? saved : 'manage'));
-  } else if (tab === 'app' && !state.app_web) {
+    showTab(hasAppPage() && (!saved || saved === 'app') ? 'app' : (TABS.includes(saved) && saved !== 'app' ? saved : 'manage'));
+  } else if (tab === 'app' && !hasAppPage()) {
     showTab('manage');
   }
   const sta = state.sta_connected
