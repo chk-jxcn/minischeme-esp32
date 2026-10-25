@@ -492,9 +492,9 @@ async function refresh() {
   $('tab-app').textContent = state.app_name || '应用';
   const picks = (state.app_web ? [['', (state.app_name || '应用') + '（设置）']] : [])
     .concat((state.app_pages || []).map(p => [p.id, p.name]));
-  const keep = $('apppick').value;
+  const picked = $('apppick').value;
   $('apppick').innerHTML = picks.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
-  if (picks.some(([id]) => id === keep)) $('apppick').value = keep;
+  if (picks.some(([id]) => id === picked)) $('apppick').value = picked;
   if (!tab) {
     let saved = '';
     try { saved = localStorage.getItem('tab') || ''; } catch (e) { /* private window */ }
