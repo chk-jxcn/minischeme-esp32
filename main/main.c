@@ -673,10 +673,10 @@ static void job_reply_hardware(RemoteJob *job) {
     hw_put(job, &n, ",\"firmware\":{\"version\":\"%s\"", esc);
     json_escape(app ? app->idf_ver : "", esc, sizeof(esc));
     hw_put(job, &n, ",\"idf\":\"%s\",\"built\":\"%s %s\",\"image\":%lld,\"partition\":%lld,"
-           "\"reset\":\"%s\",\"uptime_ms\":%lld,\"time_synced\":%s}",
+           "\"reset\":\"%s\",\"uptime_ms\":%lld,\"time_synced\":%s,\"api\":\"%s\",\"api_extensions\":[\"esp32\"]}",
            esc, app ? app->date : "", app ? app->time : "", (long long)named_int("flash-app-bytes"),
            (long long)named_int("flash-app-partition-bytes"), (rr >= 0 && rr < 11) ? reasons[rr] : "unknown",
-           (long long)(esp_timer_get_time() / 1000), hal_time_synced() ? "true" : "false");
+           (long long)(esp_timer_get_time() / 1000), hal_time_synced() ? "true" : "false", mini_api_version());
     unsigned iram_total, iram_free;
     iram_heap(&iram_total, &iram_free);
     hw_put(job, &n, ",\"memory\":{\"free\":%u,\"min_free\":%u,\"largest\":%u,\"internal_total\":%u,\"dma_free\":%u,"

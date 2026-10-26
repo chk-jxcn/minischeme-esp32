@@ -80,7 +80,7 @@ stack_trace = 0
 ```
 
 ## Documentation
-- [API overview](docs/api/README.md), [applib](docs/api/applib.md), [API 1.13.0](docs/api/v1.13.0.md)
+- [API overview](docs/api/README.md), [applib (minischeme-apps)](https://github.com/chk-jxcn/minischeme-apps/blob/main/docs/applib.md), [API 1.13.0](docs/api/v1.13.0.md)
 - [Development guide](AGENT_DEVELOPMENT_GUIDE.md)
 
 ## License

@@ -1274,6 +1274,9 @@ function kvRows(rows) {
 async function loadHardware() {
   const h = await api('/api/hardware');
   if (!h.success) { $('hw').textContent = h.error || '读取失败'; return; }
+  if (h.firmware && !h.firmware.api) {   /* firmware before 1.0.85: /api/info has it */
+    try { const i = await api('/api/info'); h.firmware.api = i.api; h.firmware.api_extensions = i.api_extensions; } catch (e) { /* — */ }
+  }
   const c = h.chip, f = h.firmware, m = h.memory, v = h.vm, s = h.storage, r = h.app_rom, fr = h.font_rom, d = h.display, n = h.network;
   const la = h.last_app;
   let html = '<h3>芯片与固件</h3>' + kvRows([
@@ -1281,6 +1284,7 @@ async function loadHardware() {
     ['MAC', esc(c.mac)],
     ['Flash', kb(c.flash)],
     ['固件', `${esc(f.version)}，${esc(f.built)}`],
+    ['固件 API', f.api ? esc(f.api) + ((f.api_extensions || []).length ? '（扩展 ' + esc(f.api_extensions.join('、')) + '）' : '') : '—'],
     ['ESP-IDF', esc(f.idf)],
     ['固件镜像', `${kb(f.image)} / ${kb(f.partition)} 分区` + bar(f.image, f.partition)],
     ['运行时间', dur(f.uptime_ms / 1000) + `，复位原因 ${esc(f.reset)}，时间${f.time_synced ? '已' : '未'}同步`],

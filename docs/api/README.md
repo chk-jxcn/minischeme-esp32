@@ -12,7 +12,7 @@
 | [v1.2.0.md](v1.2.0.md) | API 1.2.0 参考（旧版本）。 |
 | [v1.1.0.md](v1.1.0.md) | API 1.1.0 参考（旧版本）。 |
 | [v1.0.0.md](v1.0.0.md) | API 1.0.0 参考（旧版本记录）。 |
-| [applib.md](applib.md) | **应用框架**（`apps/lib/applib.scm`、`apps/lib/infopages.scm`）：页面、代理数据、布局、主题色、轮播、硬件信息页。大部分应用都基于它。 |
+| [applib.md](https://github.com/chk-jxcn/minischeme-apps/blob/main/docs/applib.md)（在 minischeme-apps 仓库：应用框架不属于固件，它是编进每个应用镜像的 Scheme 代码，有自己的版本号） | **应用框架**（`apps/lib/applib.scm`、`apps/lib/infopages.scm`）：页面、代理数据、布局、主题色、轮播、硬件信息页。大部分应用都基于它。 |
 | 本文 | 版本规则、应用如何声明 API、固件调用应用的钩子、应用结构和工作流程。 |
 
 接口的唯一数据源是 `api/spec/*.py`；维护说明（新增接口、升级版本）见 [api/README.md](../../api/README.md)。参考文档的条目用英文，因为同一份文字也编进固件，用作运行时帮助 `(help 'name)`。
@@ -112,7 +112,7 @@ apps/<id>/<id>.scm      程序（通常基于 applib：前面会拼上 apps/lib/
 
 **设置的读取**：应用第一次启动时，固件用 `[config]` 生成应用目录里的 `config.ini`（`/spiffs/apps/<id>/config.ini`）；应用更新后，新增的键会自动补进已有的文件。应用用 `(app-config "key" default)`（applib）或 `(config-get "key")` 读取设置，应用自己的 `config.ini` 优先于系统的 `config.ini`；系统配置中的密码、WiFi 等敏感项应用读不到。
 
-**应用目录和权限**：每个应用一个目录，市场安装的在 `/spiffs/apps/<id>/`，用户上传的在 `/spiffs/user/<id>/`。应用只能读写自己的目录，不能调用改系统的接口（`config-set!`、WiFi、字库写入、重启等）。详见 [applib.md 第 9 节](applib.md#9-app-folders-and-the-sandbox)。
+**应用目录和权限**：每个应用一个目录，市场安装的在 `/spiffs/apps/<id>/`，用户上传的在 `/spiffs/user/<id>/`。应用只能读写自己的目录，不能调用改系统的接口（`config-set!`、WiFi、字库写入、重启等）。详见 [applib.md 第 9 节](https://github.com/chk-jxcn/minischeme-apps/blob/main/docs/applib.md#9-app-folders-and-the-sandbox)。
 
 **工作流程**：
 
@@ -184,7 +184,7 @@ persist = 1                   ; 可选（固件 1.0.68+）：重启、崩溃、�
 | 1.5.0 | 2026-10-14 | 新增 `gui-image`、`image-info`：从文件绘制图片（baseline JPEG，以及由 GIF 转换来的 MANI 动图，按帧间隔播放，速度可调）。每个条带只解码它覆盖的 JPEG MCU 行，不需要帧缓冲，打开一张图约占 6 KB。应用网页可以经 `/api/app/file` 读写自己目录里的文件；应用的 meta.ini 可以用 `storage_kb` 申请更大的存储空间。电子相册应用声明 `api = 1.5`。 |
 | 1.6.0 | 2026-10-20 | 合并应用：meta.ini `[combo] members = a, b` 列出它带上的应用，`(config-get key app-id)` 读取成员应用自己的 config.ini，新增 `(app-has-config? app-id)`。旧固件忽略 app-id，合集应用用 `(defined? 'app-has-config?)` 兼容。 |
 | 1.7.0 | 2026-10-22 | 定时唤起：应用目录里的 `schedule.ini` 列出时间点，系统到点启动应用（正在运行则调用 `app-schedule` 钩子）；新增 `(app-scheduled)`、`(app-return)`。新增 `(gui-text-scaled x y str color scale [font-id])`：用现有字体按整数倍放大绘制，不需要单独的大字体。预留的 `(time-local)` 实现为正式接口（仅设备）：本地日期时间 `(年 月 日 时 分 秒 星期)`，用于取年份或按天计数。吃药提醒应用声明 `api = 1.7`。 |
-| 1.8.0 | 2026-10-23 | 配色方案：新增 `theme` 组件的 `(theme-css)`，任何应用都可以只读系统的配色文件 `/spiffs/theme.css`。应用框架（gui.scm）按别名取颜色（函数给的颜色 → 应用目录的 theme.css → 系统的 theme.css → 应用的默认值 → 内置白天 / 黑夜配色，都没有时用别名最后一段的大类），按光感、固定时间或日出日落在白天和黑夜间自动切换，见 [applib.md](applib.md) 4.8。用到框架的应用都声明 `api = 1.8`。 |
+| 1.8.0 | 2026-10-23 | 配色方案：新增 `theme` 组件的 `(theme-css)`，任何应用都可以只读系统的配色文件 `/spiffs/theme.css`。应用框架（gui.scm）按别名取颜色（函数给的颜色 → 应用目录的 theme.css → 系统的 theme.css → 应用的默认值 → 内置白天 / 黑夜配色，都没有时用别名最后一段的大类），按光感、固定时间或日出日落在白天和黑夜间自动切换，见 [applib.md](https://github.com/chk-jxcn/minischeme-apps/blob/main/docs/applib.md) 4.8。用到框架的应用都声明 `api = 1.8`。 |
 | 1.9.0 | 2026-10-23 | 应用镜像格式 MSBC 第 2 版：文件头之后是符号表，每个名字只存一次，常量里按序号引用（`MSBC_CONST_SYMREF`），镜像小约四分之一；第 1 版照样能读。没有新接口；编译器默认写第 2 版，所以应用声明 `api = 1.9`（`build_apps.py --msbc1` 写第 1 版，给旧固件用）。 |
 | 1.10.0 | 2026-10-24 | 网络图片：新增 `(fs-download url path)` 和 `(fs-download-status)`，在后台把一个文件（比如应用服务器转好的小 JPEG）下载到应用自己的目录，再用 `gui-image` 显示；一次一个下载，路径规则和配额同 `fs-write`，最大 256 KB。用法见 minischeme-apps 开发指南 11.7。 |
 | 1.11.0 | 2026-10-24 | 字体服务器：板载字体没有的字（emoji、韩文、繁体和生僻字）从字体服务器（minischeme-proxy 的 `font_server.py`，独立服务，不需要密码）按需取来，存在板子上，到了就重画；也可以让服务器的字体优先，系统文字用服务器上的任意字体。config.ini `[fonts]` 的 `font_server`、`font_server_on`、`font_server_first`、`font_server_face`，设备网页"常用设置"里可改，保存后立即生效。新增 `(font-server)`（状态）和 `(font-server-clear)`。文字处理改为 32 位码位：UTF-8 的 4 字节字符（emoji）不再被跳过；变体选择符、零宽连接符不画方框。 |
