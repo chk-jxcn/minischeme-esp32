@@ -1,5 +1,5 @@
 {
-  "version": "1.0.85",
+  "version": "1.0.86",
   "chip": "ESP32",
   "idf": "6.1",
   "files": [
@@ -22,7 +22,7 @@
       "address": "0x10000",
       "offset": 65536,
       "size": 1446432,
-      "sha256": "6e3a35af647a6d5d3c2553d35c62e594ae061c060481844a96a8fd70292259e2"
+      "sha256": "ac7f213ff2d4127c277c636ad0c62af747bfbc93b196490be7428aa140df464d"
     },
     {
       "name": "fontrom.bin",
