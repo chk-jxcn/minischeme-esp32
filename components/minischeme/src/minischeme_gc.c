@@ -1201,15 +1201,9 @@ Value mini_make_macro(MiniVM *vm, uint32_t is_syntax_rules, Value proc_or_litera
     return ((uintptr_t)m) | MINI_TAG_RECORD;
 }
 
-Value mini_car(Value pair) {
-    if (!mini_is_pair(pair)) return mini_void();
-    return ((PairObj *)UNTAG_PTR(pair))->car;
-}
-
-Value mini_cdr(Value pair) {
-    if (!mini_is_pair(pair)) return mini_void();
-    return ((PairObj *)UNTAG_PTR(pair))->cdr;
-}
+/* mini_car / mini_cdr are inline in minischeme.h on MiniPairCells: the same layout as PairObj */
+typedef char mini_pair_cells_car_check[offsetof(PairObj, car) == offsetof(MiniPairCells, car) ? 1 : -1];
+typedef char mini_pair_cells_cdr_check[offsetof(PairObj, cdr) == offsetof(MiniPairCells, cdr) ? 1 : -1];
 
 void mini_set_car(Value pair, Value val) {
     if (mini_is_pair(pair)) {

@@ -11,7 +11,20 @@
 
 #include "minischeme_internal.h"
 
+/* Two fixnums whose result is a fixnum: no bigint call, no rooted accumulator */
+static bool two_fixnums(int argc, const Value *argv) {
+    return argc == 2 && mini_is_fixnum(argv[0]) && mini_is_fixnum(argv[1]);
+}
+
+static bool small_result(int64_t n, Value *out) {
+    if (n < MINI_FIXNUM_MIN || n > MINI_FIXNUM_MAX) return false;
+    *out = mini_make_fixnum(n);
+    return true;
+}
+
 Value prim_add(MiniVM *vm, int argc, Value *argv) {
+    Value fast;
+    if (two_fixnums(argc, argv) && small_result(mini_to_fixnum(argv[0]) + mini_to_fixnum(argv[1]), &fast)) return fast;
     bool has_float = false;
     for (int i = 0; i < argc; i++) {
         if (mini_is_flonum(argv[i])) {
@@ -38,6 +51,8 @@ Value prim_add(MiniVM *vm, int argc, Value *argv) {
 }
 
 Value prim_sub(MiniVM *vm, int argc, Value *argv) {
+    Value fast;
+    if (two_fixnums(argc, argv) && small_result(mini_to_fixnum(argv[0]) - mini_to_fixnum(argv[1]), &fast)) return fast;
     if (argc == 0) {
         vm_error(vm, "-: requires at least 1 argument");
         return mini_void();
@@ -70,6 +85,13 @@ Value prim_sub(MiniVM *vm, int argc, Value *argv) {
 }
 
 Value prim_mul(MiniVM *vm, int argc, Value *argv) {
+    if (two_fixnums(argc, argv)) {
+        int64_t x = mini_to_fixnum(argv[0]), y = mini_to_fixnum(argv[1]);
+        Value fast;
+        /* both under 2^30 in magnitude: the product fits 64 bits on every host */
+        if (x > -((int64_t)1 << 30) && x < ((int64_t)1 << 30) && y > -((int64_t)1 << 30) && y < ((int64_t)1 << 30) &&
+            small_result(x * y, &fast)) return fast;
+    }
     bool has_float = false;
     for (int i = 0; i < argc; i++) {
         if (mini_is_flonum(argv[i])) {
@@ -241,6 +263,7 @@ Value prim_modulo(MiniVM *vm, int argc, Value *argv) {
 
 #define DEFINE_NUM_CMP(name, op_name, flt_op, int_cond) \
 Value name(MiniVM *vm, int argc, Value *argv) { \
+    if (two_fixnums(argc, argv)) return mini_make_bool((intptr_t)argv[0] flt_op (intptr_t)argv[1]); \
     if (argc < 2) return mini_true(); \
     for (int i = 0; i < argc - 1; i++) { \
         if (mini_is_flonum(argv[i]) || mini_is_flonum(argv[i + 1])) { \

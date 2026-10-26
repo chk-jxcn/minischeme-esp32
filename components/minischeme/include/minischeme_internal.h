@@ -216,7 +216,20 @@ typedef enum {
     OP_CLOSURE,
     OP_CALL,
     OP_TAIL_CALL,
-    OP_RETURN
+    OP_RETURN,
+
+    /* API 1.14: (+ a b) (- a b) (* a b) (< a b) (> a b) (<= a b) (>= a b) (= a b) of the
+     * global procedures, inline: two fixnums are computed here, anything else (flonums,
+     * bigints, an overflow, a wrong type) goes to the primitive, as the call would */
+    OP_ADD,
+    OP_SUB,
+    OP_MUL,
+    OP_LT,
+    OP_GT,
+    OP_LE,
+    OP_GE,
+    OP_NUM_EQ,
+    OP_COUNT
 } OpCode;
 
 typedef struct CallFrame {
@@ -227,7 +240,10 @@ typedef struct CallFrame {
     Value env;
 } CallFrame;
 
+/* The global cache: MINI_GCACHE_SIZE entries in sets of MINI_GCACHE_WAYS (vm.c global_binding) */
 #define MINI_GCACHE_SIZE 128
+#define MINI_GCACHE_WAYS 4
+#define MINI_GCACHE_SETS (MINI_GCACHE_SIZE / MINI_GCACHE_WAYS)
 typedef struct {
     Value sym;
     Value binding;

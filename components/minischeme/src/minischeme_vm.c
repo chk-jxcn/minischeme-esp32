@@ -12,6 +12,41 @@
 
 #include "minischeme_internal.h"
 
+/* Tagged fixnum arithmetic: a and b are fixnums (value << 3, tag 0); true and the tagged
+ * result in *r when it is a fixnum too, false on an overflow (the caller then takes the
+ * primitive, which makes a bigint) */
+#if defined(__GNUC__) || defined(__clang__)
+static inline bool fixnum_add_ok(Value a, Value b, intptr_t *r) {
+    return !__builtin_add_overflow((intptr_t)a, (intptr_t)b, r);
+}
+static inline bool fixnum_sub_ok(Value a, Value b, intptr_t *r) {
+    return !__builtin_sub_overflow((intptr_t)a, (intptr_t)b, r);
+}
+static inline bool fixnum_mul_ok(Value a, Value b, intptr_t *r) {
+    return !__builtin_mul_overflow((intptr_t)a >> 3, (intptr_t)b, r);
+}
+#else
+static bool fixnum_result(int64_t n, intptr_t *r) {
+    if (n < MINI_FIXNUM_MIN || n > MINI_FIXNUM_MAX) return false;
+    *r = (intptr_t)mini_make_fixnum(n);
+    return true;
+}
+static bool fixnum_add_ok(Value a, Value b, intptr_t *r) {
+    return fixnum_result(mini_to_fixnum(a) + mini_to_fixnum(b), r);
+}
+static bool fixnum_sub_ok(Value a, Value b, intptr_t *r) {
+    return fixnum_result(mini_to_fixnum(a) - mini_to_fixnum(b), r);
+}
+static bool fixnum_mul_ok(Value a, Value b, intptr_t *r) {
+    int64_t x = mini_to_fixnum(a), y = mini_to_fixnum(b);
+    /* |x|, |y| <= 2^60: decide on the magnitudes before multiplying */
+    uint64_t ux = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+    uint64_t uy = y < 0 ? (uint64_t)0 - (uint64_t)y : (uint64_t)y;
+    if (ux != 0 && uy > (uint64_t)MINI_FIXNUM_MAX / ux) return false;
+    return fixnum_result(x * y, r);
+}
+#endif
+
 Value prim_callcc(MiniVM *vm, int argc, Value *argv) {
     (void)vm; (void)argc; (void)argv;
     return mini_void();
@@ -21,17 +56,41 @@ Value prim_callcc(MiniVM *vm, int argc, Value *argv) {
 /* Environment Operations                                                    */
 /* ========================================================================= */
 
-/* Binding pair of a global, or 0; see MINI_GCACHE_SIZE */
+/* Entry a of a cache set takes entry b's place (field by field: the cache is word memory,
+ * IRAM on the ESP32, which takes 32-bit accesses only) */
+static inline void gcache_move(MiniGlobalCacheEntry *a, const MiniGlobalCacheEntry *b) {
+    a->sym = b->sym;
+    a->binding = b->binding;
+    a->gen = b->gen;
+}
+
+/* Binding pair of a global, or 0. The cache holds MINI_GCACHE_SIZE recent lookups in sets of
+ * MINI_GCACHE_WAYS, the most recent first: a hit moves to its set's front, a miss walks the
+ * global list and puts what it found there (the set's least recent entry leaves). A
+ * direct-mapped cache let two hot globals of one slot evict each other on every access, each
+ * time a walk of the whole list (a matrix loop: 1.7 s instead of 0.17 s). Entries of an older
+ * gcache_gen (a GC moved the bindings) count as empty. */
 static Value global_binding(MiniVM *vm, Value sym) {
     uintptr_t h = (((uintptr_t)sym >> 3) * 2654435761u) >> 8;
-    MiniGlobalCacheEntry *e = &vm->gcache[h & (MINI_GCACHE_SIZE - 1)];
-    if (e->gen == vm->gcache_gen && e->sym == sym) return e->binding;
+    MiniGlobalCacheEntry *set = &vm->gcache[(h & (MINI_GCACHE_SETS - 1)) * MINI_GCACHE_WAYS];
+    uint32_t gen = vm->gcache_gen;
+    if (set[0].sym == sym && set[0].gen == gen) return set[0].binding;
+    for (int w = 1; w < MINI_GCACHE_WAYS; w++) {
+        if (set[w].sym == sym && set[w].gen == gen) {
+            MiniGlobalCacheEntry hit;
+            gcache_move(&hit, &set[w]);
+            for (int k = w; k > 0; k--) gcache_move(&set[k], &set[k - 1]);
+            gcache_move(&set[0], &hit);
+            return hit.binding;
+        }
+    }
     for (Value curr = mini_cdr(vm->global_env); mini_is_pair(curr); curr = mini_cdr(curr)) {
         Value b = mini_car(curr);
         if (mini_is_pair(b) && mini_car(b) == sym) {
-            e->sym = sym;
-            e->binding = b;
-            e->gen = vm->gcache_gen;
+            for (int k = MINI_GCACHE_WAYS - 1; k > 0; k--) gcache_move(&set[k], &set[k - 1]);
+            set[0].sym = sym;
+            set[0].binding = b;
+            set[0].gen = gen;
             return b;
         }
     }
@@ -344,7 +403,16 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         [OP_CLOSURE]       = &&do_op_closure,
         [OP_CALL]          = &&do_op_call,
         [OP_TAIL_CALL]     = &&do_op_tail_call,
-        [OP_RETURN]        = &&do_op_return
+        [OP_RETURN]        = &&do_op_return,
+        [OP_ADD]           = &&do_op_add,
+        [OP_SUB]           = &&do_op_sub,
+        [OP_MUL]           = &&do_op_mul,
+        [OP_LT]            = &&do_op_lt,
+        [OP_GT]            = &&do_op_gt,
+        [OP_LE]            = &&do_op_le,
+        [OP_GE]            = &&do_op_ge,
+        [OP_NUM_EQ]        = &&do_op_num_eq,
+        [OP_COUNT ... 255] = &&do_op_bad   /* a byte no instruction has: an error, not a jump anywhere */
     };
     #define DISPATCH() goto *dispatch_table[*pc++]
     DISPATCH();
@@ -375,7 +443,15 @@ vm_loop:
         case OP_CALL:          goto do_op_call;
         case OP_TAIL_CALL:     goto do_op_tail_call;
         case OP_RETURN:        goto do_op_return;
-        default:               goto vm_err;
+        case OP_ADD:           goto do_op_add;
+        case OP_SUB:           goto do_op_sub;
+        case OP_MUL:           goto do_op_mul;
+        case OP_LT:            goto do_op_lt;
+        case OP_GT:            goto do_op_gt;
+        case OP_LE:            goto do_op_le;
+        case OP_GE:            goto do_op_ge;
+        case OP_NUM_EQ:        goto do_op_num_eq;
+        default:               goto do_op_bad;
     }
 #endif
     {
@@ -384,6 +460,72 @@ vm_loop:
     do_op_halt: {
         goto vm_done;
     }
+
+    do_op_bad: {
+        vm_error(vm, "invalid instruction %u (an image for a newer firmware API?)", (unsigned)pc[-1]);
+        goto vm_err;
+    }
+
+    /* Two-argument arithmetic and comparisons (API 1.14). A fixnum is its value shifted
+     * left by 3 with tag 0, so tagged fixnums add, subtract and compare as they are and an
+     * overflow of the machine word is exactly a result outside the fixnum range. The slow
+     * path calls the primitive on the two stack slots (rooted there), as OP_CALL would. */
+#define ARITH_SLOW(prim) do { \
+        SYNC_VM_STATE(); \
+        Value res_ = prim(vm, 2, sp - 2); \
+        if (vm->has_error) goto vm_err; \
+        RELOAD_VM_STATE(); \
+        sp -= 2; \
+        *sp++ = res_; \
+        DISPATCH(); \
+    } while (0)
+#define ARITH_COMPARE(cmp, prim) do { \
+        Value a_ = sp[-2], b_ = sp[-1]; \
+        if (mini_is_fixnum(a_) && mini_is_fixnum(b_)) { \
+            sp--; \
+            sp[-1] = ((intptr_t)a_ cmp (intptr_t)b_) ? MINI_CONST_TRUE : MINI_CONST_FALSE; \
+            DISPATCH(); \
+        } \
+        ARITH_SLOW(prim); \
+    } while (0)
+
+    do_op_add: {
+        Value a = sp[-2], b = sp[-1];
+        intptr_t r;
+        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_add_ok(a, b, &r)) {
+            sp--;
+            sp[-1] = (Value)r;
+            DISPATCH();
+        }
+        ARITH_SLOW(prim_add);
+    }
+    do_op_sub: {
+        Value a = sp[-2], b = sp[-1];
+        intptr_t r;
+        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_sub_ok(a, b, &r)) {
+            sp--;
+            sp[-1] = (Value)r;
+            DISPATCH();
+        }
+        ARITH_SLOW(prim_sub);
+    }
+    do_op_mul: {
+        Value a = sp[-2], b = sp[-1];
+        intptr_t r;
+        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_mul_ok(a, b, &r)) {
+            sp--;
+            sp[-1] = (Value)r;
+            DISPATCH();
+        }
+        ARITH_SLOW(prim_mul);
+    }
+    do_op_lt:     ARITH_COMPARE(<,  prim_lt);
+    do_op_gt:     ARITH_COMPARE(>,  prim_gt);
+    do_op_le:     ARITH_COMPARE(<=, prim_le);
+    do_op_ge:     ARITH_COMPARE(>=, prim_ge);
+    do_op_num_eq: ARITH_COMPARE(==, prim_num_eq);
+#undef ARITH_COMPARE
+#undef ARITH_SLOW
 
     /* Load constant from pool: operand is 16-bit little-endian index */
     do_op_const: {

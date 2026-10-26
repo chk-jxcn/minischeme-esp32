@@ -449,9 +449,23 @@ Value mini_make_symbol(MiniVM *vm, const char *name);
 Value mini_make_string(MiniVM *vm, const char *str);
 Value mini_make_string_len(MiniVM *vm, const char *str, size_t len);
 
-/* Accessors */
-Value mini_car(Value pair);
-Value mini_cdr(Value pair);
+/* Accessors. car and cdr are inline: every global lookup and list walk takes them (as calls
+ * into another file they cost a call each, 12 million in a 3-million-step loop). A pair is a
+ * heap header followed by car and cdr (minischeme_internal.h PairObj, checked there). */
+typedef struct MiniPairCells {
+    MiniHeapObj header;
+    Value car;
+    Value cdr;
+} MiniPairCells;
+
+static inline Value mini_car(Value pair) {
+    return mini_is_pair(pair) ? ((const MiniPairCells *)(pair & ~(Value)MINI_TAG_MASK))->car : MINI_CONST_VOID;
+}
+
+static inline Value mini_cdr(Value pair) {
+    return mini_is_pair(pair) ? ((const MiniPairCells *)(pair & ~(Value)MINI_TAG_MASK))->cdr : MINI_CONST_VOID;
+}
+
 void  mini_set_car(Value pair, Value val);
 void  mini_set_cdr(Value pair, Value val);
 
