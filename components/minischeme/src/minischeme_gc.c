@@ -82,6 +82,8 @@ void mini_vm_mem_owners(MiniVM *vm, MiniMemOwnerFn fn, void *user) {
     fn(vm->remset, "gc remset", user);
     fn(vm->c_roots, "vm c roots", user);
     fn(vm->gcache, "vm global cache", user);
+    fn(vm->gslots, "vm global slots", user);
+    fn(vm->prim_fns, "vm api procedures", user);
 }
 
 char *alloc_aligned8(size_t size, char **raw_ptr) {
@@ -268,6 +270,10 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
 
     for (Value *s = vm->stack; s < vm->sp; s++) {
         *s = promote_val(vm, *s);
+    }
+
+    for (uint32_t i = 0; i < vm->gslot_count; i++) {   /* bindings of the global slots */
+        if (vm->gslots[i]) vm->gslots[i] = promote_val(vm, vm->gslots[i]);
     }
 
     for (size_t i = 0; i < vm->c_roots_count; i++) {
@@ -671,6 +677,10 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
 
     for (Value *s = vm->stack; s < vm->sp; s++) {
         *s = fix_forwarded_val(vm, target_start, *s);
+    }
+
+    for (uint32_t i = 0; i < vm->gslot_count; i++) {
+        if (vm->gslots[i]) vm->gslots[i] = fix_forwarded_val(vm, target_start, vm->gslots[i]);
     }
 
     for (size_t i = 0; i < vm->c_roots_count; i++) {

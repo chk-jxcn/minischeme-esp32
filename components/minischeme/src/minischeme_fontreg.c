@@ -1014,8 +1014,8 @@ void mini_font_config_text(char *order, size_t order_cap, char *overrides, size_
 #define FONTS_GLOBAL "%fonts"
 
 static void font_remember(MiniVM *vm, int id, Value what) {
+    mini_push_root(vm, &what);   /* first: looking up %fonts may make its symbol and collect */
     Value tab = env_lookup_name(vm, FONTS_GLOBAL);
-    mini_push_root(vm, &what);
     if (!mini_is_vector(tab) || mini_vector_length(tab) != MINI_FONT_SLOTS) {
         tab = mini_make_vector(vm, MINI_FONT_SLOTS, mini_false());
         mini_push_root(vm, &tab);
@@ -1031,7 +1031,10 @@ static void font_remember(MiniVM *vm, int id, Value what) {
 static void font_remember_ref(MiniVM *vm, int id, const char *text, const char *kind) {
     Value p = mini_make_string(vm, text);
     mini_push_root(vm, &p);
-    Value entry = mini_make_cons(vm, p, mini_make_symbol(vm, kind));
+    /* the symbol first: making it may collect, and p must be read after that (an argument
+     * list evaluated the other way round passed a moved string: a crash at the next GC) */
+    Value k = mini_make_symbol(vm, kind);
+    Value entry = mini_make_cons(vm, p, k);
     mini_pop_root(vm);
     font_remember(vm, id, entry);
 }

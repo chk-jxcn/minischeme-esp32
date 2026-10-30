@@ -122,14 +122,19 @@ Value cfasl_make_procedure_stub(MiniVM *vm,
                                 Value constants_vec) {
     if (!vm || !comp_bytes || comp_size == 0) return mini_nil();
 
-    /* Store compressed bytes in a Scheme String */
+    /* Store compressed bytes in a Scheme String (each value kept across an allocation is
+     * rooted: a collection moves it) */
+    mini_push_root(vm, &constants_vec);
     Value comp_str = mini_make_string_len(vm, (const char *)comp_bytes, comp_size);
+    mini_push_root(vm, &comp_str);
 
     /* Allocate vector metadata stub:
      * #( 'cfasl-stub comp_str uncomp_bytes num_params max_stack is_variadic has_inner const_vec )
      */
     Value meta = mini_make_vector(vm, 8, mini_nil());
-    mini_vector_set(vm, meta, 0, mini_make_symbol(vm, "cfasl-stub"));
+    mini_push_root(vm, &meta);
+    Value tag = mini_make_symbol(vm, "cfasl-stub");
+    mini_vector_set(vm, meta, 0, tag);
     mini_vector_set(vm, meta, 1, comp_str);
     mini_vector_set(vm, meta, 2, mini_make_fixnum((int64_t)uncomp_code_bytes));
     mini_vector_set(vm, meta, 3, mini_make_fixnum((int64_t)num_params));
@@ -137,6 +142,9 @@ Value cfasl_make_procedure_stub(MiniVM *vm,
     mini_vector_set(vm, meta, 5, mini_make_bool(is_variadic != 0));
     mini_vector_set(vm, meta, 6, mini_make_bool(has_inner_lambdas != 0));
     mini_vector_set(vm, meta, 7, constants_vec);
+    mini_pop_root(vm);
+    mini_pop_root(vm);
+    mini_pop_root(vm);
 
     return meta;
 }

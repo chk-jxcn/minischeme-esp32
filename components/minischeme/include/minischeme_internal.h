@@ -52,6 +52,10 @@ typedef MiniHeapObj HeapObj;
 #define MINI_GC_FWD_MASK    0x003FFFFFU
 #define MINI_GC_MARK_BIT    0x80000000U /* Bit 31: Mark bit for Major GC Mark-Compact */
 
+/* A Code ROM symbol's header carries its global slot (1 + its number in the image) in bits
+ * 9..30: the GC never touches the image, so they stay; heap objects use them for forwarding */
+#define MINI_SYM_SLOT_SHIFT 9
+
 typedef struct ForwardedObj {
     HeapObj header;
     Value new_val;
@@ -229,6 +233,19 @@ typedef enum {
     OP_LE,
     OP_GE,
     OP_NUM_EQ,
+
+    /* API 1.15: (f a ...) of an API procedure by its permanent number (minischeme_api_ids.h):
+     * operands u16 number, u8 argc; the procedure is found once per VM (its global binding if
+     * the name is bound, else the firmware's C function) */
+    OP_CALL_PRIM,
+    /* API 1.15: (car p) (cdr p) (not x) (null? x) (pair? x) (eq? a b) (vector-ref v k) inline */
+    OP_CAR,
+    OP_CDR,
+    OP_NOT,
+    OP_NULLP,
+    OP_PAIRP,
+    OP_EQ,
+    OP_VECTOR_REF,
     OP_COUNT
 } OpCode;
 
@@ -360,6 +377,12 @@ struct MiniVM {
      * both bump gcache_gen, which retires every entry at once */
     MiniGlobalCacheEntry *gcache;   /* [MINI_GCACHE_SIZE], word memory (IRAM on the ESP32) */
     uint32_t gcache_gen;
+    /* One global binding per Code ROM symbol, by its slot (MINI_SYM_SLOT_SHIFT): 0 until looked
+     * up. A GC updates the entries (they are roots); a new global environment clears them. */
+    Value *gslots;
+    uint32_t gslot_count;
+    /* OP_CALL_PRIM: the procedure of each API number, found at its first call (NULL until then) */
+    MiniCFunc *prim_fns;
 
     /* Runtime statistics (see mini_get_stats) */
     uint64_t stat_alloc_bytes;
@@ -469,6 +492,11 @@ void  env_define(MiniVM *vm, Value env, Value sym, Value val);
 void  env_set(MiniVM *vm, Value env, Value sym, Value val);
 Value make_cfunc(MiniVM *vm, MiniCFunc fn, const char *name);
 Value prim_callcc(MiniVM *vm, int argc, Value *argv);
+Value prim_car(MiniVM *vm, int argc, Value *argv);
+Value prim_cdr(MiniVM *vm, int argc, Value *argv);
+Value prim_vector_ref(MiniVM *vm, int argc, Value *argv);
+/* (%api-id name): the API procedure's permanent number, or #f (the compiler's OP_CALL_PRIM) */
+Value prim_api_id(MiniVM *vm, int argc, Value *argv);
 
 /* Built-in Primitives Registration & Table */
 typedef MiniPrimEntry BuiltinCFuncEntry;
@@ -546,6 +574,8 @@ extern const char *(*mini_api_alias_hook)(const char *name, size_t i);
 extern const char *(*mini_api_unbound_hook)(const char *name);
 /* Interned symbol of the attached Code ROM, or 0 */
 Value xrom_find_symbol(const MiniVM *vm, const char *name, size_t len);
+/* The global environment was replaced or its keys changed: drop what lookups remembered */
+void mini_globals_reset(MiniVM *vm);
 const MiniPrimEntry *prim_table_find(const MiniVM *vm, const char *name);
 const char *rom_find_cfunc_name(MiniVM *vm, uint64_t heap_offset);
 

@@ -55,7 +55,7 @@ static Value prim_vector_length(MiniVM *vm, int argc, Value *argv) {
     return mini_make_fixnum((int64_t)mini_vector_length(argv[0]));
 }
 
-static Value prim_vector_ref(MiniVM *vm, int argc, Value *argv) {
+Value prim_vector_ref(MiniVM *vm, int argc, Value *argv) {
     if (argc != 2 || !mini_is_vector(argv[0]) || !mini_is_fixnum(argv[1])) {
         vm_error(vm, "vector-ref: expected vector and fixnum index");
         return mini_void();
@@ -166,7 +166,7 @@ static const char *mini_describe_type(Value v) {
     return "non-pair";
 }
 
-static Value prim_car(MiniVM *vm, int argc, Value *argv) {
+Value prim_car(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
         vm_error(vm, "car: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
@@ -174,7 +174,7 @@ static Value prim_car(MiniVM *vm, int argc, Value *argv) {
     return mini_car(argv[0]);
 }
 
-static Value prim_cdr(MiniVM *vm, int argc, Value *argv) {
+Value prim_cdr(MiniVM *vm, int argc, Value *argv) {
     if (argc != 1 || !mini_is_pair(argv[0])) {
         vm_error(vm, "cdr: requires a pair (got %s)", argc >= 1 ? mini_describe_type(argv[0]) : "none");
         return mini_void();
@@ -1433,6 +1433,7 @@ const BuiltinCFuncEntry BUILTIN_CFUNCS[] = {
     { "quotient", prim_quotient },
     { "cons", prim_cons },
     { "car", prim_car },
+    { "%api-id", prim_api_id },
     { "cdr", prim_cdr },
     { "set-car!", prim_set_car },
     { "vm-rom-bytes", prim_vm_rom_bytes },

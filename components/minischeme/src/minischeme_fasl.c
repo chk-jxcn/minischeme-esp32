@@ -914,7 +914,7 @@ static bool fasl_load(MiniVM *vm, FaslSrc *src) {
         vm->tenured_hp = vm->tenured_start;
         vm->global_env = mini_nil();
         vm->symbols = mini_nil();
-        vm->gcache_gen++;
+        mini_globals_reset(vm);
         vm_error(vm, "failed reading heap payload of FASL image");
         return false;
     }
@@ -1022,7 +1022,7 @@ static bool fasl_load(MiniVM *vm, FaslSrc *src) {
 
     /* Restore VM roots */
     vm->global_env = offset_to_val(hdr.global_env_offset, new_base);
-    vm->gcache_gen++;
+    mini_globals_reset(vm);
     vm->symbols    = offset_to_val(hdr.symbols_offset, new_base);
 
     /* Re-bind fast internal symbol references */
@@ -1353,7 +1353,7 @@ bool mini_load_fasl_xip(MiniVM *vm, const uint8_t *rom_buf, size_t rom_size) {
     /* Reset symbols and global env so all bindings use unified ROM symbol pointers */
     vm->symbols = mini_nil();
     vm->global_env = mini_make_cons(vm, mini_nil(), mini_nil());
-    vm->gcache_gen++;
+    mini_globals_reset(vm);
 
     /* Re-bind fast internal symbol references from ROM */
     vm->sym_quote   = mini_make_symbol(vm, "quote");
@@ -1637,7 +1637,7 @@ Value prim_fasl_to_c(MiniVM *vm, int argc, Value *argv) {
 /* with no translation. Mutable state (globals, closures, frames) stays in   */
 /* RAM; the GC never touches the image because it lies outside the heap.     */
 
-#define MROM_VERSION 1
+#define MROM_VERSION 2   /* 2: symbols carry their global slot */
 
 typedef struct {
     char     magic[4];     /* "MROM" */
@@ -1834,6 +1834,7 @@ size_t mini_rom_build(MiniVM *vm, Value root, uintptr_t base, uint32_t key,
 
     /* 3. Emit relocated objects, then the sorted symbol table, then header */
     uint32_t sum = 2166136261u;
+    uint32_t sym_slot = 0;
     for (size_t i = 0; ok && i < map.n; i++) {
         HeapObj *obj = map.objs[i];
         size_t sz = ALIGN8(obj->size);
@@ -1859,6 +1860,7 @@ size_t mini_rom_build(MiniVM *vm, Value root, uintptr_t base, uint32_t key,
             default:
                 break;
         }
+        if (c->type == OBJ_SYMBOL) c->type |= ++sym_slot << MINI_SYM_SLOT_SHIFT;
         sum = fnv1a(sum, tmp, sz);
         if (ok && !write(map.offs[i], tmp, sz, user)) ok = false;
     }
@@ -1931,7 +1933,7 @@ static void xrom_reintern(MiniVM *vm) {
         Value r = xrom_find_symbol(vm, s->name, s->len);
         if (r) mini_set_car(b, r);
     }
-    vm->gcache_gen++; /* binding keys changed */
+    mini_globals_reset(vm); /* binding keys changed */
     /* drop RAM twins from the intern list (relink in place, no allocation) */
     Value prev = mini_nil();
     for (Value curr = vm->symbols; mini_is_pair(curr); curr = mini_cdr(curr)) {
@@ -2179,7 +2181,7 @@ static Value rs_symbol(RomStream *s) {
     size_t size = ALIGN8(sizeof(SymbolObj) + len);
     bool large;
     size_t off = rs_alloc(s, size, &large);
-    rs_header(s, off, OBJ_SYMBOL, size);
+    rs_header(s, off, OBJ_SYMBOL | ((uint32_t)(s->sym_n + 1) << MINI_SYM_SLOT_SHIFT), size);
     rs_put(s, off + offsetof(SymbolObj, len), &len, sizeof(len));
     rs_put(s, off + offsetof(SymbolObj, name), s->name, len);
     rs_zero(s, off + offsetof(SymbolObj, name) + len, size - offsetof(SymbolObj, name) - len);
@@ -2494,6 +2496,11 @@ Value mini_rom_attach(MiniVM *vm, const void *image, size_t size, uint32_t key) 
     vm->xrom_end = img + hdr.total_bytes;
     vm->xrom_syms = (const Value *)(const void *)(img + hdr.symtab_off);
     vm->xrom_sym_count = hdr.sym_count;
+    /* a global slot per image symbol (without the memory: the global cache alone) */
+    free(vm->gslots);
+    vm->gslot_count = 0;
+    vm->gslots = hdr.sym_count ? (Value *)mini_word_alloc(hdr.sym_count * sizeof(Value)) : NULL;
+    if (vm->gslots) vm->gslot_count = hdr.sym_count;
     xrom_reintern(vm);
     return (Value)(uintptr_t)(img + hdr.root_off) | MINI_TAG_CODE;
 }

@@ -334,6 +334,9 @@ MiniVM *mini_create_ext(const MiniConfig *config) {
         return NULL;
     }
     mini_words_fill(vm->gcache, 0, MINI_GCACHE_SIZE * sizeof(MiniGlobalCacheEntry));
+    vm->gslots = NULL;
+    vm->gslot_count = 0;
+    vm->prim_fns = NULL;
 
     vm->c_roots_cap = 32;
     vm->c_roots = (Value **)malloc(vm->c_roots_cap * sizeof(Value *));
@@ -456,6 +459,8 @@ void mini_destroy(MiniVM *vm) {
     free(vm->stack);
     free(vm->call_frames);
     free(vm->gcache);
+    free(vm->gslots);
+    free(vm->prim_fns);
     free(vm->c_roots);
     if (vm->rom_owned_buffer) {
         free(vm->rom_owned_buffer);

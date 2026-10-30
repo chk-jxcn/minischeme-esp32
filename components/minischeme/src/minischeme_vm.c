@@ -11,6 +11,7 @@
  */
 
 #include "minischeme_internal.h"
+#include "minischeme_api_ids.h"
 
 /* Tagged fixnum arithmetic: a and b are fixnums (value << 3, tag 0); true and the tagged
  * result in *r when it is a fixnum too, false on an overflow (the caller then takes the
@@ -64,13 +65,132 @@ static inline void gcache_move(MiniGlobalCacheEntry *a, const MiniGlobalCacheEnt
     a->gen = b->gen;
 }
 
-/* Binding pair of a global, or 0. The cache holds MINI_GCACHE_SIZE recent lookups in sets of
+void mini_globals_reset(MiniVM *vm) {
+    vm->gcache_gen++;
+    if (vm->gslots) mini_words_fill(vm->gslots, 0, vm->gslot_count * sizeof(Value));
+    if (vm->prim_fns) memset(vm->prim_fns, 0, MINI_API_ID_COUNT * sizeof(MiniCFunc));
+}
+
+Value prim_api_id(MiniVM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc != 1 || !mini_is_symbol(argv[0])) return mini_false();
+    const char *name = mini_symbol_name(argv[0]);
+    size_t lo = 0, hi = MINI_API_ID_INDEX_COUNT;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        int c = strcmp(mini_api_id_index[mid].name, name);
+        if (c == 0) return mini_make_fixnum(mini_api_id_index[mid].id);
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return mini_false();
+}
+
+/* An API number whose name is bound to something else than a C procedure (a Scheme definition,
+ * call/cc) or to nothing: OP_CALL_PRIM calls the global the ordinary way. Never called. */
+static Value prim_by_call(MiniVM *vm, int argc, Value *argv) {
+    (void)vm; (void)argc; (void)argv;
+    return MINI_CONST_VOID;
+}
+
+/* An existing symbol of that name, without making one (no allocation) */
+static Value find_symbol(MiniVM *vm, const char *name) {
+    size_t len = strlen(name);
+    if (vm->xrom_sym_count) {
+        Value r = xrom_find_symbol(vm, name, len);
+        if (r) return r;
+    }
+    for (Value c = vm->symbols; mini_is_pair(c); c = mini_cdr(c)) {
+        Value s = mini_car(c);
+        if (mini_is_symbol(s)) {
+            const SymbolObj *o = (const SymbolObj *)UNTAG_PTR(s);
+            if (o->len == len && memcmp(o->name, name, len) == 0) return s;
+        }
+    }
+    return 0;
+}
+
+static MiniCFunc cfunc_named(MiniVM *vm, const char *name, const char **static_name);
+static Value global_binding(MiniVM *vm, Value sym);
+
+/* The k-th name of API number id: 0 its name, then its older names (aliases), NULL after them */
+static const char *api_id_name(uint16_t id, size_t k) {
+    if (k == 0) return mini_api_id_names[id];
+    for (size_t i = 0; i < MINI_API_ID_INDEX_COUNT; i++) {
+        if (mini_api_id_index[i].id == id && strcmp(mini_api_id_index[i].name, mini_api_id_names[id]) != 0 && --k == 0) {
+            return mini_api_id_index[i].name;
+        }
+    }
+    return NULL;
+}
+
+/* The procedure of API number id, found once per VM: the C function its global is bound to,
+ * else (unbound) the firmware's C procedure of that name (no binding, no procedure object:
+ * no memory); prim_by_call for anything else. NULL with an error for a number this firmware
+ * does not know. */
+static MiniCFunc prim_resolve(MiniVM *vm, uint16_t id) {
+    if (id >= MINI_API_ID_COUNT || !mini_api_id_names[id]) {
+        vm_error(vm, "unknown API procedure number %u (an image for a newer firmware API?)", (unsigned)id);
+        return NULL;
+    }
+    if (!vm->prim_fns) {
+        vm->prim_fns = (MiniCFunc *)calloc(MINI_API_ID_COUNT, sizeof(MiniCFunc));
+        if (!vm->prim_fns) {
+            vm_error(vm, "out of memory (API procedure table)");
+            return NULL;
+        }
+    }
+    /* a global bound under any of its names decides; else a C procedure of any of them */
+    MiniCFunc fn = NULL;
+    const char *name;
+    for (size_t k = 0; !fn && (name = api_id_name(id, k)) != NULL; k++) {
+        Value sym = find_symbol(vm, name);
+        Value b = sym ? global_binding(vm, sym) : 0;
+        if (b) fn = mini_is_cfunc(mini_cdr(b)) ? ((CFuncObj *)UNTAG_PTR(mini_cdr(b)))->fn : prim_by_call;
+    }
+    for (size_t k = 0; !fn && (name = api_id_name(id, k)) != NULL; k++) {
+        const char *static_name = NULL, *other;
+        fn = cfunc_named(vm, name, &static_name);
+        for (size_t j = 0; !fn && mini_api_alias_hook && (other = mini_api_alias_hook(name, j)) != NULL; j++) {
+            fn = cfunc_named(vm, other, &static_name);
+        }
+    }
+    if (!fn) fn = prim_by_call;   /* the ordinary call says what is missing */
+    if (fn == prim_callcc) fn = prim_by_call;
+    vm->prim_fns[id] = fn;
+    return fn;
+}
+
+/* The global slot of a Code ROM symbol (its header holds 1 + its number in the image), or NULL
+ * for any other symbol (made at run time, or a FASL image's), which takes the global cache */
+static inline Value *global_slot(MiniVM *vm, Value sym) {
+    const char *p = (const char *)UNTAG_PTR(sym);
+    if (!vm->gslots || p < vm->xrom_start || p >= vm->xrom_end) return NULL;
+    uint32_t k = ((const HeapObj *)(const void *)p)->type >> MINI_SYM_SLOT_SHIFT;
+    return (k && k <= vm->gslot_count) ? &vm->gslots[k - 1] : NULL;
+}
+
+/* The binding pair of sym in the global list, or 0 */
+static Value global_walk(MiniVM *vm, Value sym) {
+    for (Value curr = mini_cdr(vm->global_env); mini_is_pair(curr); curr = mini_cdr(curr)) {
+        Value b = mini_car(curr);
+        if (mini_is_pair(b) && mini_car(b) == sym) return b;
+    }
+    return 0;
+}
+
+/* Binding pair of a global, or 0. A Code ROM symbol (an app's names) has a slot of its own:
+ * one load once looked up. Other symbols use the cache: it holds MINI_GCACHE_SIZE recent lookups in sets of
  * MINI_GCACHE_WAYS, the most recent first: a hit moves to its set's front, a miss walks the
  * global list and puts what it found there (the set's least recent entry leaves). A
  * direct-mapped cache let two hot globals of one slot evict each other on every access, each
  * time a walk of the whole list (a matrix loop: 1.7 s instead of 0.17 s). Entries of an older
  * gcache_gen (a GC moved the bindings) count as empty. */
 static Value global_binding(MiniVM *vm, Value sym) {
+    Value *slot = global_slot(vm, sym);
+    if (slot) {
+        if (!*slot) *slot = global_walk(vm, sym);
+        return *slot;
+    }
     uintptr_t h = (((uintptr_t)sym >> 3) * 2654435761u) >> 8;
     MiniGlobalCacheEntry *set = &vm->gcache[(h & (MINI_GCACHE_SETS - 1)) * MINI_GCACHE_WAYS];
     uint32_t gen = vm->gcache_gen;
@@ -84,17 +204,14 @@ static Value global_binding(MiniVM *vm, Value sym) {
             return hit.binding;
         }
     }
-    for (Value curr = mini_cdr(vm->global_env); mini_is_pair(curr); curr = mini_cdr(curr)) {
-        Value b = mini_car(curr);
-        if (mini_is_pair(b) && mini_car(b) == sym) {
-            for (int k = MINI_GCACHE_WAYS - 1; k > 0; k--) gcache_move(&set[k], &set[k - 1]);
-            set[0].sym = sym;
-            set[0].binding = b;
-            set[0].gen = gen;
-            return b;
-        }
+    Value b = global_walk(vm, sym);
+    if (b) {
+        for (int k = MINI_GCACHE_WAYS - 1; k > 0; k--) gcache_move(&set[k], &set[k - 1]);
+        set[0].sym = sym;
+        set[0].binding = b;
+        set[0].gen = gen;
     }
-    return 0;
+    return b;
 }
 
 Value env_lookup(MiniVM *vm, Value env, Value sym) {
@@ -207,6 +324,8 @@ void env_define(MiniVM *vm, Value env, Value sym, Value val) {
     Value new_pair = mini_make_cons(vm, binding, mini_cdr(vm->global_env));
     vm->sp -= 3;
     mini_set_cdr(vm->global_env, new_pair);
+    Value *slot = global_slot(vm, mini_car(mini_car(new_pair)));   /* the binding may have moved */
+    if (slot) *slot = mini_car(new_pair);
     mini_write_barrier(vm, vm->global_env, new_pair);
 }
 
@@ -412,6 +531,14 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         [OP_LE]            = &&do_op_le,
         [OP_GE]            = &&do_op_ge,
         [OP_NUM_EQ]        = &&do_op_num_eq,
+        [OP_CALL_PRIM]     = &&do_op_call_prim,
+        [OP_CAR]           = &&do_op_car,
+        [OP_CDR]           = &&do_op_cdr,
+        [OP_NOT]           = &&do_op_not,
+        [OP_NULLP]         = &&do_op_nullp,
+        [OP_PAIRP]         = &&do_op_pairp,
+        [OP_EQ]            = &&do_op_eq,
+        [OP_VECTOR_REF]    = &&do_op_vector_ref,
         [OP_COUNT ... 255] = &&do_op_bad   /* a byte no instruction has: an error, not a jump anywhere */
     };
     #define DISPATCH() goto *dispatch_table[*pc++]
@@ -451,6 +578,14 @@ vm_loop:
         case OP_LE:            goto do_op_le;
         case OP_GE:            goto do_op_ge;
         case OP_NUM_EQ:        goto do_op_num_eq;
+        case OP_CALL_PRIM:     goto do_op_call_prim;
+        case OP_CAR:           goto do_op_car;
+        case OP_CDR:           goto do_op_cdr;
+        case OP_NOT:           goto do_op_not;
+        case OP_NULLP:         goto do_op_nullp;
+        case OP_PAIRP:         goto do_op_pairp;
+        case OP_EQ:            goto do_op_eq;
+        case OP_VECTOR_REF:    goto do_op_vector_ref;
         default:               goto do_op_bad;
     }
 #endif
@@ -470,22 +605,34 @@ vm_loop:
      * left by 3 with tag 0, so tagged fixnums add, subtract and compare as they are and an
      * overflow of the machine word is exactly a result outside the fixnum range. The slow
      * path calls the primitive on the two stack slots (rooted there), as OP_CALL would. */
-#define ARITH_SLOW(prim) do { \
+#define PRIM_SLOW(prim, n) do { \
         SYNC_VM_STATE(); \
-        Value res_ = prim(vm, 2, sp - 2); \
+        Value res_ = prim(vm, (n), sp - (n)); \
         if (vm->has_error) goto vm_err; \
         RELOAD_VM_STATE(); \
-        sp -= 2; \
+        sp -= (n); \
         *sp++ = res_; \
+        DISPATCH(); \
+    } while (0)
+#define ARITH_SLOW(prim) PRIM_SLOW(prim, 2)
+/* A boolean in place of the top n values; when OP_JUMP_IF_FALSE follows ((if (< a b) ...)),
+ * branch at once instead (no boolean on the stack, one dispatch less) */
+#define BOOL_RESULT(r, n) do { \
+        bool r_ = (r); \
+        if (*pc == OP_JUMP_IF_FALSE) { \
+            int16_t off_ = (int16_t)(pc[1] | ((uint16_t)pc[2] << 8)); \
+            pc += 3; \
+            sp -= (n); \
+            if (!r_) pc += off_; \
+            DISPATCH(); \
+        } \
+        sp -= (n) - 1; \
+        sp[-1] = r_ ? MINI_CONST_TRUE : MINI_CONST_FALSE; \
         DISPATCH(); \
     } while (0)
 #define ARITH_COMPARE(cmp, prim) do { \
         Value a_ = sp[-2], b_ = sp[-1]; \
-        if (mini_is_fixnum(a_) && mini_is_fixnum(b_)) { \
-            sp--; \
-            sp[-1] = ((intptr_t)a_ cmp (intptr_t)b_) ? MINI_CONST_TRUE : MINI_CONST_FALSE; \
-            DISPATCH(); \
-        } \
+        if (mini_is_fixnum(a_) && mini_is_fixnum(b_)) BOOL_RESULT((intptr_t)a_ cmp (intptr_t)b_, 2); \
         ARITH_SLOW(prim); \
     } while (0)
 
@@ -524,8 +671,107 @@ vm_loop:
     do_op_le:     ARITH_COMPARE(<=, prim_le);
     do_op_ge:     ARITH_COMPARE(>=, prim_ge);
     do_op_num_eq: ARITH_COMPARE(==, prim_num_eq);
+
+    /* API 1.15 inline procedures: the fast cases here, anything else (a wrong type, an index
+     * out of range) through the primitive, with its errors */
+    do_op_car: {
+        Value p = sp[-1];
+        if (mini_is_pair(p)) {
+            sp[-1] = ((const MiniPairCells *)UNTAG_PTR(p))->car;
+            DISPATCH();
+        }
+        PRIM_SLOW(prim_car, 1);
+    }
+    do_op_cdr: {
+        Value p = sp[-1];
+        if (mini_is_pair(p)) {
+            sp[-1] = ((const MiniPairCells *)UNTAG_PTR(p))->cdr;
+            DISPATCH();
+        }
+        PRIM_SLOW(prim_cdr, 1);
+    }
+    do_op_not:    BOOL_RESULT(sp[-1] == MINI_CONST_FALSE, 1);
+    do_op_nullp:  BOOL_RESULT(sp[-1] == MINI_CONST_NIL, 1);
+    do_op_pairp:  BOOL_RESULT(mini_is_pair(sp[-1]), 1);
+    do_op_eq:     BOOL_RESULT(sp[-2] == sp[-1], 2);
+    do_op_vector_ref: {
+        Value v = sp[-2], k = sp[-1];
+        if (mini_is_vector(v) && mini_is_fixnum(k)) {
+            const VectorObj *vec = (const VectorObj *)UNTAG_PTR(v);
+            int64_t i = mini_to_fixnum(k);
+            if (i >= 0 && (uint64_t)i < (uint64_t)vec->length) {
+                sp--;
+                sp[-1] = vec->data[i];
+                DISPATCH();
+            }
+        }
+        PRIM_SLOW(prim_vector_ref, 2);
+    }
+
+    /* (f a ...) of API procedure number id (API 1.15): its C function straight away, as OP_CALL
+     * calls a C procedure, but with no global lookup and no procedure on the stack */
+    do_op_call_prim: {
+        uint16_t id = (uint16_t)(pc[0] | ((uint16_t)pc[1] << 8));
+        call_argc = pc[2];
+        pc += 3;
+        MiniCFunc fn = (vm->prim_fns && id < MINI_API_ID_COUNT) ? vm->prim_fns[id] : NULL;
+        if (!fn) {
+            SYNC_VM_STATE();
+            fn = prim_resolve(vm, id);
+            RELOAD_VM_STATE();
+            if (!fn) goto vm_err;
+        }
+        if (fn == prim_by_call) {
+            /* the ordinary call of the global: its value below the arguments, as OP_CALL has it */
+            SYNC_VM_STATE();
+            Value val = MINI_CONST_VOID;
+            const char *name;
+            for (size_t k = 0; mini_is_void(val) && !vm->has_error && (name = api_id_name(id, k)) != NULL; k++) {
+                Value sym = mini_make_symbol(vm, name);
+                val = env_lookup(vm, vm->global_env, sym);
+                if (mini_is_void(val)) val = global_miss(vm, sym);
+            }
+            RELOAD_VM_STATE();
+            if (vm->has_error) goto vm_err;
+            if (mini_is_void(val)) {
+                const char *hint = mini_api_unbound_hook ? mini_api_unbound_hook(mini_api_id_names[id]) : NULL;
+                vm_error(vm, "unbound variable: %s%s", mini_api_id_names[id], hint ? hint : "");
+                goto vm_err;
+            }
+            for (int i = 0; i < call_argc; i++) sp[-i] = sp[-i - 1];
+            sp[-call_argc] = val;
+            sp++;
+            callee = val;
+            goto do_call_dispatch;
+        }
+        frames[frame_count - 1].pc = pc;
+        vm->sp = sp;
+        vm->call_frame_count = frame_count;
+        {
+            PROF_SAVE(prof_prev);
+            PROF_SITE(mini_api_id_names[id]);
+            Value res = fn(vm, call_argc, sp - call_argc);
+            PROF_SITE(prof_prev);
+            if (vm->has_error) goto vm_err;
+            if (vm->state_reloaded) {
+                vm->state_reloaded = false;
+                vm->sp = vm->stack;
+                vm->call_frame_count = 0;
+                return res;
+            }
+            code = frames[frame_count - 1].code;
+            pc = frames[frame_count - 1].pc;
+            consts = CODE_CONSTS(code);
+            sp = vm->sp;
+            sp -= call_argc;
+            *sp++ = res;
+        }
+        DISPATCH();
+    }
 #undef ARITH_COMPARE
 #undef ARITH_SLOW
+#undef PRIM_SLOW
+#undef BOOL_RESULT
 
     /* Load constant from pool: operand is 16-bit little-endian index */
     do_op_const: {
@@ -943,6 +1189,17 @@ vm_loop:
                 fp[i] = args_src[i];
             }
             sp = fp + call_argc;
+
+            /* A loop: the running closure calls itself. Its frame, code and environment stay;
+             * only the arguments and the other locals start again. */
+            if (callee_cl == frames[frame_count - 1].closure && !callee_code->is_variadic &&
+                !callee_code->has_inner_lambdas && call_argc == callee_code->num_params) {
+                int locals = get_code_num_locals(callee_code);
+                while (sp < fp + locals) *sp++ = MINI_CONST_VOID;
+                vm->sp = sp;
+                pc = CODE_BYTES(callee_code);
+                DISPATCH();
+            }
 
             frames[frame_count - 1].closure = callee_cl;
             frames[frame_count - 1].code = callee_code;
