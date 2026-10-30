@@ -6,9 +6,11 @@
  * Nothing here has a fixed size: keys, selectors, rows, value text, nesting
  * levels and the URL are allocated as a feed needs them. The only bound is
  * memory: on the ESP32 a buffer stops growing when the free heap would fall
- * under JF_RAM_RESERVE (the WiFi stack and the HTTP server need it), and the
- * document then reports `truncated`. An app may still set its own limits
- * (pool-bytes, value-len, depth of json-feed-start).
+ * under JF_RAM_RESERVE (the WiFi stack and the HTTP server need it). Such a
+ * document is fetched again (JF_SHORT_TRIES, a failure each time: the app
+ * keeps its data), memory is often only short for a moment (an app starting);
+ * then it is delivered and reports `truncated`. An app may still set its own
+ * limits (pool-bytes, value-len, depth of json-feed-start).
  */
 
 #include "minischeme_jsonfeed.h"
@@ -39,6 +41,7 @@ static int64_t jf_now_ms(void) { return (int64_t)time(NULL) * 1000; }
 #define JF_NONE          0xFFFFFFFFu  /* no value: key absent, not kept */
 #define JF_RETRY_MS      5000         /* next try after a failed fetch */
 #define JF_RAM_RESERVE   (16 * 1024)  /* ESP32: free heap the feed never takes */
+#define JF_SHORT_TRIES   2            /* fetches of a document memory cut short before it is taken */
 
 enum { JF_EQUAL, JF_PREFIX };
 enum { JF_IDLE, JF_CONNECTING, JF_OK, JF_ERROR };
@@ -73,6 +76,7 @@ typedef struct {
     char     *pool;
     size_t    used, pcap;
     bool      truncated;        /* rows or text did not fit */
+    bool      short_mem;        /* ... for lack of memory (not by the app's limits) */
     int       objects;          /* objects with a captured key */
     uint32_t  generation;
 } JfSnap;
@@ -288,7 +292,7 @@ static void tok_put(JfParser *p, char c) {
     if (p->tok_len + 1 >= p->tok_cap &&
         !jf_reserve((void **)&p->tok, &p->tok_cap, p->tok_len + 2, 1)) {
         p->tok_limit = p->tok_len;    /* out of memory: the value is cut here */
-        if (S) S->work->truncated = true;
+        if (S) S->work->truncated = S->work->short_mem = true;
         return;
     }
     p->tok[p->tok_len++] = c;
@@ -361,7 +365,7 @@ static void level_open(int level) {
         size_t need = (size_t)level + 1;
         JfLevel *lv = p->lv;
         if (!jf_reserve((void **)&lv, &cap, need, sizeof(JfLevel))) {
-            S->work->truncated = true;
+            S->work->truncated = S->work->short_mem = true;
             return;
         }
         memset(lv + p->nlv, 0, (cap - (size_t)p->nlv) * sizeof(JfLevel));
@@ -373,7 +377,7 @@ static void level_open(int level) {
         size_t cap = (size_t)L->nkeys;
         if (!jf_reserve_words(&L->off, &cap, (size_t)c->nkeys)) {
             L->ok = false;
-            S->work->truncated = true;
+            S->work->truncated = S->work->short_mem = true;
             return;
         }
         L->nkeys = (int)cap;
@@ -395,7 +399,7 @@ static uint32_t pool_put(JfSnap *sn, const char *s, size_t n) {
         return JF_NONE;
     }
     if (!jf_reserve((void **)&sn->pool, &sn->pcap, sn->used + n + 1, 1)) {
-        sn->truncated = true;
+        sn->truncated = sn->short_mem = true;
         return JF_NONE;
     }
     memcpy(sn->pool + sn->used, s, n);
@@ -439,7 +443,7 @@ static void object_done(int level) {
                                            : (strncmp(v, sel->text, sel->len) == 0);
         if (!hit) continue;
         if (!snap_row(sn)) {
-            sn->truncated = true;
+            sn->truncated = sn->short_mem = true;
             return;
         }
         int i = sn->count++;
@@ -491,7 +495,7 @@ static void token_done(void) {
     size_t n = p->tok_len;
     if (n == p->tok_limit) n = utf8_trim_tail(p->tok, n);   /* cut at value-len (or by memory) */
     if (!jf_reserve((void **)&L->buf, &L->cap, L->used + n + 1, 1)) {
-        S->work->truncated = true;
+        S->work->truncated = S->work->short_mem = true;
         return;
     }
     memcpy(L->buf + L->used, p->tok ? p->tok : "", n);
@@ -585,6 +589,7 @@ static void snap_reset(JfSnap *sn, int nkeys) {
     sn->count = 0;
     sn->used = 0;
     sn->truncated = false;
+    sn->short_mem = false;
     sn->objects = 0;
 }
 
@@ -627,10 +632,20 @@ void mini_json_feed_data(const char *data, size_t len) {
 }
 
 void mini_json_feed_end(bool ok, const char *error) {
+    static int short_tries = 0;   /* documents memory cut short in a row */
     if (!S) return;
     if (ok && (!S->cfg || S->work->objects == 0)) {
         ok = false;
         error = "no matching JSON objects in the response";
+    }
+    /* cut short for lack of memory: a failure (retried soon, the app keeps
+     * its data) the first times, as memory is often short only for a moment */
+    if (ok && S->work->short_mem && short_tries < JF_SHORT_TRIES) {
+        short_tries++;
+        ok = false;
+        error = "out of memory for the document, retrying";
+    } else if (ok) {
+        short_tries = 0;
     }
     JF_LOCK();
     s_fetches++;
