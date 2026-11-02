@@ -847,6 +847,7 @@ static void run_job(RemoteJob *job) {
         char err[112] = "";
         bool ok = true;
         if (strcmp(job->path, "refresh") == 0) ok = mini_market_refresh(err, sizeof(err));
+        else if (strcmp(job->path, "update-all") == 0) ok = mini_market_update_all(err, sizeof(err)) > 0;
         else if (strncmp(job->path, "install:", 8) == 0) ok = mini_market_install(job->path + 8, err, sizeof(err)) > 0;
         else if (strcmp(job->path, "cancel") == 0) mini_market_cancel();
         size_t n = mini_market_json(job->out, job->out_cap);
@@ -2357,8 +2358,11 @@ static esp_err_t http_market(httpd_req_t *req) {
         http_query(req, "action", action, sizeof(action));
         http_query(req, "id", id, sizeof(id));
         if (strcmp(action, "install") == 0) snprintf(job.path, sizeof(job.path), "install:%s", id[0] ? id : "updates");
-        else if (strcmp(action, "refresh") == 0 || strcmp(action, "cancel") == 0) snprintf(job.path, sizeof(job.path), "%s", action);
-        else return http_error(req, "action: refresh, install or cancel");
+        else if (strcmp(action, "refresh") == 0 || strcmp(action, "cancel") == 0 || strcmp(action, "update-all") == 0) {
+            snprintf(job.path, sizeof(job.path), "%s", action);
+        } else {
+            return http_error(req, "action: refresh, install, update-all or cancel");
+        }
     } else {
         snprintf(job.path, sizeof(job.path), "status");
     }
@@ -6136,9 +6140,12 @@ void app_main(void) {
         s_market_auto = 0;
         if (s_settings_mode && market_auto == MARKET_AUTO_UPDATE_MAGIC) {
             s_market_auto = MARKET_AUTO_SKIP_MAGIC;   /* the app boot after this round checks nothing */
-            mini_market_auto_start(MINI_MARKET_AUTO_UPDATE);
+            mini_market_auto_start(MINI_MARKET_AUTO_UPDATE, "");
         } else if (!s_settings_mode && market_auto != MARKET_AUTO_SKIP_MAGIC) {
-            mini_market_auto_start(MINI_MARKET_AUTO_CHECK);   /* market_auto_update = 1 only */
+            /* market_auto_update = 1 only; the running app alone, when the market keeps it
+             * (its folder in /spiffs/apps, or the root app), not an uploaded one */
+            bool kept = strncmp(s_app_path, APPS_DIR "/", strlen(APPS_DIR) + 1) == 0 || strcmp(s_app_path, APP_MSBC_PATH) == 0;
+            mini_market_auto_start(MINI_MARKET_AUTO_CHECK, kept ? s_app_id : "");
         }
     }
     if (s_settings_mode) {

@@ -258,10 +258,10 @@
     { "setup-mode-start", "(setup-mode-start)", "System / Setup mode", "Start the setup access point and its web page. Not for apps: only the system settings and the REPL may (an app gets an error)." }, \
     { "factory-reset", "(factory-reset what)", "System / Setup mode", "Reset part of the board from the system settings: 'rom (the app Code ROM partition), 'configs (the apps' /spiffs/apps/<id>.ini), 'fonts (the system font ROM), 'files (every file: apps, data, config.ini, WiFi) or 'all (the Code ROM and every file; the font ROM stays)." }, \
     { "setup-mode-status", "(setup-mode-status)", "System / Setup mode", "The state of setup mode and the WiFi station, as an alist." }, \
-    { "market-refresh", "(market-refresh)", "System / App market", "Start reading the market index in the background; (market-status) follows it, (market-apps) has the result." }, \
+    { "market-refresh", "(market-refresh)", "System / App market", "Start checking the installed apps against the market in the background, one app at a time; (market-status) follows it, (market-apps) has the result." }, \
     { "market-status", "(market-status)", "System / App market", "What the market does now: an alist of state, message, app, received, total, queued, install, auto, return and url." }, \
-    { "market-apps", "(market-apps)", "System / App market", "The apps of the last index read, each compared with the installed copy." }, \
-    { "market-install", "(market-install id)", "System / App market", "Queue the install of an app (a string id), or 'updates for every app with an update; downloads run in the background." }, \
+    { "market-apps", "(market-apps)", "System / App market", "The installed apps of the last check (and any app asked for by id), each compared with its market entry." }, \
+    { "market-install", "(market-install id)", "System / App market", "Queue the install of an app (a string id; one not installed is looked up first: its <id>.info.json), or 'updates for every checked app with an update; downloads run in the background." }, \
     { "market-cancel", "(market-cancel)", "System / App market", "Stop the read or download in progress and empty the install queue; the installed files are untouched." }, \
     { "bench-tick", "(bench-tick [n])", "System / Benchmarks", "Average time of n synthetic clock ticks with a partial redraw to the LCD; diagnostic." }, \
     { "tick-bench", "(tick-bench [n])", "System / Benchmarks", "Older name of bench-tick (same procedure, kept for compatibility). Average time of n synthetic clock ticks with a partial redraw to the LCD; diagnostic." }, \

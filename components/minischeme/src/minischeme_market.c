@@ -11,33 +11,41 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MARKET_MAX_APPS   24
-#define MARKET_INDEX_MAX  (16 * 1024)
+#define MARKET_INFO_MAX   2048     /* bytes of one <id>.info.json */
 
 typedef struct {
-    char id[24], name[48], version[12], api[12], ext[24], file[40], desc[100];
+    char id[MINI_MARKET_ID_MAX], name[48], version[12], api[12], ext[24], file[40], desc[100];
     uint32_t size, hash;
     char path[48];          /* the installed copy, or where an install goes */
     char inst_version[12];  /* "" when not installed */
     uint8_t status;         /* MiniMarketAppStatus */
     uint8_t tries;          /* failed downloads of this install (one retry) */
+    bool info;              /* its info was read (or could not be: absent) */
+    bool queued;            /* to install */
+    bool want;              /* asked for by id: install once its info is here */
 } MarketApp;
 
 static const MiniMarketHost *H = NULL;
 static MarketApp *s_apps = NULL;       /* malloc'd while a list is held */
-static int s_count = 0;
+static int s_count = 0, s_cap = 0;
 static MiniMarketState s_state = MINI_MARKET_IDLE;
 static char s_msg[112] = "";
 static char s_base[160] = "";          /* the market URL of the list */
-static uint32_t s_queue = 0;           /* bit i: s_apps[i] to install */
-static int s_cur = -1;                 /* the app being downloaded */
+static int s_cur = -1;                 /* the app whose info or image is fetched */
+static bool s_cur_info = false;        /* ... its info (else its image) */
 static size_t s_recv = 0, s_total = 0;
 static int s_done = 0, s_failed = 0;   /* installs of the current queue */
+static bool s_checking = false;        /* a check round runs (infos of the list) */
+static bool s_installing = false;      /* an install round runs */
+static int s_absent = 0, s_unread = 0; /* apps of the check the market lacks; infos not read */
+static char s_unread_err[64] = "";
+static bool s_then_updates = false;    /* after the check: install the updates (update-all) */
 static MiniMarketAuto s_auto = MINI_MARKET_AUTO_OFF;   /* the automatic round of this boot */
 static bool s_auto_busy = false;       /* its refresh or installs run */
 static bool s_auto_t0_set = false;
 static uint32_t s_auto_t0 = 0;         /* its first mini_market_auto call */
 static bool s_return = false;          /* an update round is over: back to the app */
+static char s_auto_app[MINI_MARKET_ID_MAX] = "";   /* the app a boot check looks at */
 
 void mini_market_set_host(const MiniMarketHost *host) { H = host; }
 
@@ -198,48 +206,49 @@ static void field(MarketApp *a, const char *key, const char *val) {
     if (strcmp(key, "hash") == 0) a->hash = (uint32_t)parse_uint(&v, 16);
 }
 
-/* The apps of index.json; count or -1 when it is not an array of objects */
-static int parse_index(const char *p, size_t len, MarketApp *apps, int max) {
+/* An app's <id>.info.json: one flat object (index.json's entry of it) into
+ * *a; false when malformed, of another app or without a safe image name */
+static bool parse_info(const char *p, size_t len, MarketApp *a) {
     const char *end = p + len;
-    int n = 0;
+    MarketApp got;
+    memset(&got, 0, sizeof(got));
     p = skip_ws(p, end);
-    if (p >= end || *p != '[') return -1;
+    if (p >= end || *p != '{') return false;
     p = skip_ws(p + 1, end);
-    while (p < end && *p != ']') {
-        if (*p != '{') return -1;
-        MarketApp a;
-        memset(&a, 0, sizeof(a));
+    while (p < end && *p != '}') {
+        char key[16], val[128];
+        p = parse_string(p, end, key, sizeof(key));
+        if (!p) return false;
+        p = skip_ws(p, end);
+        if (p >= end || *p != ':') return false;
         p = skip_ws(p + 1, end);
-        while (p < end && *p != '}') {
-            char key[16], val[128];
-            p = parse_string(p, end, key, sizeof(key));
-            if (!p) return -1;
-            p = skip_ws(p, end);
-            if (p >= end || *p != ':') return -1;
-            p = skip_ws(p + 1, end);
-            if (p < end && *p == '"') {
-                p = parse_string(p, end, val, sizeof(val));
-            } else {
-                const char *v = p;
-                p = skip_value(p, end);
-                if (!p) return -1;
-                size_t vl = (size_t)(p - v) < sizeof(val) - 1 ? (size_t)(p - v) : sizeof(val) - 1;
-                memcpy(val, v, vl);
-                val[vl] = '\0';
-            }
-            if (!p) return -1;
-            field(&a, key, val);
-            p = skip_ws(p, end);
-            if (p < end && *p == ',') p = skip_ws(p + 1, end);
+        if (p < end && *p == '"') {
+            p = parse_string(p, end, val, sizeof(val));
+        } else {
+            const char *v = p;
+            p = skip_value(p, end);
+            if (!p) return false;
+            size_t vl = (size_t)(p - v) < sizeof(val) - 1 ? (size_t)(p - v) : sizeof(val) - 1;
+            memcpy(val, v, vl);
+            val[vl] = '\0';
         }
-        if (p >= end) return -1;
-        p = skip_ws(p + 1, end);
-        if (a.id[0] && a.file[0] && n < max && !strchr(a.file, '/') && strstr(a.file, "..") == NULL) {
-            apps[n++] = a;
-        }
+        if (!p) return false;
+        field(&got, key, val);
+        p = skip_ws(p, end);
         if (p < end && *p == ',') p = skip_ws(p + 1, end);
     }
-    return n;
+    if (p >= end || strcmp(got.id, a->id) != 0 || !got.file[0] || strchr(got.file, '/') || strstr(got.file, "..")) {
+        return false;
+    }
+    memcpy(a->name, got.name, sizeof(a->name));
+    memcpy(a->version, got.version, sizeof(a->version));
+    memcpy(a->api, got.api, sizeof(a->api));
+    memcpy(a->ext, got.ext, sizeof(a->ext));
+    memcpy(a->file, got.file, sizeof(a->file));
+    memcpy(a->desc, got.desc, sizeof(a->desc));
+    a->size = got.size;
+    a->hash = got.hash;
+    return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -279,6 +288,11 @@ static void compare_installed(MarketApp *a) {
         char *meta = H->file_meta(a->path);
         meta_value(meta, "version", a->inst_version, sizeof(a->inst_version));
         if (!a->inst_version[0]) snprintf(a->inst_version, sizeof(a->inst_version), "?");
+        if (!a->name[0]) {
+            char name[48];
+            meta_value(meta, "name", name, sizeof(name));
+            copy_utf8(a->name, sizeof(a->name), name[0] ? name : a->id);
+        }
         free(meta);
     }
     /* a system app built into the firmware: installed as that copy unless the
@@ -301,6 +315,15 @@ static void compare_installed(MarketApp *a) {
             hash = mini_fnv1a(bdata, blen);
             snprintf(a->inst_version, sizeof(a->inst_version), "%s", bver[0] ? bver : "?");
         }
+        if (!a->name[0]) copy_utf8(a->name, sizeof(a->name), a->id);
+    }
+    if (!a->info) {                         /* its info is not read yet */
+        a->status = MINI_MARKET_CHECKING;
+        return;
+    }
+    if (!a->file[0]) {                      /* the market has no such app */
+        a->status = MINI_MARKET_ABSENT;
+        return;
     }
     char need[96];
     snprintf(need, sizeof(need), "[app]\napi = %s\nextensions = %s\n", a->api[0] ? a->api : "1.0", a->ext);
@@ -353,18 +376,15 @@ bool mini_market_use_installed(const char *id, const char *file_meta, const uint
     return true;
 }
 
-static void start_next(void);
+static void step(void);
 static void auto_refreshed(bool ok, int updates);
 static void auto_installed(void);
 
-bool mini_market_refresh(char *err, size_t cap) {
-    char url[200];
-    if (err && cap) err[0] = '\0';
+static bool busy(void) { return s_state == MINI_MARKET_REFRESHING || s_state == MINI_MARKET_INSTALLING; }
+
+/* The market URL now; false (with err) without one or without the network */
+static bool market_ready(char *err, size_t cap) {
     if (!H) { if (err) snprintf(err, cap, "market: not available"); return false; }
-    if (s_state == MINI_MARKET_REFRESHING || s_state == MINI_MARKET_INSTALLING) {
-        if (err) snprintf(err, cap, "market: busy");
-        return false;
-    }
     mini_market_url(s_base, sizeof(s_base));
     if (!s_base[0]) {
         if (err) snprintf(err, cap, "market: no market_url and no proxy in config.ini");
@@ -374,14 +394,98 @@ bool mini_market_refresh(char *err, size_t cap) {
         if (err) snprintf(err, cap, "market: not connected");
         return false;
     }
-    snprintf(url, sizeof(url), "%.159s/index.json", s_base);
-    if (!H->fetch_start(url, NULL, MARKET_INDEX_MAX)) {
-        if (err) snprintf(err, cap, "market: cannot fetch %.90s", url);
+    return true;
+}
+
+static int find_app(const char *id) {
+    for (int i = 0; i < s_count; i++) {
+        if (strcmp(s_apps[i].id, id) == 0) return i;
+    }
+    return -1;
+}
+
+/* An entry for id (its info still to read); -1 when memory is short */
+static int add_app(const char *id) {
+    if (s_count == s_cap) {
+        int cap = s_cap ? s_cap * 2 : 4;
+        MarketApp *a = (MarketApp *)realloc(s_apps, sizeof(MarketApp) * (size_t)cap);
+        if (!a) return -1;
+        s_apps = a;
+        s_cap = cap;
+    }
+    MarketApp *a = &s_apps[s_count];
+    memset(a, 0, sizeof(*a));
+    copy_utf8(a->id, sizeof(a->id), id);
+    compare_installed(a);
+    return s_count++;
+}
+
+/* The list to check: only (one app), or every app installed here */
+static bool load_list(const char *only, char *err, size_t cap) {
+    free(s_apps);
+    s_apps = NULL;
+    s_count = s_cap = 0;
+    if (only) return add_app(only) >= 0;
+    char (*ids)[MINI_MARKET_ID_MAX] = (char (*)[MINI_MARKET_ID_MAX])malloc(MINI_MARKET_ID_MAX * MINI_MARKET_MAX_LOCAL);
+    int n = ids && H->installed ? H->installed(ids, MINI_MARKET_MAX_LOCAL) : 0;
+    if (!ids) {
+        if (err) snprintf(err, cap, "market: out of memory");
         return false;
     }
+    for (int i = 0; i < n; i++) {
+        ids[i][MINI_MARKET_ID_MAX - 1] = '\0';
+        if (mini_app_id_ok(ids[i]) && find_app(ids[i]) < 0 && add_app(ids[i]) < 0) {
+            free(ids);
+            if (err) snprintf(err, cap, "market: out of memory");
+            return false;
+        }
+    }
+    free(ids);
+    return true;
+}
+
+/* Checks the list (only: one app, NULL: every installed one) */
+static bool start_check(const char *only, char *err, size_t cap) {
+    if (err && cap) err[0] = '\0';
+    if (busy()) {
+        if (err) snprintf(err, cap, "market: busy");
+        return false;
+    }
+    if (!market_ready(err, cap) || !load_list(only, err, cap)) return false;
+    s_checking = true;
+    s_installing = false;
+    s_absent = s_unread = 0;
+    s_unread_err[0] = '\0';
     s_state = MINI_MARKET_REFRESHING;
     s_recv = s_total = 0;
-    say("reading the market index");
+    say(only ? "checking the app" : "checking the installed apps");
+    step();
+    return true;
+}
+
+bool mini_market_refresh(char *err, size_t cap) {
+    s_then_updates = false;
+    return start_check(NULL, err, cap);
+}
+
+static int count_updates(void) {
+    int n = 0;
+    for (int i = 0; i < s_count; i++) n += s_apps[i].status == MINI_MARKET_UPDATE;
+    return n;
+}
+
+/* Queue one entry; false when it cannot be installed (err set) */
+static bool queue_app(MarketApp *a, char *err, size_t cap) {
+    if (a->status == MINI_MARKET_INCOMPATIBLE) {
+        if (err) snprintf(err, cap, "market: %s needs a newer firmware", a->id);
+        return false;
+    }
+    if (a->status == MINI_MARKET_ABSENT) {
+        if (err) snprintf(err, cap, "market: no app %s", a->id);
+        return false;
+    }
+    a->queued = true;
+    a->tries = 0;
     return true;
 }
 
@@ -391,77 +495,155 @@ int mini_market_install(const char *id, char *err, size_t cap) {
         if (err) snprintf(err, cap, "market: install and update apps in the system settings");
         return 0;
     }
-    if (!H || !s_apps || s_state == MINI_MARKET_REFRESHING) {
-        if (err) snprintf(err, cap, "market: refresh the list first");
+    if (s_state == MINI_MARKET_REFRESHING && s_checking) {
+        if (err) snprintf(err, cap, "market: busy");
         return 0;
     }
     int n = 0;
-    bool all = strcmp(id, "updates") == 0, known = false;
-    for (int i = 0; i < s_count; i++) {
-        MarketApp *a = &s_apps[i];
-        if (!all && strcmp(a->id, id) != 0) continue;
-        known = true;
-        if (a->status == MINI_MARKET_INCOMPATIBLE) continue;
-        if (all ? a->status == MINI_MARKET_UPDATE : true) {
-            if (!(s_queue & (1u << i)) && i != s_cur) n++;
-            s_queue |= 1u << i;
-            a->tries = 0;
+    if (strcmp(id, "updates") == 0) {
+        for (int i = 0; i < s_count; i++) {
+            MarketApp *a = &s_apps[i];
+            if (a->status == MINI_MARKET_UPDATE && !a->queued && i != s_cur && queue_app(a, NULL, 0)) n++;
+        }
+        if (n == 0 && err) snprintf(err, cap, s_count ? "market: no updates" : "market: refresh the list first");
+    } else {
+        if (!mini_app_id_ok(id)) {
+            if (err) snprintf(err, cap, "market: no app %s", id);
+            return 0;
+        }
+        if (!busy() && !market_ready(err, cap)) return 0;
+        int i = find_app(id);
+        if (i < 0) {                      /* not in the list: its info first, then the image */
+            i = add_app(id);
+            if (i < 0) {
+                if (err) snprintf(err, cap, "market: out of memory");
+                return 0;
+            }
+            s_apps[i].want = true;
+            n = 1;
+        } else if (!s_apps[i].info) {
+            s_apps[i].want = true;
+            n = 1;
+        } else if (s_apps[i].queued || i == s_cur) {
+            n = 1;
+        } else {
+            n = queue_app(&s_apps[i], err, cap) ? 1 : 0;
         }
     }
-    if (n == 0 && err) {
-        snprintf(err, cap, !known && !all ? "market: no app %s" : all ? "market: no updates" :
-                           "market: %s needs a newer firmware", id);
-    }
-    if (n > 0 && s_state != MINI_MARKET_INSTALLING) {
+    if (n > 0 && !busy()) {
         s_done = s_failed = 0;
-        start_next();
+        s_installing = true;
+        step();
+    } else if (n > 0) {
+        s_installing = true;
     }
     return n;
 }
 
+int mini_market_update_all(char *err, size_t cap) {
+    if (err && cap) err[0] = '\0';
+    if (H && H->install_here && !H->install_here()) {
+        if (!H->auto_update) {
+            if (err) snprintf(err, cap, "market: install and update apps in the system settings");
+            return 0;
+        }
+        say("update all: restarting into the settings");
+        H->auto_update();
+        return 2;
+    }
+    if (!start_check(NULL, err, cap)) return 0;
+    s_then_updates = true;
+    return 1;
+}
+
 void mini_market_cancel(void) {
     if (!H) return;
-    if (s_state == MINI_MARKET_REFRESHING || s_state == MINI_MARKET_INSTALLING) {
+    if (busy()) {
         H->fetch_cancel();
         if (s_state == MINI_MARKET_INSTALLING) H->file_remove(MINI_MARKET_TMP);
     }
-    s_queue = 0;
+    for (int i = 0; i < s_count; i++) s_apps[i].queued = s_apps[i].want = false;
     s_cur = -1;
+    s_checking = s_installing = s_then_updates = false;
     s_state = MINI_MARKET_IDLE;
     s_auto = MINI_MARKET_AUTO_OFF;
     s_auto_busy = false;
     say("cancelled");
 }
 
-static void start_next(void) {
+/* The next fetch: an info still to read, else a queued image; else the
+ * rounds that ran are over */
+static void step(void) {
+    char url[240], m[112];
     s_cur = -1;
     for (int i = 0; i < s_count; i++) {
-        if (s_queue & (1u << i)) { s_cur = i; break; }
+        MarketApp *a = &s_apps[i];
+        if (a->info) continue;
+        snprintf(url, sizeof(url), "%.159s/%.23s.info.json", s_base, a->id);
+        s_recv = s_total = 0;
+        if (!H->fetch_start(url, NULL, MARKET_INFO_MAX)) {
+            a->info = true;                 /* cannot start: counts as unread */
+            s_unread++;
+            snprintf(s_unread_err, sizeof(s_unread_err), "cannot fetch %.40s", url);
+            compare_installed(a);
+            continue;
+        }
+        s_cur = i;
+        s_cur_info = true;
+        s_state = MINI_MARKET_REFRESHING;
+        return;
     }
-    if (s_cur < 0) {   /* the queue is done */
-        char m[96];
-        snprintf(m, sizeof(m), "%d installed%s%s", s_done, s_failed ? ", failed: " : "", s_failed ? "see the log" : "");
+    if (s_checking) {                       /* every info is here */
+        s_checking = false;
+        int updates = count_updates();
+        bool none = s_count > 0 && s_unread == s_count;
+        if (none) {
+            snprintf(m, sizeof(m), "market: %.90s", s_unread_err[0] ? s_unread_err : "no app info could be read");
+        } else {
+            snprintf(m, sizeof(m), "%d apps, %d updates", s_count, updates);
+            if (s_absent) snprintf(m + strlen(m), sizeof(m) - strlen(m), ", %d not in the market", s_absent);
+        }
+        say(m);
+        s_state = none ? MINI_MARKET_ERROR : MINI_MARKET_IDLE;
+        if (!none && s_then_updates) {
+            s_then_updates = false;
+            char err[112];
+            if (mini_market_install("updates", err, sizeof(err)) <= 0) say(updates ? err : "no updates");
+            if (s_installing) return;       /* the install round has started (step ran) */
+        }
+        s_then_updates = false;
+        auto_refreshed(!none, updates);
+        if (busy()) return;
+    }
+    for (int i = 0; i < s_count; i++) {
+        MarketApp *a = &s_apps[i];
+        if (!a->queued) continue;
+        a->queued = false;
+        snprintf(url, sizeof(url), "%.159s/%.39s", s_base, a->file);
+        s_recv = 0;
+        s_total = a->size;
+        if (!H->fetch_start(url, MINI_MARKET_TMP, 0)) {
+            snprintf(m, sizeof(m), "%.23s: cannot fetch", a->id);
+            say(m);
+            s_failed++;
+            continue;
+        }
+        s_cur = i;
+        s_cur_info = false;
+        s_state = MINI_MARKET_INSTALLING;
+        snprintf(m, sizeof(m), "downloading %.23s", a->id);
+        say(m);
+        return;
+    }
+    if (s_installing) {                     /* the queue is done */
+        s_installing = false;
+        snprintf(m, sizeof(m), "%d installed%s", s_done, s_failed ? ", failed: see the log" : "");
         if (!s_failed) say(m);
         s_state = s_failed ? MINI_MARKET_ERROR : MINI_MARKET_IDLE;
         auto_installed();
         return;
     }
-    s_queue &= ~(1u << s_cur);
-    MarketApp *a = &s_apps[s_cur];
-    char url[240], m[96];
-    snprintf(url, sizeof(url), "%.159s/%.39s", s_base, a->file);
-    s_recv = 0;
-    s_total = a->size;
-    s_state = MINI_MARKET_INSTALLING;
-    if (!H->fetch_start(url, MINI_MARKET_TMP, 0)) {
-        snprintf(m, sizeof(m), "%.23s: cannot fetch", a->id);
-        say(m);
-        s_failed++;
-        start_next();
-        return;
-    }
-    snprintf(m, sizeof(m), "downloading %.23s", a->id);
-    say(m);
+    if (s_state != MINI_MARKET_ERROR) s_state = MINI_MARKET_IDLE;
 }
 
 /* the downloaded image: complete, unchanged, an app image this firmware runs */
@@ -490,48 +672,50 @@ static bool check_download(MarketApp *a, char *why, size_t cap) {
     return ok;
 }
 
+/* the info of s_cur arrived (r 1) or did not (r -1, err) */
+static void info_done(int r, const char *err) {
+    MarketApp *a = &s_apps[s_cur];
+    char m[112];
+    bool ok = false;
+    if (r > 0) {
+        size_t len = 0;
+        const char *data = H->fetch_data(&len);
+        ok = data && parse_info(data, len, a);
+    }
+    H->fetch_release();
+    a->info = true;
+    if (!ok) {
+        a->file[0] = '\0';
+        /* a 404 is an app the market does not have; anything else could not be read */
+        if (r > 0 || (err && strstr(err, "404"))) {
+            s_absent++;
+        } else {
+            s_unread++;
+            snprintf(s_unread_err, sizeof(s_unread_err), "%.60s", err ? err : "fetch failed");
+        }
+    }
+    compare_installed(a);
+    if (a->want) {
+        a->want = false;
+        if (!queue_app(a, m, sizeof(m))) {
+            if (!ok && r < 0 && !(err && strstr(err, "404"))) snprintf(m, sizeof(m), "%.23s: %.80s", a->id, err ? err : "fetch failed");
+            say(m);
+            s_failed++;
+        }
+    }
+}
+
 void mini_market_poll(void) {
-    if (!H || (s_state != MINI_MARKET_REFRESHING && s_state != MINI_MARKET_INSTALLING)) return;
+    if (!H || !busy() || s_cur < 0) return;
     const char *err = NULL;
     size_t total = 0;
     int r = H->fetch_poll(&s_recv, &total, &err);
     if (total) s_total = total;
     if (r == 0) return;
     char m[112];
-    if (s_state == MINI_MARKET_REFRESHING) {
-        if (r < 0) {
-            snprintf(m, sizeof(m), "market index: %.90s", err ? err : "fetch failed");
-            say(m);
-            s_state = MINI_MARKET_ERROR;
-            auto_refreshed(false, 0);
-            return;
-        }
-        size_t len = 0;
-        const char *data = H->fetch_data(&len);
-        MarketApp *apps = (MarketApp *)malloc(sizeof(MarketApp) * MARKET_MAX_APPS);
-        int n = (data && apps) ? parse_index(data, len, apps, MARKET_MAX_APPS) : -1;
-        H->fetch_release();
-        if (n < 0) {
-            free(apps);
-            say(apps ? "market index: not an app index" : "market: out of memory");
-            s_state = MINI_MARKET_ERROR;
-            auto_refreshed(false, 0);
-            return;
-        }
-        free(s_apps);
-        s_apps = n ? (MarketApp *)realloc(apps, sizeof(MarketApp) * (size_t)n) : apps;
-        if (!s_apps) s_apps = apps;
-        s_count = n;
-        s_queue = 0;
-        int updates = 0;
-        for (int i = 0; i < n; i++) {
-            compare_installed(&s_apps[i]);
-            if (s_apps[i].status == MINI_MARKET_UPDATE) updates++;
-        }
-        snprintf(m, sizeof(m), "%d apps, %d updates", n, updates);
-        say(m);
-        s_state = MINI_MARKET_IDLE;
-        auto_refreshed(true, updates);
+    if (s_cur_info) {
+        info_done(r, err);
+        step();
         return;
     }
     /* installing s_cur: a failed download or check is tried once more (the
@@ -548,7 +732,7 @@ void mini_market_poll(void) {
         H->file_remove(MINI_MARKET_TMP);
         say(m);
         if (a->tries++ == 0) {
-            s_queue |= 1u << s_cur;   /* again, before the next one */
+            a->queued = true;         /* again, before the next one */
         } else {
             s_failed++;
         }
@@ -564,15 +748,15 @@ void mini_market_poll(void) {
         snprintf(m, sizeof(m), "%.23s %.11s installed", a->id, a->version);
         say(m);
     }
-    start_next();
+    /* a queued app first (a retry), in list order */
+    step();
 }
 
 void mini_market_release(void) {
-    if (s_state == MINI_MARKET_REFRESHING || s_state == MINI_MARKET_INSTALLING) return;
+    if (busy()) return;
     free(s_apps);
     s_apps = NULL;
-    s_count = 0;
-    s_queue = 0;
+    s_count = s_cap = 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -599,12 +783,14 @@ static void auto_end(const char *msg) {
     s_auto_busy = false;
 }
 
-void mini_market_auto_start(MiniMarketAuto mode) {
+void mini_market_auto_start(MiniMarketAuto mode, const char *app_id) {
     s_auto = mode;
     s_auto_busy = false;
     s_auto_t0_set = false;
     s_return = false;
-    if (mode == MINI_MARKET_AUTO_CHECK && !auto_enabled()) s_auto = MINI_MARKET_AUTO_OFF;
+    copy_utf8(s_auto_app, sizeof(s_auto_app), app_id ? app_id : "");
+    /* a boot check looks at the running app alone, and only one the market keeps */
+    if (mode == MINI_MARKET_AUTO_CHECK && (!auto_enabled() || !mini_app_id_ok(s_auto_app))) s_auto = MINI_MARKET_AUTO_OFF;
     if (s_auto == MINI_MARKET_AUTO_UPDATE) say("auto update: waiting for the network");
 }
 
@@ -624,18 +810,19 @@ void mini_market_auto(uint32_t now_ms) {
         return;
     }
     char err[112];
-    if (s_state == MINI_MARKET_REFRESHING) {   /* someone else's refresh: use it */
+    if (s_state == MINI_MARKET_REFRESHING && s_checking) {   /* someone else's check: use it */
         s_auto_busy = true;
         return;
     }
-    if (!mini_market_refresh(err, sizeof(err))) {
+    s_then_updates = false;
+    s_auto_busy = true;           /* before: a check that ends at once reports to this round */
+    if (!start_check(s_auto == MINI_MARKET_AUTO_CHECK ? s_auto_app : NULL, err, sizeof(err))) {
+        s_auto_busy = false;
         auto_end(err);
-        return;
     }
-    s_auto_busy = true;
 }
 
-/* the index of the round arrived (ok) or did not */
+/* the check of the round ended: the infos arrived (ok) or none could be read */
 static void auto_refreshed(bool ok, int updates) {
     if (s_auto == MINI_MARKET_AUTO_OFF || !s_auto_busy) return;
     char m[112];
@@ -649,7 +836,7 @@ static void auto_refreshed(bool ok, int updates) {
             auto_end("no updates");
             return;
         }
-        snprintf(m, sizeof(m), "auto update: %d updates, restarting into the settings", updates);
+        snprintf(m, sizeof(m), "auto update: %.23s has an update, restarting into the settings", s_auto_app);
         s_auto = MINI_MARKET_AUTO_OFF;
         s_auto_busy = false;
         if (H->auto_update) {
@@ -680,7 +867,7 @@ const char *mini_market_message(void) { return s_msg; }
 /* ------------------------------------------------------------------------- */
 
 static const char *const STATE_NAMES[] = { "idle", "refreshing", "installing", "error" };
-static const char *const STATUS_NAMES[] = { "new", "installed", "update", "incompatible" };
+static const char *const STATUS_NAMES[] = { "new", "installed", "update", "incompatible", "checking", "absent" };
 
 static void json_str(char *out, size_t cap, size_t *n, const char *s) {
     if (*n + 1 < cap) out[(*n)++] = '"';
@@ -709,8 +896,9 @@ size_t mini_market_json(char *out, size_t cap) {
     json_str(out, cap, &n, url);
     JSON_PUT(",\"current\":");
     if (s_state == MINI_MARKET_INSTALLING && s_cur >= 0) json_str(out, cap, &n, s_apps[s_cur].id); else JSON_PUT("null");
+    JSON_PUT(",\"checking\":%s", s_checking ? "true" : "false");
     int queued = 0;
-    for (int i = 0; i < s_count; i++) queued += (s_queue >> i) & 1;
+    for (int i = 0; i < s_count; i++) queued += s_apps[i].queued;
     static const char *const AUTO_NAMES[] = { "off", "check", "update" };
     JSON_PUT(",\"received\":%u,\"total\":%u,\"queued\":%d,\"install\":%s,\"auto\":\"%s\",\"return\":%s,\"apps\":[",
              (unsigned)s_recv, (unsigned)s_total, queued, (!H || !H->install_here || H->install_here()) ? "true" : "false",
@@ -730,7 +918,7 @@ size_t mini_market_json(char *out, size_t cap) {
         JSON_PUT(",\"api\":");
         json_str(out, cap, &n, a->api);
         JSON_PUT(",\"size\":%u,\"status\":\"%s\",\"queued\":%s}", (unsigned)a->size, STATUS_NAMES[a->status],
-                 ((s_queue >> i) & 1) || i == s_cur ? "true" : "false");
+                 a->queued || a->want || (i == s_cur && !s_cur_info) ? "true" : "false");
     }
     JSON_PUT("]}");
     if (n >= cap) n = cap - 1;
@@ -756,7 +944,7 @@ static Value cons_pair(MiniVM *vm, const char *key, Value v, Value tail) {
     return res;
 }
 
-/* (market-refresh) => #t when started, else a string saying why */
+/* (market-refresh) => #t when the check of the installed apps started, else a string saying why */
 static Value prim_market_refresh(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
     char err[112];
@@ -791,7 +979,7 @@ static Value prim_market_status(MiniVM *vm, int argc, Value *argv) {
     mini_market_poll();
     mini_market_url(url, sizeof(url));
     int queued = 0;
-    for (int i = 0; i < s_count; i++) queued += (s_queue >> i) & 1;
+    for (int i = 0; i < s_count; i++) queued += s_apps[i].queued;
     Value l = mini_nil(), v = mini_void();
     mini_push_root(vm, &l);
     mini_push_root(vm, &v);
@@ -815,7 +1003,8 @@ static Value prim_market_status(MiniVM *vm, int argc, Value *argv) {
     return l;
 }
 
-/* (market-apps) => ((id name version installed-version status size description) ...) */
+/* (market-apps) => ((id name version installed-version status size description) ...): the installed
+ * apps of the last check (status checking until its info is read, absent when the market lacks it) */
 static Value prim_market_apps(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
     mini_market_poll();

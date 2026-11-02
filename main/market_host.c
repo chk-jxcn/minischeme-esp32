@@ -16,6 +16,7 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -247,10 +248,37 @@ static const uint8_t *host_builtin(const char *id, size_t *len) {
     return s_builtin ? s_builtin(id, len) : NULL;
 }
 
+/* The apps the market keeps here: the folders /spiffs/apps/<id>/ with an
+ * app.msbc, the root app (/spiffs/app.msbc, by the id in its metadata) and
+ * the system settings built into the firmware */
+static int host_installed(char (*ids)[MINI_MARKET_ID_MAX], int max) {
+    int n = 0;
+    size_t blen = 0;
+    if (n < max && host_builtin("settings", &blen)) snprintf(ids[n++], MINI_MARKET_ID_MAX, "settings");
+    char *meta = host_file_meta("/spiffs/app.msbc");
+    char id[MINI_MARKET_ID_MAX] = "";
+    if (meta && mini_device_config_value(meta, "id", id, sizeof(id)) && id[0] && n < max) {
+        snprintf(ids[n++], MINI_MARKET_ID_MAX, "%s", id);
+    }
+    free(meta);
+    DIR *dir = opendir("/spiffs/apps");
+    for (struct dirent *de = dir ? readdir(dir) : NULL; de && n < max; de = readdir(dir)) {
+        char path[96];
+        if (strlen(de->d_name) >= MINI_MARKET_ID_MAX || !mini_app_id_ok(de->d_name)) continue;
+        snprintf(path, sizeof(path), "/spiffs/apps/%s/app.msbc", de->d_name);
+        FILE *fp = fopen(path, "rb");
+        if (!fp) continue;
+        fclose(fp);
+        snprintf(ids[n++], MINI_MARKET_ID_MAX, "%s", de->d_name);
+    }
+    if (dir) closedir(dir);
+    return n;
+}
+
 static const MiniMarketHost HOST = {
     host_fetch_start, host_fetch_poll, host_fetch_data, host_fetch_release, host_fetch_cancel,
     host_file_hash, host_file_meta, host_file_replace, host_file_remove, host_config, host_online, host_log,
-    host_install_here, host_auto_update, host_builtin,
+    host_install_here, host_auto_update, host_builtin, host_installed,
 };
 
 void market_host_init(void) { mini_market_set_host(&HOST); }

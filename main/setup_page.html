@@ -74,8 +74,10 @@ h2 button.small{margin-top:-4px}
 <div id="mmode" class="desc"></div>
 </section>
 <section>
-<h2>应用市场 <button class="plain small" onclick="market('refresh')">刷新</button></h2>
+<h2>应用市场 <button class="plain small" onclick="readMarket()">刷新</button></h2>
+<div class="desc">这个网页直接读取市场的应用列表、比较版本；设备只读取自己已安装应用的信息，市场再大也不占设备内存。</div>
 <div id="mstate" class="desc">点“刷新”读取市场</div>
+<input id="msearch" placeholder="搜索应用（名称、说明、id）" oninput="showMarket()" style="display:none">
 <div id="mlist"></div>
 </section>
 <section>
@@ -469,7 +471,7 @@ function showTab(which) {
   if (which === 'app' && !$('appframe').src) $('appframe').src = appPageUrl($('apppick').value);
   if (!loaded[which]) {
     loaded[which] = true;
-    if (which === 'manage') loadApps().then(() => market());
+    if (which === 'manage') loadApps().then(readMarket);
     if (which === 'config') loadApps();
     if (which === 'system') loadApps().then(loadAllConfig).then(() => loadText('/spiffs/config.ini', 'cfg'));
     if (which === 'info') loadHardware();
@@ -582,52 +584,146 @@ async function waitForMode(settings, since = Date.now()) {
   return waitForMode(settings, since);
 }
 
-/* ---- the app market (the board's engine: GET / POST /api/market) ---- */
+/* ---- the app market: this page reads its index.json (any size: the board never does) and
+ * compares it with the installed apps; installs and updates run on the board (/api/market),
+ * which reads only the <id>.info.json of the apps it handles ---- */
 const MARKET_STATUS = {new: ['未安装', 'muted'], installed: ['已安装', 'ok'], update: ['有更新', 'warn'],
                        incompatible: ['需新固件', 'bad']};
-let marketTimer = 0;
-function showMarket(m) {
-  marketApps = m.apps || [];
+let marketTimer = 0, marketIndex = null, marketUrl = '', marketErr = '', fwApi = '', fwExt = [], dev = {};
+
+/* "1.10" > "1.9"; missing parts are 0 (as the board's version_cmp) */
+function verCmp(a, b) {
+  const x = String(a || '').split('.'), y = String(b || '').split('.');
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (parseInt(x[i], 10) || 0) - (parseInt(y[i], 10) || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/* the market's apps, each compared with the installed copy (not an uploaded one) */
+function compareMarket() {
+  const fwMinor = String(fwApi).split('.').slice(0, 2).join('.');
+  marketApps = (marketIndex || []).map(m => {
+    const local = apps.find(a => a.id === m.id && a.source !== 'user');
+    const exts = String(m.extensions || '').split(',').map(e => e.trim()).filter(Boolean);
+    const fits = (!fwApi || verCmp(m.api || '1.0', fwMinor) <= 0) && exts.every(e => fwExt.includes(e));
+    const status = !fits ? 'incompatible' : !local ? 'new'
+      : verCmp(m.version, local.version) > 0 || (verCmp(m.version, local.version) === 0 && m.size && local.size && m.size !== local.size)
+        ? 'update' : 'installed';
+    return Object.assign({}, m, {status, installed: local ? local.version : ''});
+  });
+}
+
+async function readMarket() {
+  $('mstate').textContent = '正在读取市场…';
+  try {
+    if (!fwApi) {
+      const i = await api('/api/info');
+      fwApi = i.api || '';
+      fwExt = i.api_extensions || [];
+    }
+    dev = await api('/api/market');
+    marketUrl = dev.url || '';
+    if (!marketUrl) throw new Error('没有设置市场地址（应用代理或 market_url）');
+    const r = await fetch(marketUrl + '/index.json', {cache: 'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const idx = await r.json();
+    marketIndex = Array.isArray(idx) ? idx : (idx.apps || []);
+    marketErr = '';
+  } catch (e) {
+    marketErr = `浏览器读不到市场 ${marketUrl}/index.json：${e.message}`;
+  }
+  showMarket();
+}
+
+function showMarket() {
+  compareMarket();
+  const m = dev || {};
   const busy = m.state === 'refreshing' || m.state === 'installing';
   const can = m.install !== false;          /* installs only in the system settings */
-  const updates = marketApps.filter(a => a.status === 'update').length;
-  let line = m.state === 'refreshing' ? '正在读取市场…'
+  const updates = marketApps.filter(a => a.status === 'update');
+  const q = ($('msearch').value || '').trim().toLowerCase();
+  const shown = q ? marketApps.filter(a => [a.id, a.name, a.description].some(t => String(t || '').toLowerCase().includes(q)))
+                  : marketApps;
+  let line = m.state === 'refreshing' ? (m.checking ? '设备正在检查已安装的应用…' : `正在读取 ${esc(m.current || '')} 的信息…`)
     : m.state === 'installing' ? `正在安装 ${esc(m.current || '')}：${m.total ? Math.floor(m.received * 100 / m.total) + '%' : kb(m.received)}` +
                                  (m.queued ? `，还有 ${m.queued} 个排队` : '')
     : m.state === 'error' ? `<span class="bad">失败：${esc(m.message)}</span>`
-    : marketApps.length ? `${marketApps.length} 个应用，${updates} 个有更新` + (m.message ? `（${esc(m.message)}）` : '')
+    : marketErr ? `<span class="bad">${esc(marketErr)}</span>`
+    : marketIndex ? `市场有 ${marketApps.length} 个应用，已安装的有 ${updates.length} 个可更新` + (q ? `；搜到 ${shown.length} 个` : '')
     : '点“刷新”读取市场';
   if (m.error) line += ` <span class="bad">${esc(m.error)}</span>`;
-  if (m.auto === 'update') line = '<span class="warn">自动更新中，完成后设备自动返回应用</span><br>' + line;
-  else if (m['return']) line = '<span class="ok">自动更新结束，设备正在返回应用…</span><br>' + line;
-  $('mstate').innerHTML = `${line}<br>市场：${esc(m.url || '未设置（填写应用代理或市场地址）')}` +
-    (updates && !busy && can ? ` <button class="plain small" onclick="market('install','updates')">全部更新</button>` : '') +
-    (busy ? ` <button class="plain small" onclick="market('cancel')">取消</button>` : '');
-  $('mlist').innerHTML = marketApps.map(a => {
+  if (m.auto === 'update') line = '<span class="warn">正在更新应用，完成后设备自动返回应用</span><br>' + line;
+  else if (m['return']) line = '<span class="ok">更新结束，设备正在返回应用…</span><br>' + line;
+  $('mstate').innerHTML = `${line}<br>市场：${esc(m.url || marketUrl || '未设置（填写应用代理或市场地址）')}` +
+    (updates.length && !busy ? ` <button class="small" onclick="updateAll()">全部更新（${updates.length}）</button>` : '') +
+    (busy ? ` <button class="plain small" onclick="market('cancel')">取消</button>` : '') +
+    (marketIndex && !can ? '<br>安装新应用、单独更新请先进入设置模式；“全部更新”会自动进入设置模式，更新完回到应用。' : '');
+  $('msearch').style.display = marketIndex ? '' : 'none';
+  $('mlist').innerHTML = shown.map(a => {
     const [label, cls] = MARKET_STATUS[a.status] || ['', ''];
     const act = a.status === 'incompatible' || busy || !can ? ''
       : `<button class="plain small" onclick="market('install','${esc(a.id)}')">${a.status === 'update' ? '更新' : a.status === 'installed' ? '重新安装' : '安装'}</button>`;
     const prog = m.state === 'installing' && m.current === a.id ? bar(m.received, m.total) : '';
+    const queued = (m.apps || []).some(d => d.id === a.id && d.queued) && !(m.state === 'installing' && m.current === a.id);
     return `<div class="app"><div class="name">${esc(a.name)} <span class="tag ${cls}">${label}</span>${act}</div>
       <div class="desc">${esc(a.description)}</div>
       <div class="desc">v${esc(a.version)}${a.installed && a.installed !== a.version ? '（已装 v' + esc(a.installed) + '）' : ''} · ${kb(a.size)} · API ${esc(a.api)}</div>
-      ${prog}${a.queued && !(m.state === 'installing' && m.current === a.id) ? '<div class="desc">排队中</div>' : ''}</div>`;
+      ${prog}${queued ? '<div class="desc">排队中</div>' : ''}</div>`;
   }).join('');
-  clearTimeout(marketTimer);
-  if (busy) marketTimer = setTimeout(() => market(), 700);
-  else if (m.wasBusy) { loadApps(); say(m.state === 'error' ? '有应用未能安装' : '已完成：退出设置模式后运行新版本', m.state === 'error' ? 'bad' : 'ok'); }
   showInstalled();
 }
 
+/* the board's market state (progress); after a round the installed apps are read again */
 let marketBusy = false;
 async function market(action, id) {
   try {
     const m = action ? await api('/api/market?action=' + action + (id ? '&id=' + encodeURIComponent(id) : ''), {method: 'POST'})
                      : await api('/api/market');
-    m.wasBusy = marketBusy && !(m.state === 'refreshing' || m.state === 'installing');
+    const wasBusy = marketBusy && !(m.state === 'refreshing' || m.state === 'installing');
     marketBusy = m.state === 'refreshing' || m.state === 'installing';
-    showMarket(m);
+    dev = m;
+    if (!marketUrl) marketUrl = m.url || '';
+    clearTimeout(marketTimer);
+    if (marketBusy) marketTimer = setTimeout(() => market(), 700);
+    if (wasBusy) {
+      await loadApps();
+      say(m.state === 'error' ? '有应用未能安装' : '已完成：退出设置模式后运行新版本', m.state === 'error' ? 'bad' : 'ok');
+    }
+    showMarket();
   } catch (e) { say(e.message, 'bad'); }
+}
+
+/* 全部更新: in the settings the board checks and updates now; while an app runs it restarts
+ * into the settings for the round, which returns to the app (followed here) */
+async function updateAll() {
+  try {
+    const m = await api('/api/market?action=update-all', {method: 'POST'});
+    if (m.error) return say(m.error, 'bad');
+    if (state.settings_mode) return market();
+    say('设备正在重启进入设置模式更新应用，完成后自动回到应用', 'ok');
+    followUpdate(Date.now(), false);
+  } catch (e) { say(e.message, 'bad'); }
+}
+
+async function followUpdate(since, seenSettings) {
+  await new Promise(r => setTimeout(r, 1500));
+  if (Date.now() - since > 600000) return say('设备没有回来：请查看屏幕', 'bad');
+  let s = null, m = null;
+  try { s = await api('/api/settings'); } catch (e) { /* restarting */ }
+  if (s && s.success !== false && s.settings_mode) {
+    try { m = await api('/api/market'); } catch (e) { /* — */ }
+    if (m) { dev = m; showMarket(); }
+    return followUpdate(since, true);
+  }
+  if (s && s.success !== false && seenSettings) {     /* back in the app */
+    await refresh();
+    await loadApps();
+    await readMarket();
+    return say('应用已更新，设备已回到应用', 'ok');
+  }
+  return followUpdate(since, seenSettings);
 }
 
 /* ---- installed apps (GET /api/apps: no metadata; it comes per app) ---- */
