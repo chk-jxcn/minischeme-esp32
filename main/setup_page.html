@@ -14,6 +14,7 @@ section{background:var(--card);border:1px solid var(--line);border-radius:10px;p
 label{display:block;color:var(--muted);font-size:13px;margin:8px 0 3px}
 input,select,textarea{width:100%;min-height:38px;padding:7px 10px;border-radius:6px;border:1px solid var(--line);background:#0e151e;color:var(--text);font:inherit}
 input[type=checkbox]{width:auto;min-height:0;margin:0 6px 0 0;vertical-align:middle}
+.pagerow{display:flex;align-items:center;gap:6px;margin:4px 0}.pagerow span{flex:1}.pagerow select{flex:1;width:auto}
 input[type=file]{padding:6px 10px}
 textarea{font:13px/1.45 ui-monospace,Consolas,monospace;min-height:150px}
 button{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 14px;border-radius:6px;border:1px solid var(--accent);background:#173f52;color:var(--text);font:inherit;line-height:1.2;white-space:nowrap;cursor:pointer;margin:10px 8px 0 0;vertical-align:middle}
@@ -408,15 +409,51 @@ function iniSet(text, section, key, value) {
 
 /* The app's settings: [config] keys in order, shown as [fields] describes
  * them ("type | label | help"; types text, number:min-max, bool,
- * select:value=label,...) */
+ * select:value=label,..., pages: the app's pages from [app] page_ids and
+ * page_names, in an order of the user's, a page possibly several times) */
 function appFields(meta) {
-  const ini = parseIni(meta), desc = {};
+  const ini = parseIni(meta), desc = {}, app = {};
+  for (const it of ini.app || []) app[it.key] = it.value;
+  const list = k => String(app[k] || '').split(',').map(x => x.trim()).filter(Boolean);
+  const ids = list('page_ids'), names = list('page_names');
   for (const f of ini.fields || []) {
     const [type, label, help] = (f.value + '||').split('|').map(x => x.trim());
     desc[f.key] = {type: type || 'text', label, help};
+    if (type === 'pages') desc[f.key].pages = ids.map((id, i) => ({id, name: names[i] || id}));
   }
   return (ini.config || []).map(c => Object.assign({key: c.key, def: c.value, type: 'text', label: c.key, help: c.comment},
                                                    desc[c.key] || {}));
+}
+
+/* the pages field: the value (page ids, comma separated) in a hidden input, edited as a list */
+const pageFields = {};
+function pagesOf(id) { return String($(id).value || '').split(',').map(x => x.trim()).filter(Boolean); }
+function pageLabel(pages, s) {
+  const p = pages.find(x => x.id === s) || (/^\d+$/.test(s) ? pages[Number(s) - 1] : null) || pages.find(x => x.name === s);
+  return p ? p.name : s + '（未知页面）';
+}
+function pagesList(id) {
+  const pages = pageFields[id], list = pagesOf(id);
+  const rows = list.map((s, i) => `<div class="pagerow"><span>${i + 1}. ${esc(pageLabel(pages, s))}</span>
+    <button class="plain small" onclick="pagesEdit('${id}','up',${i})"${i ? '' : ' disabled'}>上移</button>
+    <button class="plain small" onclick="pagesEdit('${id}','down',${i})"${i < list.length - 1 ? '' : ' disabled'}>下移</button>
+    <button class="plain small" onclick="pagesEdit('${id}','del',${i})">删除</button></div>`).join('');
+  return (rows || '<div class="help">（全部页面，按应用自己的顺序）</div>') +
+    `<div class="pagerow"><select id="${id}_add">${pages.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select>
+    <button class="plain small" onclick="pagesEdit('${id}','add')">添加</button>
+    ${list.length ? `<button class="plain small" onclick="pagesEdit('${id}','clear')">恢复全部</button>` : ''}</div>`;
+}
+function pagesEdit(id, op, i) {
+  const list = pagesOf(id);
+  if (op === 'add') list.push($(id + '_add').value);
+  else if (op === 'del') list.splice(i, 1);
+  else if (op === 'clear') list.length = 0;
+  else {
+    const j = op === 'up' ? i - 1 : i + 1;
+    if (j >= 0 && j < list.length) [list[i], list[j]] = [list[j], list[i]];
+  }
+  $(id).value = list.join(', ');
+  $(id + '_list').innerHTML = pagesList(id);
 }
 
 function fieldHtml(p, f, value) {
@@ -424,6 +461,12 @@ function fieldHtml(p, f, value) {
   if (f.type === 'bool') {
     return `<label><input type="checkbox" id="${id}"${on(value) ? ' checked' : ''}>${esc(f.label)}</label>` +
       (f.help ? `<div class="help">${esc(f.help)}</div>` : '');
+  }
+  if (f.type === 'pages' && (f.pages || []).length) {
+    pageFields[id] = f.pages;
+    setTimeout(() => { if ($(id + '_list')) $(id + '_list').innerHTML = pagesList(id); });
+    return `<label>${esc(f.label)}</label><input type="hidden" id="${id}" value="${esc(value)}"><div id="${id}_list"></div>` +
+      (f.help ? `<div class="help">${esc(f.help.replace(/。直接填写.*$/, ''))}</div>` : '');
   }
   let input;
   if (f.type.startsWith('select:')) {
