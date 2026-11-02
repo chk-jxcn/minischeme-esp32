@@ -233,11 +233,11 @@ h2 button.small{margin-top:-4px}
 <div><label for="th_scope">编辑</label><select id="th_scope" onchange="themeLoadCss()"></select></div>
 </div>
 <textarea id="th_css" spellcheck="false" style="min-height:260px" oninput="themePreview()"></textarea>
-<div class="desc">每块是一套配色：<b>day</b>、<b>night</b>、自己起名的（如 sakura，可在上面选为白天或黑夜用的配色），<b>*</b> 对所有配色生效。块里写 <code>别名: 颜色;</code>，颜色是 #rgb、#rrggbb、rgb(r, g, b) 或另一个别名，也可以起自己的别名再引用。
+<div class="desc">每块是一套配色：<b>day</b>、<b>night</b>、自己起名的（如 my_theme，可在上面选为白天或黑夜用的配色），<b>*</b> 对所有配色生效。另有内置配色（高对比、多巴胺、莫兰迪、深海、复古琥珀、樱花），在上面选为白天或黑夜用的配色即可（应用用 applib 1.2 以上编译，市场里的应用会自动更新）；要改其中的颜色，写一个同名的块，只写要改的别名（点下面预览里的颜色就会这样写）。块里写 <code>别名: 颜色;</code>，颜色是 #rgb、#rrggbb、rgb(r, g, b) 或另一个别名，也可以起自己的别名再引用。
 查找顺序：程序里直接给的颜色 → 应用目录的 theme.css → 系统的 theme.css → 应用自带的默认值 → 内置的白天 / 黑夜配色；都没写的别名用它最后一段的大类（titlebar_bg → bg，text_sub_fg → fg，card_border → border）。</div>
 <button onclick="themeSaveCss()">保存</button>
-<button class="plain" onclick="themeInsert('day')">插入内置白天配色</button>
-<button class="plain" onclick="themeInsert('night')">插入内置黑夜配色</button>
+<select id="th_insert" style="width:auto"></select>
+<button class="plain" onclick="themeInsert($('th_insert').value)">插入内置配色</button>
 <button class="plain" onclick="themeLoadCss()">重新读取</button>
 <h3>预览（系统和所选应用的 theme.css 加内置配色；应用自带的默认值不在这里）</h3>
 <div class="desc">点任意一个颜色可以用调色盘修改：改动写进上面编辑的配色文件里对应的块（白天或黑夜用的配色），点“保存”后生效。</div>
@@ -1200,6 +1200,20 @@ const THEME_BUILTIN = {
     success_fg: '#1d7f45', warning_fg: '#b8700a', danger_fg: '#bf3434', purple_fg: '#6c49b0', inactive_fg: '#c4cdd8',
     divider_border: '#a3b0bf', seg_on_fg: '#000000', seg_off_fg: 'bg', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}
 };
+/* More built-in schemes, as apps/lib/gui.scm THEME-PRESETS (applib 1.2: in every app image, no
+ * heap): listed beside day and night and previewed; a dark one fills in from night. A block of
+ * the same name in theme.css overrides single colors. Keep in step with gui.scm and
+ * minischeme-webrepl js/app_web.js AW_THEME_PRESETS. */
+const THEME_PRESETS = {
+  hc_dark: {label: '高对比·深色', dark: true, colors: {bg: '#000000', fg: '#ffffff', border: '#ffffff', card_bg: 'bg', card_border: '#ffffff', titlebar_bg: '#262626', text_fg: '#ffffff', text_sub_fg: '#f0f0f0', text_muted_fg: '#d6d6d6', accent_fg: '#00e5ff', accent_bg: '#003c47', success_fg: '#33ff77', warning_fg: '#ffd400', danger_fg: '#ff5c5c', purple_fg: '#e0a3ff', inactive_fg: '#4d4d4d', divider_border: '#bfbfbf', seg_on_fg: '#ffffff', seg_off_fg: '#1a1a1a', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}},
+  hc_light: {label: '高对比·浅色', dark: false, colors: {bg: '#ffffff', fg: '#000000', border: '#000000', card_bg: 'bg', card_border: '#000000', titlebar_bg: '#e0e0e0', text_fg: '#000000', text_sub_fg: '#1a1a1a', text_muted_fg: '#333333', accent_fg: '#0040a8', accent_bg: '#cfe0ff', success_fg: '#00632a', warning_fg: '#7a4a00', danger_fg: '#a80000', purple_fg: '#5214a0', inactive_fg: '#b3b3b3', divider_border: '#404040', seg_on_fg: '#000000', seg_off_fg: 'bg', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}},
+  dopamine: {label: '多巴胺·浅色', dark: false, colors: {bg: '#fff8e7', fg: '#2b1b47', border: '#ff5fa2', card_bg: 'bg', card_border: '#ff5fa2', titlebar_bg: '#ffd23f', text_fg: '#2b1b47', text_sub_fg: '#45306b', text_muted_fg: '#5f4a85', accent_fg: '#d81b60', accent_bg: '#ffd6e7', success_fg: '#00875a', warning_fg: '#c25e00', danger_fg: '#d0021b', purple_fg: '#7b2ff7', inactive_fg: '#f2dfc0', divider_border: '#b58cff', seg_on_fg: '#d81b60', seg_off_fg: 'bg', bar_fg: '#00a3b8', bar_bg: '#ffe9a8', icon_fg: '#7b2ff7'}},
+  dopamine_dark: {label: '多巴胺·深色', dark: true, colors: {bg: '#1a0f2e', fg: '#fff3fb', border: '#ff4fd8', card_bg: 'bg', card_border: '#ff4fd8', titlebar_bg: '#2f1754', text_fg: '#fff3fb', text_sub_fg: '#e6d6ff', text_muted_fg: '#c2aee6', accent_fg: '#00f0ff', accent_bg: '#40206e', success_fg: '#39ff88', warning_fg: '#ffd23f', danger_fg: '#ff5c7a', purple_fg: '#d08cff', inactive_fg: '#3a2a55', divider_border: '#9a78d9', seg_on_fg: '#ff4fd8', seg_off_fg: '#2a1640', bar_fg: '#ffd23f', bar_bg: 'titlebar_bg', icon_fg: '#00f0ff'}},
+  morandi: {label: '莫兰迪', dark: false, colors: {bg: '#eeeae4', fg: '#3a3632', border: '#a89c8f', card_bg: 'bg', card_border: '#a89c8f', titlebar_bg: '#d9d0c5', text_fg: '#3a3632', text_sub_fg: '#4f4a43', text_muted_fg: '#655e55', accent_fg: '#466168', accent_bg: '#cfdadc', success_fg: '#4a6b4d', warning_fg: '#80602b', danger_fg: '#8f453f', purple_fg: '#6c5a7a', inactive_fg: '#d4ccc2', divider_border: '#a69a8d', seg_on_fg: '#3e4a4e', seg_off_fg: 'bg', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}},
+  ocean: {label: '深海', dark: true, colors: {bg: '#031926', fg: '#d9f2ff', border: '#2f6f8f', card_bg: 'bg', card_border: '#2f6f8f', titlebar_bg: '#072b40', text_fg: '#d9f2ff', text_sub_fg: '#a9d3e8', text_muted_fg: '#86b8d0', accent_fg: '#4fd1e8', accent_bg: '#0c4a63', success_fg: '#5be3a8', warning_fg: '#ffc857', danger_fg: '#ff8080', purple_fg: '#b9a3ff', inactive_fg: '#12384d', divider_border: '#3f84a6', seg_on_fg: '#4fd1e8', seg_off_fg: '#062635', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}},
+  retro: {label: '复古琥珀', dark: true, colors: {bg: '#0a0700', fg: '#ffb000', border: '#8a5f00', card_bg: 'bg', card_border: '#8a5f00', titlebar_bg: '#241900', text_fg: '#ffb000', text_sub_fg: '#e89e00', text_muted_fg: '#c48600', accent_fg: '#ffd36b', accent_bg: '#3d2a00', success_fg: '#a6f05a', warning_fg: '#ffd36b', danger_fg: '#ff6a45', purple_fg: '#ffa8c8', inactive_fg: '#2e2100', divider_border: '#8a5f00', seg_on_fg: '#ffb000', seg_off_fg: '#2a1d00', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}},
+  sakura: {label: '樱花', dark: false, colors: {bg: '#fff4f6', fg: '#4a2c35', border: '#e39ab0', card_bg: 'bg', card_border: '#e39ab0', titlebar_bg: '#ffd9e3', text_fg: '#4a2c35', text_sub_fg: '#62404b', text_muted_fg: '#7d5a66', accent_fg: '#b8325e', accent_bg: '#ffd1df', success_fg: '#2f7a52', warning_fg: '#9a5a10', danger_fg: '#b5232f', purple_fg: '#7a45a8', inactive_fg: '#f2d4dc', divider_border: '#d29aab', seg_on_fg: '#b8325e', seg_off_fg: 'bg', bar_fg: 'accent_fg', bar_bg: 'titlebar_bg', icon_fg: 'accent_fg'}}
+};
 const THEME_NAMES = {bg: '背景', fg: '文字（大类）', border: '边框（大类）', titlebar_bg: '标题栏、底栏', card_bg: '卡片背景',
   card_border: '卡片边框', text_fg: '正文', text_sub_fg: '次要文字', text_muted_fg: '提示文字', accent_fg: '强调色',
   accent_bg: '强调背景、按钮', success_fg: '正常、上涨', warning_fg: '警告', danger_fg: '危险、下跌', purple_fg: '紫色',
@@ -1250,25 +1264,38 @@ function themeLiteral(v) {
 function themeResolve(ctx, name, depth) {
   const lit = themeLiteral(name);
   if (lit || depth >= 8) return lit;
-  const v = themeBlockGet(ctx.app, ctx.scheme, name) ?? themeBlockGet(ctx.sys, ctx.scheme, name) ?? THEME_BUILTIN[ctx.mode][name];
+  const v = themeBlockGet(ctx.app, ctx.scheme, name) ?? themeBlockGet(ctx.sys, ctx.scheme, name) ??
+            (THEME_PRESETS[ctx.scheme] ? THEME_PRESETS[ctx.scheme].colors[name] : undefined) ??
+            THEME_BUILTIN[THEME_PRESETS[ctx.scheme] ? (THEME_PRESETS[ctx.scheme].dark ? 'night' : 'day') : ctx.mode][name];
   const r = v != null ? themeResolve(ctx, v, depth + 1) : null;
   if (r) return r;
   const u = name.lastIndexOf('_');
   return u >= 0 ? themeResolve(ctx, name.slice(u + 1), depth + 1) : null;
 }
 
-/* the schemes the css names (besides day and night) */
+/* the schemes: day, night, the other built-in ones, then those the css names */
 function themeSchemes(...texts) {
-  const names = new Set(['day', 'night']);
+  const names = new Set(['day', 'night', ...Object.keys(THEME_PRESETS)]);
   for (const t of texts) for (const b of themeParse(t)) if (b.name !== '*') names.add(b.name);
   return [...names];
+}
+
+function themeLabel(n) {
+  return n === 'day' ? '（内置白天）' : n === 'night' ? '（内置黑夜）' : THEME_PRESETS[n] ? `（内置·${THEME_PRESETS[n].label}）` : '';
+}
+
+/* a built-in scheme's block, every alias with its name */
+function themeBlockText(name) {
+  const b = THEME_BUILTIN[name] || THEME_PRESETS[name].colors;
+  return (THEME_PRESETS[name] ? `/* 内置配色：${THEME_PRESETS[name].label} */\n` : '') + `${name} {\n` +
+    Object.entries(b).map(([k, v]) => `  ${k}: ${v};${THEME_NAMES[k] ? '  /* ' + THEME_NAMES[k] + ' */' : ''}`).join('\n') + '\n}\n';
 }
 
 function themeSelects() {
   const names = themeSchemes(themeSys, $('th_scope').value === 'sys' ? $('th_css').value : '');
   for (const [id, key, def] of [['th_day_scheme', 'theme_day', 'day'], ['th_night_scheme', 'theme_night', 'night']]) {
     const cur = $(id).value || themeCfg[key] || def;
-    $(id).innerHTML = names.map(n => `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}${n === 'day' ? '（内置白天）' : n === 'night' ? '（内置黑夜）' : ''}</option>`).join('');
+    $(id).innerHTML = names.map(n => `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}${themeLabel(n)}</option>`).join('');
   }
 }
 
@@ -1304,7 +1331,7 @@ function themePreview() {
  * mode uses, written into the css being edited (saved with 保存) */
 function themePicked(mode, alias, value) {
   const scheme = $(mode === 'day' ? 'th_day_scheme' : 'th_night_scheme').value || mode;
-  $('th_css').value = themeSetAlias($('th_css').value, scheme, alias, value);
+  $('th_css').value = themeSetAlias($('th_css').value, scheme, alias, value);   /* a built-in scheme: an override */
   themePreview();
   say(`${scheme} 的 ${alias} 改成 ${value}，点“保存”生效`, 'warn');
 }
@@ -1354,6 +1381,8 @@ async function loadTheme() {
                           ['th_night_start', 'theme_night_start'], ['th_lat', 'theme_lat'], ['th_lon', 'theme_lon']]) $(id).value = themeCfg[key] || '';
   $('th_scope').innerHTML = '<option value="sys">系统（/spiffs/theme.css，所有应用）</option>' +
     apps.filter(a => a.dir).map(a => `<option value="${esc(a.dir)}">${esc(a.name)}（${esc(rel(a.dir))}/theme.css）</option>`).join('');
+  $('th_insert').innerHTML = ['day', 'night', ...Object.keys(THEME_PRESETS)]
+    .map(n => `<option value="${n}">${n}${themeLabel(n)}</option>`).join('');
   themeFormShow();
   await themeLoadCss();
   const st = await api('/api/stats');
@@ -1377,6 +1406,7 @@ async function themeSaveMode() {
     }
     await post(f);
     themeCfg = Object.fromEntries(Object.entries(f).map(([k, v]) => [k.slice(6), v]));
+    themePreview();
     say('已保存，应用 10 秒内换上', 'ok');
   } catch (e) { say(e.message, 'bad'); }
 }
@@ -1391,8 +1421,7 @@ async function themeSaveCss() {
 }
 
 function themeInsert(mode) {
-  const b = THEME_BUILTIN[mode];
-  const text = `${mode} {\n` + Object.entries(b).map(([k, v]) => `  ${k}: ${v};${THEME_NAMES[k] ? '  /* ' + THEME_NAMES[k] + ' */' : ''}`).join('\n') + '\n}\n';
+  const text = themeBlockText(mode);
   const ta = $('th_css');
   ta.value = (ta.value.trim() ? ta.value.replace(/\s*$/, '\n\n') : '') + text;
   themeSelects();
