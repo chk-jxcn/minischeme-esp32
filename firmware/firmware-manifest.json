@@ -1,5 +1,5 @@
 {
-  "version": "1.0.92",
+  "version": "1.0.93",
   "chip": "ESP32",
   "idf": "6.1",
   "files": [
@@ -21,8 +21,8 @@
       "name": "minischeme_esp32.bin",
       "address": "0x10000",
       "offset": 65536,
-      "size": 1462160,
-      "sha256": "5497e9005a7829c06f72ee7f24213d1f8c6505b330c74e79f31956f0d769d825"
+      "size": 1475824,
+      "sha256": "b8a86e582498ed7a373530fbddba322f5d4907027469eeca5182752be3e9ec9d"
     },
     {
       "name": "fontrom.bin",
