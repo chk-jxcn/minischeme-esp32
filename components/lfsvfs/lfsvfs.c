@@ -33,6 +33,7 @@ static const char *TAG = "lfsvfs";
 
 typedef struct {
     bool used;
+    bool written;       /* data written through it: closing it changes the file system */
     lfs_file_t file;
     struct lfs_file_config cfg;
     uint8_t buf[LFSV_CACHE];
@@ -45,6 +46,9 @@ typedef struct {
 } LfsDir;
 
 static lfs_t s_lfs;
+static volatile uint32_t s_gen = 1;   /* lfsvfs_generation */
+
+uint32_t lfsvfs_generation(void) { return s_gen; }
 static struct lfs_config s_cfg;
 static const esp_partition_t *s_part = NULL;
 static SemaphoreHandle_t s_mx = NULL;
@@ -170,6 +174,11 @@ static int vfs_open(void *ctx, const char *path, int flags, int mode) {
         return -1;
     }
     LfsFd *f = &s_fds[fd];
+    bool created = false;
+    if (flags & O_CREAT) {
+        struct lfs_info info;
+        created = lfs_stat(&s_lfs, path, &info) != 0;
+    }
     memset(&f->cfg, 0, sizeof(f->cfg));
     f->cfg.buffer = f->buf;
     int e = lfs_file_opencfg(&s_lfs, &f->file, path, lflags, &f->cfg);
@@ -177,7 +186,13 @@ static int vfs_open(void *ctx, const char *path, int flags, int mode) {
         make_parents(path);
         e = lfs_file_opencfg(&s_lfs, &f->file, path, lflags, &f->cfg);
     }
-    if (e == 0) f->used = true;
+    if (e == 0) {
+        f->used = true;
+        f->written = false;
+        /* a file emptied or made: the file system changed (a read-write open alone does not:
+         * the font cache keeps its files open that way) */
+        if ((flags & O_TRUNC) || created) s_gen++;
+    }
     UNLOCK();
     return e < 0 ? fail(e) : fd;
 }
@@ -191,6 +206,10 @@ static ssize_t vfs_write(void *ctx, int fd, const void *data, size_t size) {
     LOCK();
     LfsFd *f = fd_get(fd);
     lfs_ssize_t n = f ? lfs_file_write(&s_lfs, &f->file, data, size) : LFS_ERR_BADF;
+    if (f && !f->written) {   /* the first write: readers re-read (again when it is closed) */
+        f->written = true;
+        s_gen++;
+    }
     UNLOCK();
     return n < 0 ? fail((int)n) : (ssize_t)n;
 }
@@ -219,6 +238,7 @@ static int vfs_close(void *ctx, int fd) {
     LOCK();
     LfsFd *f = fd_get(fd);
     int e = f ? lfs_file_close(&s_lfs, &f->file) : LFS_ERR_BADF;
+    if (f && f->written) s_gen++;
     if (f) f->used = false;
     UNLOCK();
     return e < 0 ? fail(e) : 0;
@@ -252,6 +272,7 @@ static int vfs_ftruncate(void *ctx, int fd, off_t length) {
     LOCK();
     LfsFd *f = fd_get(fd);
     int e = f ? lfs_file_truncate(&s_lfs, &f->file, (lfs_off_t)length) : LFS_ERR_BADF;
+    s_gen++;
     UNLOCK();
     return e < 0 ? fail(e) : 0;
 }
@@ -281,6 +302,7 @@ static int vfs_unlink(void *ctx, const char *path) {
     int e = lfs_stat(&s_lfs, path, &info);
     if (e == 0 && info.type == LFS_TYPE_DIR) e = LFS_ERR_ISDIR;
     if (e == 0) e = lfs_remove(&s_lfs, path);
+    s_gen++;
     UNLOCK();
     return e < 0 ? fail(e) : 0;
 }
@@ -288,6 +310,7 @@ static int vfs_unlink(void *ctx, const char *path) {
 static int vfs_rename(void *ctx, const char *src, const char *dst) {
     (void)ctx;
     LOCK();
+    s_gen++;
     int e = lfs_rename(&s_lfs, src, dst);
     if (e == LFS_ERR_NOENT) {
         struct lfs_info info;
@@ -378,6 +401,7 @@ static int vfs_mkdir(void *ctx, const char *name, mode_t mode) {
     (void)ctx; (void)mode;
     LOCK();
     int e = lfs_mkdir(&s_lfs, name);
+    s_gen++;
     UNLOCK();
     return e < 0 ? fail(e) : 0;
 }
@@ -389,6 +413,7 @@ static int vfs_rmdir(void *ctx, const char *name) {
     int e = lfs_stat(&s_lfs, name, &info);
     if (e == 0 && info.type != LFS_TYPE_DIR) e = LFS_ERR_NOTDIR;
     if (e == 0) e = lfs_remove(&s_lfs, name);
+    s_gen++;
     UNLOCK();
     return e < 0 ? fail(e) : 0;
 }
@@ -404,6 +429,7 @@ static int vfs_truncate(void *ctx, const char *path, off_t length) {
     lfs_file_t file;
     LOCK();
     int e = lfs_file_open(&s_lfs, &file, path, LFS_O_WRONLY);
+    s_gen++;
     if (e == 0) {
         e = lfs_file_truncate(&s_lfs, &file, (lfs_off_t)length);
         int c = lfs_file_close(&s_lfs, &file);

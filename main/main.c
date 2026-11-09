@@ -4077,11 +4077,36 @@ static bool app_member_ok(const char *id) {
 
 /* A member's own config.ini (apps/<id>/, else user/<id>/) into out; whether it exists */
 static bool member_ini_path(const char *id, char *out, size_t cap) {
+    /* known while the file system has not changed: a member's config-get came here every
+     * time, one or two stats (a combined app asks several times a second) */
+    static struct { char id[32]; char path[64]; bool ok; } known[8];
+    static uint32_t known_gen;
+    if (known_gen != lfsvfs_generation()) {
+        memset(known, 0, sizeof(known));
+        known_gen = lfsvfs_generation();
+    }
+    for (int i = 0; i < 8; i++) {
+        if (known[i].id[0] && strcmp(known[i].id, id) == 0) {
+            snprintf(out, cap, "%s", known[i].path);
+            return known[i].ok;
+        }
+    }
     struct stat st;
     snprintf(out, cap, APPS_DIR "/%s/config.ini", id);
-    if (stat(out, &st) == 0) return true;
-    snprintf(out, cap, "/spiffs/user/%s/config.ini", id);
-    return stat(out, &st) == 0;
+    bool ok = stat(out, &st) == 0;
+    if (!ok) {
+        snprintf(out, cap, "/spiffs/user/%s/config.ini", id);
+        ok = stat(out, &st) == 0;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (!known[i].id[0] && strlen(id) < sizeof(known[i].id) && strlen(out) < sizeof(known[i].path)) {
+            snprintf(known[i].id, sizeof(known[i].id), "%s", id);
+            snprintf(known[i].path, sizeof(known[i].path), "%s", out);
+            known[i].ok = ok;
+            break;
+        }
+    }
+    return ok;
 }
 
 /* (app-has-config? app-id) => whether that member of the running combined
@@ -4138,7 +4163,21 @@ static Value prim_app_member_folder(MiniVM *vm, int argc, Value *argv) {
     char dir[64];
     struct stat st;
     snprintf(dir, sizeof(dir), APPS_DIR "/%s", id);
-    if (stat(dir, &st) != 0) mkdir(dir, 0775);
+    /* a combined app switches folders many times a second: a folder seen while the file
+     * system has not changed is not looked up again (a stat took 4.6 ms) */
+    static char seen[8][32];
+    static uint32_t seen_gen;
+    if (seen_gen != lfsvfs_generation()) {
+        memset(seen, 0, sizeof(seen));
+        seen_gen = lfsvfs_generation();
+    }
+    int slot = -1;
+    for (int i = 0; i < 8 && slot < 0; i++) if (strcmp(seen[i], id) == 0) slot = i;
+    if (slot < 0) {
+        if (stat(dir, &st) != 0) mkdir(dir, 0775);
+        seen_gen = lfsvfs_generation();          /* mkdir moved it */
+        for (int i = 0; i < 8; i++) if (!seen[i][0]) { snprintf(seen[i], sizeof(seen[i]), "%s", id); break; }
+    }
     mini_app_sandbox_set(dir);
     mini_app_set_storage(member_quota(id), dir_used_bytes);
     return mini_true();
@@ -4149,6 +4188,69 @@ static Value prim_app_member_folder(MiniVM *vm, int argc, Value *argv) {
  * An app gets no secrets of config.ini (Wi-Fi, *password*, ...:
  * mini_app_config_key_ok). app-id, a member of the running combined app,
  * reads that app's own config.ini (apps/<id>/, else user/<id>/) instead. */
+/* config-get's values per (ini file, key) while the file system has not changed: each call
+ * opened and parsed one or two ini files (10-20 ms on the board; a combined app asked ~5 times
+ * a second). Absent keys are remembered too. When full, the oldest entry makes room (a combined
+ * app's members and config.ini need ~60). The ini paths are kept once (CFG_CACHE_INIS). */
+#define CFG_CACHE_MAX  96
+#define CFG_CACHE_INIS 8
+typedef struct { uint8_t ini; bool found; char *key, *val; } CfgCacheEntry;
+static CfgCacheEntry s_cfg_cache[CFG_CACHE_MAX];
+static char *s_cfg_inis[CFG_CACHE_INIS];
+static int s_cfg_cache_n, s_cfg_cache_next;
+static uint32_t s_cfg_cache_gen;
+
+static void cfg_entry_free(CfgCacheEntry *e) {
+    if (e->val) mini_wipe(e->val, strlen(e->val));
+    free(e->key);
+    free(e->val);
+    e->key = e->val = NULL;
+}
+
+static void cfg_cache_clear(void) {
+    for (int i = 0; i < s_cfg_cache_n; i++) cfg_entry_free(&s_cfg_cache[i]);
+    for (int i = 0; i < CFG_CACHE_INIS; i++) { free(s_cfg_inis[i]); s_cfg_inis[i] = NULL; }
+    s_cfg_cache_n = s_cfg_cache_next = 0;
+}
+
+/* ini_file_value through the cache */
+static bool ini_value_cached(const char *ini, const char *key, char *val, size_t cap) {
+    if (s_cfg_cache_gen != lfsvfs_generation()) {
+        cfg_cache_clear();
+        s_cfg_cache_gen = lfsvfs_generation();
+    }
+    int ini_ix = -1;
+    for (int i = 0; i < CFG_CACHE_INIS && s_cfg_inis[i]; i++) if (strcmp(s_cfg_inis[i], ini) == 0) ini_ix = i;
+    for (int i = 0; ini_ix >= 0 && i < s_cfg_cache_n; i++) {
+        CfgCacheEntry *e = &s_cfg_cache[i];
+        if (e->key && e->ini == ini_ix && strcmp(e->key, key) == 0) {
+            if (e->found) snprintf(val, cap, "%s", e->val);
+            return e->found;
+        }
+    }
+    bool found = ini_file_value(ini, key, val, cap);
+    if (ini_ix < 0) {
+        for (int i = 0; i < CFG_CACHE_INIS && ini_ix < 0; i++) {
+            if (!s_cfg_inis[i] && (s_cfg_inis[i] = strdup(ini)) != NULL) ini_ix = i;
+        }
+        if (ini_ix < 0) return found;      /* more ini files than slots: not kept */
+    }
+    CfgCacheEntry *e;
+    if (s_cfg_cache_n < CFG_CACHE_MAX) {
+        e = &s_cfg_cache[s_cfg_cache_n++];
+    } else {                               /* the oldest one makes room */
+        e = &s_cfg_cache[s_cfg_cache_next];
+        s_cfg_cache_next = (s_cfg_cache_next + 1) % CFG_CACHE_MAX;
+        cfg_entry_free(e);
+    }
+    e->ini = (uint8_t)ini_ix;
+    e->found = found;
+    e->key = strdup(key);
+    e->val = found ? strdup(val) : NULL;
+    if (!e->key || (found && !e->val)) cfg_entry_free(e);   /* out of memory: an empty entry, skipped */
+    return found;
+}
+
 static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
     if (argc < 1 || !mini_is_string(argv[0])) {
         vm_error(vm, "config-get: expected a key string");
@@ -4167,8 +4269,8 @@ static Value prim_config_get(MiniVM *vm, int argc, Value *argv) {
         member_ini_path(id, member_ini, sizeof(member_ini));
         ini = member_ini;
     }
-    if ((ini_file_value(ini, key, val, sizeof(val)) && val[0]) ||
-        (mini_app_config_key_ok(key) && ini_file_value("/spiffs/config.ini", key, val, sizeof(val)))) {
+    if ((ini_value_cached(ini, key, val, sizeof(val)) && val[0]) ||
+        (mini_app_config_key_ok(key) && ini_value_cached("/spiffs/config.ini", key, val, sizeof(val)))) {
         Value s = mini_make_string(vm, mini_chan_url_of(val));   /* proxy = <key>@http://...: the address */
         mini_wipe(val, sizeof(val));
         return s;
@@ -5439,6 +5541,7 @@ static void mount_storage(void) {
         ESP_LOGE(TAG, "Failed to mount LittleFS (%s)", esp_err_to_name(r));
         return;
     }
+    mini_gui_set_fs_generation(lfsvfs_generation);   /* image sizes kept while no file changes */
     size_t total = 0, used = 0;
     lfsvfs_info(&total, &used);
     ESP_LOGI(TAG, "LittleFS mounted at /spiffs: total=%u B, used=%u B", (unsigned)total, (unsigned)used);

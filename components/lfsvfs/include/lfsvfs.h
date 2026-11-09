@@ -14,6 +14,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 /**
@@ -28,5 +29,9 @@ void lfsvfs_unmount(void);
 bool lfsvfs_mounted(void);
 /** @brief Partition size and bytes in use. */
 esp_err_t lfsvfs_info(size_t *total, size_t *used);
+/** @brief A number that changes whenever the file system does (a file written, removed,
+ *  renamed or truncated, a directory made or removed): what was read before it changed may
+ *  be cached until it does. */
+uint32_t lfsvfs_generation(void);
 
 #endif /* LFSVFS_H */
