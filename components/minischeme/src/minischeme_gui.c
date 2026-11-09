@@ -6,6 +6,7 @@
 #include "minischeme_image.h"
 #include "minischeme_gui.h"
 #include "minischeme_internal.h"
+#include "minischeme_device.h"
 #include "minischeme_fonts.h"
 #include "minischeme_fontnet.h"
 #include "minischeme_ili9488.h"
@@ -2230,13 +2231,12 @@ void mini_gui_image_forget(void) {
 typedef struct { char path[112]; int w, h, n; uint32_t gen; } GuiImgMeta;
 static GuiImgMeta s_img_meta[GUI_IMG_META];
 static int s_img_meta_next;
-static uint32_t (*s_fs_gen)(void) = NULL;
-
-void mini_gui_set_fs_generation(uint32_t (*fn)(void)) { s_fs_gen = fn; }
+/* the host's file-system generation (minischeme_device.h); 0: nothing kept */
+void mini_gui_set_fs_generation(uint32_t (*fn)(void)) { mini_set_fs_generation(fn); }
 
 static const GuiImgMeta *gui_img_meta_find(const char *path) {
-    if (!s_fs_gen) return NULL;
-    uint32_t g = s_fs_gen();
+    uint32_t g = mini_fs_generation();
+    if (!g) return NULL;
     for (int i = 0; i < GUI_IMG_META; i++) {
         if (s_img_meta[i].gen == g && s_img_meta[i].path[0] && strcmp(s_img_meta[i].path, path) == 0) return &s_img_meta[i];
     }
@@ -2244,14 +2244,14 @@ static const GuiImgMeta *gui_img_meta_find(const char *path) {
 }
 
 static void gui_img_meta_put(const char *path, int w, int h, int n) {
-    if (!s_fs_gen || strlen(path) >= sizeof(s_img_meta[0].path) || gui_img_meta_find(path)) return;
+    if (!mini_fs_generation() || strlen(path) >= sizeof(s_img_meta[0].path) || gui_img_meta_find(path)) return;
     GuiImgMeta *m = &s_img_meta[s_img_meta_next];
     s_img_meta_next = (s_img_meta_next + 1) % GUI_IMG_META;
     snprintf(m->path, sizeof(m->path), "%s", path);
     m->w = w;
     m->h = h;
     m->n = n;
-    m->gen = s_fs_gen();
+    m->gen = mini_fs_generation();
 }
 
 static MiniImage *gui_image_get(const char *path, char *err, size_t cap) {

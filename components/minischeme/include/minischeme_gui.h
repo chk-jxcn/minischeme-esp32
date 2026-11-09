@@ -262,8 +262,8 @@ void mini_gui_bitmap(int x, int y, int w, int h, const uint8_t *bits, int scale,
 void mini_gui_image(int x, int y, const char *path, int frame, int speed);
 /* Closes the image kept open (call when image files change) */
 void mini_gui_image_forget(void);
-/** @brief The host's file-system generation (changes whenever a file does), so the sizes
- *  of recently drawn images are remembered between frames; NULL: no such cache. */
+/** @brief Sets the host's file-system generation (mini_set_fs_generation, minischeme_device.h):
+ *  the sizes of recently drawn images are remembered between frames. */
 void mini_gui_set_fs_generation(uint32_t (*fn)(void));
 /* Ring arc: start angle 0 = 3 o'clock, sweeping clockwise */
 void mini_gui_arc(int cx, int cy, int r, int thick, int start_deg, int sweep_deg, uint16_t color);

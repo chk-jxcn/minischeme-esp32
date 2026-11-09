@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -931,9 +932,36 @@ static bool hal_fs_write(const char *path, const char *data, size_t len) {
     return w == len;
 }
 
+/* Files not there while the file system has not changed (mini_fs_generation): gui.scm
+ * reads the app's theme.css every 10 s, and opening a missing file took 13-19 ms */
+#define FS_MISSING_MAX 8
+static struct { char path[96]; uint32_t gen; } s_fs_missing[FS_MISSING_MAX];
+static int s_fs_missing_next;
+
+static bool fs_known_missing(const char *path) {
+    uint32_t g = mini_fs_generation();
+    if (!g) return false;
+    for (int i = 0; i < FS_MISSING_MAX; i++) {
+        if (s_fs_missing[i].gen == g && strcmp(s_fs_missing[i].path, path) == 0) return true;
+    }
+    return false;
+}
+
+static void fs_note_missing(const char *path) {
+    uint32_t g = mini_fs_generation();
+    if (!g || strlen(path) >= sizeof(s_fs_missing[0].path)) return;
+    snprintf(s_fs_missing[s_fs_missing_next].path, sizeof(s_fs_missing[0].path), "%s", path);
+    s_fs_missing[s_fs_missing_next].gen = g;
+    s_fs_missing_next = (s_fs_missing_next + 1) % FS_MISSING_MAX;
+}
+
 static char *hal_fs_read(const char *path, size_t *len) {
+    if (fs_known_missing(path)) return NULL;
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        if (errno == ENOENT) fs_note_missing(path);
+        return NULL;
+    }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -947,8 +975,10 @@ static char *hal_fs_read(const char *path, size_t *len) {
 }
 
 static bool hal_fs_exists(const char *path) {
+    if (fs_known_missing(path)) return false;
     FILE *f = fopen(path, "rb");
     if (f) { fclose(f); return true; }
+    if (errno == ENOENT) fs_note_missing(path);
     return false;
 }
 

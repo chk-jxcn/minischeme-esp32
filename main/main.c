@@ -5541,7 +5541,7 @@ static void mount_storage(void) {
         ESP_LOGE(TAG, "Failed to mount LittleFS (%s)", esp_err_to_name(r));
         return;
     }
-    mini_gui_set_fs_generation(lfsvfs_generation);   /* image sizes kept while no file changes */
+    mini_set_fs_generation(lfsvfs_generation);   /* image sizes, files not there: kept while no file changes */
     size_t total = 0, used = 0;
     lfsvfs_info(&total, &used);
     ESP_LOGI(TAG, "LittleFS mounted at /spiffs: total=%u B, used=%u B", (unsigned)total, (unsigned)used);

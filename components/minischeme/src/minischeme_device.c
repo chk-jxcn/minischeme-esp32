@@ -400,6 +400,12 @@ const char *mini_app_sandbox_dir(void) { return s_box; }
 void mini_app_privileged_begin(void) { s_priv++; }
 void mini_app_privileged_end(void) { if (s_priv > 0) s_priv--; }
 
+static uint32_t (*s_fs_gen_fn)(void) = NULL;
+
+void mini_set_fs_generation(uint32_t (*fn)(void)) { s_fs_gen_fn = fn; }
+
+uint32_t mini_fs_generation(void) { return s_fs_gen_fn ? s_fs_gen_fn() : 0; }
+
 void mini_app_set_storage(size_t quota, size_t (*dir_used)(const char *dir)) {
     s_quota = quota;
     s_dir_used = dir_used;

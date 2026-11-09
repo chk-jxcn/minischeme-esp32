@@ -187,6 +187,13 @@ void mini_app_privileged_begin(void);
 void mini_app_privileged_end(void);
 /* Storage quota of an app folder and how the host measures one */
 void mini_app_set_storage(size_t quota, size_t (*dir_used)(const char *dir));
+
+/** @brief The host's file-system generation: a number that changes whenever a file does
+ *  (written, made, emptied, removed, renamed). Set by the host; while it holds, what was
+ *  learnt from the files may be kept (image sizes, files not there). NULL: nothing kept. */
+void mini_set_fs_generation(uint32_t (*fn)(void));
+/** @brief The generation now; 0 without the host's (then nothing is kept). */
+uint32_t mini_fs_generation(void);
 /* Whether writing `bytes` to a file of `old` bytes fits the quota; why if not */
 bool mini_app_storage_ok(size_t bytes, size_t old, char *why, size_t cap);
 /** @brief Bytes left in the running app's folder quota ((size_t)-1 without a sandbox). */
