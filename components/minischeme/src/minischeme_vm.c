@@ -374,18 +374,189 @@ static inline int get_code_num_locals(CodeObj *c) {
     return (n < c->num_params) ? c->num_params : n;
 }
 
-static inline Value vm_fetch_const(MiniVM *vm, CodeObj *code, const Value *consts, uint16_t idx) {
-    Value v = consts[idx];
-    if (vm->rom_base && (const char *)code >= vm->rom_base && (const char *)code < vm->rom_end) {
-        return rom_materialize_val(vm, v);
+static MINI_NOINLINE Value vm_fetch_const_rom(MiniVM *vm, CodeObj *code, uint16_t idx) {
+    return rom_materialize_val(vm, CODE_CONSTS(code)[idx]);
+}
+
+static inline Value vm_fetch_const(MiniVM *vm, CodeObj *code, uint16_t idx) {
+    Value v = CODE_CONSTS(code)[idx];
+    if (MINI_UNLIKELY(vm->rom_base != NULL &&
+                      (const char *)code >= vm->rom_base &&
+                      (const char *)code < vm->rom_end)) {
+        return vm_fetch_const_rom(vm, code, idx);
     }
     return v;
+}
+
+static MINI_NOINLINE Value vm_get_heap_local(Value env, uint8_t slot) {
+    Value node = mini_car(env);
+    for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
+        node = mini_cdr(node);
+    }
+    return mini_is_pair(node) ? mini_car(node) : MINI_CONST_VOID;
+}
+
+static MINI_NOINLINE void vm_set_heap_local(MiniVM *vm, Value env, uint8_t slot, Value val) {
+    Value node = mini_car(env);
+    for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
+        node = mini_cdr(node);
+    }
+    if (mini_is_pair(node)) {
+        mini_set_car(node, val);
+        mini_write_barrier(vm, node, val);
+    }
+}
+
+static MINI_NOINLINE CodeObj *vm_pack_variadic(MiniVM *vm, int frame_idx, int call_argc, int fixed) {
+    CallFrame *frames = vm->call_frames;
+    size_t fp_off = (size_t)(frames[frame_idx].fp - vm->stack);
+    Value rest = mini_nil();
+    mini_push_root(vm, &rest);
+    for (int i = call_argc - 1; i >= fixed; i--) {
+        rest = mini_make_cons(vm, vm->stack[fp_off + (size_t)i], rest);
+    }
+    mini_pop_root(vm);
+    Value *fp = vm->stack + fp_off;
+    fp[fixed] = rest;
+    vm->sp = fp + fixed + 1;
+    return frames[frame_idx].code;
+}
+
+static MINI_NOINLINE CodeObj *vm_alloc_env_frame(MiniVM *vm, int frame_idx, int needed_locals) {
+    CallFrame *frames = vm->call_frames;
+    size_t fp_off = (size_t)(frames[frame_idx].fp - vm->stack);
+    PROF_SAVE(prof_prev);
+    PROF_SITE("<env-frame>");
+    PROF_CODE(frames[frame_idx].code);
+    Value fvals = mini_nil();
+    mini_push_root(vm, &fvals);
+    for (int i = needed_locals - 1; i >= 0; i--) {
+        fvals = mini_make_cons(vm, vm->stack[fp_off + (size_t)i], fvals);
+    }
+    Value parent_env = frames[frame_idx].closure->env;
+    Value new_env = mini_make_cons(vm, fvals, parent_env);
+    PROF_SITE(prof_prev);
+    mini_pop_root(vm);
+    frames[frame_idx].env = new_env;
+    return frames[frame_idx].code;
+}
+
+static MINI_NOINLINE Value prim_cons_slow(MiniVM *vm, int argc, Value *argv) {
+    (void)argc;
+    return mini_make_cons(vm, argv[0], argv[1]);
+}
+
+static MINI_NOINLINE Value vm_box_flonum_slow(MiniVM *vm, double d) {
+    return mini_make_flonum(vm, d);
+}
+
+static inline bool vm_num_to_double_fast(Value v, double *out) {
+    if (mini_is_fixnum(v)) {
+        *out = (double)mini_to_fixnum(v);
+        return true;
+    }
+#ifdef MINI_HAS_IMM_FLONUM
+    if (MINI_LIKELY(mini_is_imm_flonum(v))) {
+        *out = mini_imm_flonum_to_double(v);
+        return true;
+    }
+#endif
+    if (mini_is_record(v) && (((const MiniHeapObj *)UNTAG_PTR(v))->type & MINI_OBJ_TYPE_MASK) == MINI_OBJ_FLONUM) {
+        *out = ((const FlonumObj *)UNTAG_PTR(v))->val;
+        return true;
+    }
+    return false;
+}
+
+/* True ONLY when at least one operand is an inexact flonum and the other is fixnum or flonum.
+ * Prevents exact fixnum overflow (both fixnums) from turning into an inexact flonum instead of BigInt! */
+static inline bool vm_flonum_pair_to_double(Value a, Value b, double *da, double *db) {
+    if (MINI_UNLIKELY(((a | b) & MINI_TAG_MASK) == 0)) return false;
+    return vm_num_to_double_fast(a, da) && vm_num_to_double_fast(b, db);
+}
+
+/* Fast flonum result: immediate flonum on 64-bit, or Eden bump-pointer on 32-bit;
+ * returns 0 ONLY if heap allocation is needed and Eden is full (caller then takes slow path). */
+static inline Value vm_try_fast_flonum(MiniVM *vm, double d) {
+#ifdef MINI_HAS_IMM_FLONUM
+    Value imm;
+    if (MINI_LIKELY(mini_try_imm_flonum(d, &imm))) return imm;
+#endif
+    size_t aligned_sz = ALIGN8(sizeof(FlonumObj));
+    if (MINI_LIKELY(vm->eden_hp + aligned_sz <= vm->eden_limit)) {
+        FlonumObj *f = (FlonumObj *)vm->eden_hp;
+        vm->eden_hp += aligned_sz;
+        vm->stat_alloc_bytes += aligned_sz;
+#ifdef MINI_ALLOC_PROFILE
+        mini_prof_alloc(aligned_sz, OBJ_FLONUM);
+#endif
+        f->header.type = OBJ_FLONUM;
+        f->header.size = (uint32_t)aligned_sz;
+        f->val = d;
+        return ((uintptr_t)f) | MINI_TAG_RECORD;
+    }
+    return 0; /* tag 0 with 0 is fixnum 0, so use bool out instead! */
+}
+
+static inline bool vm_try_make_flonum_inline(MiniVM *vm, double d, Value *out) {
+#ifdef MINI_HAS_IMM_FLONUM
+    if (MINI_LIKELY(mini_try_imm_flonum(d, out))) return true;
+#endif
+    size_t aligned_sz = ALIGN8(sizeof(FlonumObj));
+    if (MINI_LIKELY(vm->eden_hp + aligned_sz <= vm->eden_limit)) {
+        FlonumObj *f = (FlonumObj *)vm->eden_hp;
+        vm->eden_hp += aligned_sz;
+        vm->stat_alloc_bytes += aligned_sz;
+#ifdef MINI_ALLOC_PROFILE
+        mini_prof_alloc(aligned_sz, OBJ_FLONUM);
+#endif
+        f->header.type = OBJ_FLONUM;
+        f->header.size = (uint32_t)aligned_sz;
+        f->val = d;
+        *out = ((uintptr_t)f) | MINI_TAG_RECORD;
+        return true;
+    }
+    return false;
+}
+
+static MINI_NOINLINE Value vm_prim_by_call_lookup(MiniVM *vm, uint16_t id) {
+    Value val = MINI_CONST_VOID;
+    const char *name;
+    for (size_t k = 0; mini_is_void(val) && !vm->has_error && (name = api_id_name(id, k)) != NULL; k++) {
+        Value sym = find_symbol(vm, name);
+        if (!sym) sym = mini_make_symbol(vm, name);
+        Value b = global_binding(vm, sym);
+        if (b) {
+            uint32_t slot = (uint32_t)id & 31u;
+            vm->prim_bcache[slot].id1 = (uint32_t)id + 1u;
+            vm->prim_bcache[slot].gen = vm->gcache_gen;
+            vm->prim_bcache[slot].binding = b;
+            return mini_cdr(b);
+        }
+        val = global_miss(vm, sym);
+        if (!mini_is_void(val)) {
+            b = global_binding(vm, sym);
+            if (b) {
+                uint32_t slot = (uint32_t)id & 31u;
+                vm->prim_bcache[slot].id1 = (uint32_t)id + 1u;
+                vm->prim_bcache[slot].gen = vm->gcache_gen;
+                vm->prim_bcache[slot].binding = b;
+            }
+            return val;
+        }
+    }
+    if (!vm->has_error && mini_is_void(val)) {
+        const char *hint = mini_api_unbound_hook ? mini_api_unbound_hook(mini_api_id_names[id]) : NULL;
+        vm_error(vm, "unbound variable: %s%s", mini_api_id_names[id], hint ? hint : "");
+    }
+    return val;
 }
 
 Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
     if (!vm || vm->has_error) return mini_void();
     mini_set_active_vm(vm);
     vm->state_reloaded = false;
+    (void)vm_try_fast_flonum;
 
     int base_frame;
     CallFrame *frames = vm->call_frames;
@@ -395,7 +566,6 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
     Value *fp;
     CodeObj *code;
     uint8_t *pc;
-    Value *consts;
     uint8_t call_argc = 0;
     Value callee = 0;
 
@@ -407,10 +577,9 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         fp = top_f->fp;
         code = top_f->code;
         pc = top_f->pc;
-        consts = CODE_CONSTS(code);
     } else {
         base_frame = vm->call_frame_count;
-        if ((size_t)base_frame >= vm->frame_cap) {
+        if (MINI_UNLIKELY((size_t)base_frame >= vm->frame_cap)) {
             vm_error(vm, "call stack overflow");
             return mini_void();
         }
@@ -435,23 +604,15 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         vm->call_frame_count = frame_count;
         if ((uint32_t)frame_count > vm->stat_frame_peak) vm->stat_frame_peak = (uint32_t)frame_count;
 
-        if (code->is_variadic) {
-            int fixed = code->num_params - 1;
-            Value rest = mini_nil();
-            mini_push_root(vm, &rest);
-            for (int i = argc - 1; i >= fixed; i--) {
-                vm->sp = sp;
-                rest = mini_make_cons(vm, fp[i], rest);
-            }
-            fp[fixed] = rest;
-            mini_pop_root(vm);
-            sp = fp + fixed + 1;
+        if (MINI_UNLIKELY(code->is_variadic)) {
             vm->sp = sp;
-            code = frames[frame_count - 1].code;
+            code = vm_pack_variadic(vm, frame_count - 1, argc, code->num_params - 1);
+            fp = frames[frame_count - 1].fp;
+            sp = vm->sp;
         }
 
         int needed = get_code_num_locals(code);
-        if (fp + needed + 64 >= vm->stack + vm->stack_cap) {
+        if (MINI_UNLIKELY(fp + needed + 64 >= vm->stack + vm->stack_cap)) {
             vm_error(vm, "stack overflow");
             vm->sp = entry_sp;
             vm->call_frame_count = base_frame;
@@ -460,86 +621,101 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         while (sp < fp + needed) *sp++ = MINI_CONST_VOID;
         vm->sp = sp;
 
-        if (code->has_inner_lambdas) {
-            PROF_SAVE(prof_prev);
-            PROF_SITE("<env-frame>");
-            PROF_CODE(code);
-            Value fvals = mini_nil();
-            mini_push_root(vm, &fvals);
-            for (int i = needed - 1; i >= 0; i--) {
-                fvals = mini_make_cons(vm, fp[i], fvals);
-            }
-            Value parent_env = frames[frame_count - 1].closure->env;
-            Value new_env = mini_make_cons(vm, fvals, parent_env);
-            PROF_SITE(prof_prev);
-            mini_pop_root(vm);
-            frames[frame_count - 1].env = new_env;
-            code = frames[frame_count - 1].code;
+        if (MINI_UNLIKELY(code->has_inner_lambdas)) {
+            code = vm_alloc_env_frame(vm, frame_count - 1, needed);
+            fp = frames[frame_count - 1].fp;
+            sp = vm->sp;
         } else {
             frames[frame_count - 1].env = frames[frame_count - 1].closure->env;
         }
         frames[frame_count - 1].pc = CODE_BYTES(code);
-
         pc = CODE_BYTES(code);
-        consts = CODE_CONSTS(code);
     }
 
 #define SYNC_VM_STATE() do { \
     frames[frame_count - 1].pc = pc; \
     vm->sp = sp; \
     vm->call_frame_count = frame_count; \
+    if ((uint32_t)frame_count > vm->stat_frame_peak) vm->stat_frame_peak = (uint32_t)frame_count; \
+    if ((uint32_t)(sp - vm->stack) > vm->stat_stack_peak) vm->stat_stack_peak = (uint32_t)(sp - vm->stack); \
 } while (0)
 
 #define RELOAD_VM_STATE() do { \
     code = frames[frame_count - 1].code; \
     pc = frames[frame_count - 1].pc; \
-    consts = CODE_CONSTS(code); \
+    fp = frames[frame_count - 1].fp; \
     sp = vm->sp; \
 } while (0)
+
+#define READ_LOCAL(slot) (MINI_LIKELY(!code->has_inner_lambdas) ? fp[slot] : vm_get_heap_local(frames[frame_count - 1].env, (slot)))
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-    /* Direct threaded code dispatch table (GCC/Clang computed goto) */
     static const void *const dispatch_table[] = {
-        [OP_HALT]          = &&do_op_halt,
-        [OP_CONST]         = &&do_op_const,
-        [OP_INT8]          = &&do_op_int8,
-        [OP_NIL]           = &&do_op_nil,
-        [OP_TRUE]          = &&do_op_true,
-        [OP_FALSE]         = &&do_op_false,
-        [OP_VOID]          = &&do_op_void,
-        [OP_GET_LOCAL]     = &&do_op_get_local,
-        [OP_SET_LOCAL]     = &&do_op_set_local,
-        [OP_GET_UPVALUE]   = &&do_op_get_upvalue,
-        [OP_SET_UPVALUE]   = &&do_op_set_upvalue,
-        [OP_GET_GLOBAL]    = &&do_op_get_global,
-        [OP_SET_GLOBAL]    = &&do_op_set_global,
-        [OP_DEF_GLOBAL]    = &&do_op_def_global,
-        [OP_POP]           = &&do_op_pop,
-        [OP_JUMP]          = &&do_op_jump,
-        [OP_JUMP_IF_FALSE] = &&do_op_jump_if_false,
-        [OP_CLOSURE]       = &&do_op_closure,
-        [OP_CALL]          = &&do_op_call,
-        [OP_TAIL_CALL]     = &&do_op_tail_call,
-        [OP_RETURN]        = &&do_op_return,
-        [OP_ADD]           = &&do_op_add,
-        [OP_SUB]           = &&do_op_sub,
-        [OP_MUL]           = &&do_op_mul,
-        [OP_LT]            = &&do_op_lt,
-        [OP_GT]            = &&do_op_gt,
-        [OP_LE]            = &&do_op_le,
-        [OP_GE]            = &&do_op_ge,
-        [OP_NUM_EQ]        = &&do_op_num_eq,
-        [OP_CALL_PRIM]     = &&do_op_call_prim,
-        [OP_CAR]           = &&do_op_car,
-        [OP_CDR]           = &&do_op_cdr,
-        [OP_NOT]           = &&do_op_not,
-        [OP_NULLP]         = &&do_op_nullp,
-        [OP_PAIRP]         = &&do_op_pairp,
-        [OP_EQ]            = &&do_op_eq,
-        [OP_VECTOR_REF]    = &&do_op_vector_ref,
-        [OP_COUNT ... 255] = &&do_op_bad   /* a byte no instruction has: an error, not a jump anywhere */
+        [OP_HALT]              = &&do_op_halt,
+        [OP_CONST]             = &&do_op_const,
+        [OP_INT8]              = &&do_op_int8,
+        [OP_NIL]               = &&do_op_nil,
+        [OP_TRUE]              = &&do_op_true,
+        [OP_FALSE]             = &&do_op_false,
+        [OP_VOID]              = &&do_op_void,
+        [OP_GET_LOCAL]         = &&do_op_get_local,
+        [OP_SET_LOCAL]         = &&do_op_set_local,
+        [OP_GET_UPVALUE]       = &&do_op_get_upvalue,
+        [OP_SET_UPVALUE]       = &&do_op_set_upvalue,
+        [OP_GET_GLOBAL]        = &&do_op_get_global,
+        [OP_SET_GLOBAL]        = &&do_op_set_global,
+        [OP_DEF_GLOBAL]        = &&do_op_def_global,
+        [OP_POP]               = &&do_op_pop,
+        [OP_JUMP]              = &&do_op_jump,
+        [OP_JUMP_IF_FALSE]     = &&do_op_jump_if_false,
+        [OP_CLOSURE]           = &&do_op_closure,
+        [OP_CALL]              = &&do_op_call,
+        [OP_TAIL_CALL]         = &&do_op_tail_call,
+        [OP_RETURN]            = &&do_op_return,
+        [OP_ADD]               = &&do_op_add,
+        [OP_SUB]               = &&do_op_sub,
+        [OP_MUL]               = &&do_op_mul,
+        [OP_LT]                = &&do_op_lt,
+        [OP_GT]                = &&do_op_gt,
+        [OP_LE]                = &&do_op_le,
+        [OP_GE]                = &&do_op_ge,
+        [OP_NUM_EQ]            = &&do_op_num_eq,
+        [OP_CALL_PRIM]         = &&do_op_call_prim,
+        [OP_CAR]               = &&do_op_car,
+        [OP_CDR]               = &&do_op_cdr,
+        [OP_NOT]               = &&do_op_not,
+        [OP_NULLP]             = &&do_op_nullp,
+        [OP_PAIRP]             = &&do_op_pairp,
+        [OP_EQ]                = &&do_op_eq,
+        [OP_VECTOR_REF]        = &&do_op_vector_ref,
+        [OP_CALL_SELF]         = &&do_op_call_self,
+        [OP_TAIL_CALL_SELF]    = &&do_op_tail_call_self,
+        [OP_JUMP_IF_TRUE_KEEP] = &&do_op_jump_if_true_keep,
+        [OP_CONS]              = &&do_op_cons,
+        [OP_VECTOR_SET]        = &&do_op_vector_set,
+        [OP_REM]               = &&do_op_rem,
+        [OP_QUOT]              = &&do_op_quot,
+        [OP_DIV]               = &&do_op_div,
+        [OP_GET_LOCAL2]        = &&do_op_get_local2,
+        [OP_SET_LOCAL_POP]     = &&do_op_set_local_pop,
+        [OP_ADD_LOC_IMM]       = &&do_op_add_loc_imm,
+        [OP_SUB_LOC_IMM]       = &&do_op_sub_loc_imm,
+        [OP_ADD_LOC_LOC]       = &&do_op_add_loc_loc,
+        [OP_SUB_LOC_LOC]       = &&do_op_sub_loc_loc,
+        [OP_MUL_LOC_LOC]       = &&do_op_mul_loc_loc,
+        [OP_EQ_LOC_IMM]        = &&do_op_eq_loc_imm,
+        [OP_LT_LOC_IMM]        = &&do_op_lt_loc_imm,
+        [OP_GT_LOC_IMM]        = &&do_op_gt_loc_imm,
+        [OP_EQ_LOC_LOC]        = &&do_op_eq_loc_loc,
+        [OP_LT_LOC_LOC]        = &&do_op_lt_loc_loc,
+        [OP_LE_LOC_LOC]        = &&do_op_le_loc_loc,
+        [OP_GT_LOC_LOC]        = &&do_op_gt_loc_loc,
+        [OP_CAR_LOC]           = &&do_op_car_loc,
+        [OP_CDR_LOC]           = &&do_op_cdr_loc,
+        [OP_NULLP_LOC]         = &&do_op_nullp_loc,
+        [OP_COUNT ... 255]     = &&do_op_bad
     };
     #define DISPATCH() goto *dispatch_table[*pc++]
     DISPATCH();
@@ -549,49 +725,73 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
 
 vm_loop:
     switch (*pc++) {
-        case OP_HALT:          goto do_op_halt;
-        case OP_CONST:         goto do_op_const;
-        case OP_INT8:          goto do_op_int8;
-        case OP_NIL:           goto do_op_nil;
-        case OP_TRUE:          goto do_op_true;
-        case OP_FALSE:         goto do_op_false;
-        case OP_VOID:          goto do_op_void;
-        case OP_GET_LOCAL:     goto do_op_get_local;
-        case OP_SET_LOCAL:     goto do_op_set_local;
-        case OP_GET_UPVALUE:   goto do_op_get_upvalue;
-        case OP_SET_UPVALUE:   goto do_op_set_upvalue;
-        case OP_GET_GLOBAL:    goto do_op_get_global;
-        case OP_SET_GLOBAL:    goto do_op_set_global;
-        case OP_DEF_GLOBAL:    goto do_op_def_global;
-        case OP_POP:           goto do_op_pop;
-        case OP_JUMP:          goto do_op_jump;
-        case OP_JUMP_IF_FALSE: goto do_op_jump_if_false;
-        case OP_CLOSURE:       goto do_op_closure;
-        case OP_CALL:          goto do_op_call;
-        case OP_TAIL_CALL:     goto do_op_tail_call;
-        case OP_RETURN:        goto do_op_return;
-        case OP_ADD:           goto do_op_add;
-        case OP_SUB:           goto do_op_sub;
-        case OP_MUL:           goto do_op_mul;
-        case OP_LT:            goto do_op_lt;
-        case OP_GT:            goto do_op_gt;
-        case OP_LE:            goto do_op_le;
-        case OP_GE:            goto do_op_ge;
-        case OP_NUM_EQ:        goto do_op_num_eq;
-        case OP_CALL_PRIM:     goto do_op_call_prim;
-        case OP_CAR:           goto do_op_car;
-        case OP_CDR:           goto do_op_cdr;
-        case OP_NOT:           goto do_op_not;
-        case OP_NULLP:         goto do_op_nullp;
-        case OP_PAIRP:         goto do_op_pairp;
-        case OP_EQ:            goto do_op_eq;
-        case OP_VECTOR_REF:    goto do_op_vector_ref;
-        default:               goto do_op_bad;
+        case OP_HALT:              goto do_op_halt;
+        case OP_CONST:             goto do_op_const;
+        case OP_INT8:              goto do_op_int8;
+        case OP_NIL:               goto do_op_nil;
+        case OP_TRUE:              goto do_op_true;
+        case OP_FALSE:             goto do_op_false;
+        case OP_VOID:              goto do_op_void;
+        case OP_GET_LOCAL:         goto do_op_get_local;
+        case OP_SET_LOCAL:         goto do_op_set_local;
+        case OP_GET_UPVALUE:       goto do_op_get_upvalue;
+        case OP_SET_UPVALUE:       goto do_op_set_upvalue;
+        case OP_GET_GLOBAL:        goto do_op_get_global;
+        case OP_SET_GLOBAL:        goto do_op_set_global;
+        case OP_DEF_GLOBAL:        goto do_op_def_global;
+        case OP_POP:               goto do_op_pop;
+        case OP_JUMP:              goto do_op_jump;
+        case OP_JUMP_IF_FALSE:     goto do_op_jump_if_false;
+        case OP_CLOSURE:           goto do_op_closure;
+        case OP_CALL:              goto do_op_call;
+        case OP_TAIL_CALL:         goto do_op_tail_call;
+        case OP_RETURN:            goto do_op_return;
+        case OP_ADD:               goto do_op_add;
+        case OP_SUB:               goto do_op_sub;
+        case OP_MUL:               goto do_op_mul;
+        case OP_LT:                goto do_op_lt;
+        case OP_GT:                goto do_op_gt;
+        case OP_LE:                goto do_op_le;
+        case OP_GE:                goto do_op_ge;
+        case OP_NUM_EQ:            goto do_op_num_eq;
+        case OP_CALL_PRIM:         goto do_op_call_prim;
+        case OP_CAR:               goto do_op_car;
+        case OP_CDR:               goto do_op_cdr;
+        case OP_NOT:               goto do_op_not;
+        case OP_NULLP:             goto do_op_nullp;
+        case OP_PAIRP:             goto do_op_pairp;
+        case OP_EQ:                goto do_op_eq;
+        case OP_VECTOR_REF:        goto do_op_vector_ref;
+        case OP_CALL_SELF:         goto do_op_call_self;
+        case OP_TAIL_CALL_SELF:    goto do_op_tail_call_self;
+        case OP_JUMP_IF_TRUE_KEEP: goto do_op_jump_if_true_keep;
+        case OP_CONS:              goto do_op_cons;
+        case OP_VECTOR_SET:        goto do_op_vector_set;
+        case OP_REM:               goto do_op_rem;
+        case OP_QUOT:              goto do_op_quot;
+        case OP_DIV:               goto do_op_div;
+        case OP_GET_LOCAL2:        goto do_op_get_local2;
+        case OP_SET_LOCAL_POP:     goto do_op_set_local_pop;
+        case OP_ADD_LOC_IMM:       goto do_op_add_loc_imm;
+        case OP_SUB_LOC_IMM:       goto do_op_sub_loc_imm;
+        case OP_ADD_LOC_LOC:       goto do_op_add_loc_loc;
+        case OP_SUB_LOC_LOC:       goto do_op_sub_loc_loc;
+        case OP_MUL_LOC_LOC:       goto do_op_mul_loc_loc;
+        case OP_EQ_LOC_IMM:        goto do_op_eq_loc_imm;
+        case OP_LT_LOC_IMM:        goto do_op_lt_loc_imm;
+        case OP_GT_LOC_IMM:        goto do_op_gt_loc_imm;
+        case OP_EQ_LOC_LOC:        goto do_op_eq_loc_loc;
+        case OP_LT_LOC_LOC:        goto do_op_lt_loc_loc;
+        case OP_LE_LOC_LOC:        goto do_op_le_loc_loc;
+        case OP_GT_LOC_LOC:        goto do_op_gt_loc_loc;
+        case OP_CAR_LOC:           goto do_op_car_loc;
+        case OP_CDR_LOC:           goto do_op_cdr_loc;
+        case OP_NULLP_LOC:         goto do_op_nullp_loc;
+        default:                   goto do_op_bad;
     }
 #endif
     {
 
-    /* Stop VM execution */
     do_op_halt: {
         goto vm_done;
     }
@@ -601,70 +801,139 @@ vm_loop:
         goto vm_err;
     }
 
-    /* Two-argument arithmetic and comparisons (API 1.14). A fixnum is its value shifted
-     * left by 3 with tag 0, so tagged fixnums add, subtract and compare as they are and an
-     * overflow of the machine word is exactly a result outside the fixnum range. The slow
-     * path calls the primitive on the two stack slots (rooted there), as OP_CALL would. */
 #define PRIM_SLOW(prim, n) do { \
         SYNC_VM_STATE(); \
         Value res_ = prim(vm, (n), sp - (n)); \
-        if (vm->has_error) goto vm_err; \
+        if (MINI_UNLIKELY(vm->has_error)) goto vm_err; \
         RELOAD_VM_STATE(); \
         sp -= (n); \
         *sp++ = res_; \
         DISPATCH(); \
     } while (0)
 #define ARITH_SLOW(prim) PRIM_SLOW(prim, 2)
-/* A boolean in place of the top n values; when OP_JUMP_IF_FALSE follows ((if (< a b) ...)),
- * branch at once instead (no boolean on the stack, one dispatch less) */
+
 #define BOOL_RESULT(r, n) do { \
         bool r_ = (r); \
-        if (*pc == OP_JUMP_IF_FALSE) { \
+        uint8_t next_op_ = *pc; \
+        if (MINI_LIKELY(next_op_ == OP_JUMP_IF_FALSE)) { \
             int16_t off_ = (int16_t)(pc[1] | ((uint16_t)pc[2] << 8)); \
             pc += 3; \
-            sp -= (n); \
+            sp -= (int)(n); \
             if (!r_) pc += off_; \
             DISPATCH(); \
         } \
-        sp -= (n) - 1; \
+        if (next_op_ == OP_JUMP_IF_TRUE_KEEP) { \
+            int16_t off_ = (int16_t)(pc[1] | ((uint16_t)pc[2] << 8)); \
+            pc += 3; \
+            if (r_) { \
+                sp = sp - (int)(n) + 1; \
+                sp[-1] = MINI_CONST_TRUE; \
+                pc += off_; \
+            } else { \
+                sp -= (int)(n); \
+            } \
+            DISPATCH(); \
+        } \
+        sp = sp - (int)(n) + 1; \
         sp[-1] = r_ ? MINI_CONST_TRUE : MINI_CONST_FALSE; \
         DISPATCH(); \
     } while (0)
+
 #define ARITH_COMPARE(cmp, prim) do { \
         Value a_ = sp[-2], b_ = sp[-1]; \
-        if (mini_is_fixnum(a_) && mini_is_fixnum(b_)) BOOL_RESULT((intptr_t)a_ cmp (intptr_t)b_, 2); \
+        if (MINI_LIKELY(mini_is_fixnum(a_) && mini_is_fixnum(b_))) { \
+            BOOL_RESULT((intptr_t)a_ cmp (intptr_t)b_, 2); \
+        } \
+        double da_, db_; \
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a_, b_, &da_, &db_))) { \
+            BOOL_RESULT(da_ cmp db_, 2); \
+        } \
         ARITH_SLOW(prim); \
+    } while (0)
+
+#define BIN_FLONUM_FAST(a_, b_, fop_) do { \
+        double da_, db_; \
+        if (MINI_LIKELY(vm_flonum_pair_to_double((a_), (b_), &da_, &db_))) { \
+            Value fv_; \
+            if (MINI_LIKELY(vm_try_make_flonum_inline(vm, da_ fop_ db_, &fv_))) { \
+                sp--; \
+                sp[-1] = fv_; \
+                DISPATCH(); \
+            } \
+            SYNC_VM_STATE(); \
+            fv_ = vm_box_flonum_slow(vm, da_ fop_ db_); \
+            if (MINI_UNLIKELY(vm->has_error)) goto vm_err; \
+            RELOAD_VM_STATE(); \
+            sp--; \
+            sp[-1] = fv_; \
+            DISPATCH(); \
+        } \
     } while (0)
 
     do_op_add: {
         Value a = sp[-2], b = sp[-1];
         intptr_t r;
-        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_add_ok(a, b, &r)) {
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_add_ok(a, b, &r))) {
             sp--;
             sp[-1] = (Value)r;
             DISPATCH();
         }
+        BIN_FLONUM_FAST(a, b, +);
         ARITH_SLOW(prim_add);
     }
     do_op_sub: {
         Value a = sp[-2], b = sp[-1];
         intptr_t r;
-        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_sub_ok(a, b, &r)) {
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_sub_ok(a, b, &r))) {
             sp--;
             sp[-1] = (Value)r;
             DISPATCH();
         }
+        BIN_FLONUM_FAST(a, b, -);
         ARITH_SLOW(prim_sub);
     }
     do_op_mul: {
         Value a = sp[-2], b = sp[-1];
         intptr_t r;
-        if (mini_is_fixnum(a) && mini_is_fixnum(b) && fixnum_mul_ok(a, b, &r)) {
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_mul_ok(a, b, &r))) {
             sp--;
             sp[-1] = (Value)r;
             DISPATCH();
         }
+        BIN_FLONUM_FAST(a, b, *);
         ARITH_SLOW(prim_mul);
+    }
+    do_op_div: {
+        Value a = sp[-2], b = sp[-1];
+        if (((a | b) & MINI_TAG_MASK) == 0) {
+            int64_t x = mini_to_fixnum(a), y = mini_to_fixnum(b);
+            if (MINI_LIKELY(y != 0)) {
+                if (MINI_LIKELY(!(x == MINI_FIXNUM_MIN && y == -1)) && x % y == 0) {
+                    sp--;
+                    sp[-1] = mini_make_fixnum(x / y);
+                    DISPATCH();
+                }
+                if (MINI_LIKELY(!(x == MINI_FIXNUM_MIN && y == -1))) {
+                    Value fv;
+                    if (MINI_LIKELY(vm_try_make_flonum_inline(vm, (double)x / (double)y, &fv))) {
+                        sp--;
+                        sp[-1] = fv;
+                        DISPATCH();
+                    }
+                }
+            }
+            ARITH_SLOW(prim_div);
+        }
+        double da, db;
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a, b, &da, &db) && db != 0.0)) {
+            Value fv;
+            if (MINI_LIKELY(vm_try_make_flonum_inline(vm, da / db, &fv))) {
+                sp--;
+                sp[-1] = fv;
+                DISPATCH();
+            }
+        }
+        ARITH_SLOW(prim_div);
     }
     do_op_lt:     ARITH_COMPARE(<,  prim_lt);
     do_op_gt:     ARITH_COMPARE(>,  prim_gt);
@@ -672,11 +941,9 @@ vm_loop:
     do_op_ge:     ARITH_COMPARE(>=, prim_ge);
     do_op_num_eq: ARITH_COMPARE(==, prim_num_eq);
 
-    /* API 1.15 inline procedures: the fast cases here, anything else (a wrong type, an index
-     * out of range) through the primitive, with its errors */
     do_op_car: {
         Value p = sp[-1];
-        if (mini_is_pair(p)) {
+        if (MINI_LIKELY(mini_is_pair(p))) {
             sp[-1] = ((const MiniPairCells *)UNTAG_PTR(p))->car;
             DISPATCH();
         }
@@ -684,7 +951,7 @@ vm_loop:
     }
     do_op_cdr: {
         Value p = sp[-1];
-        if (mini_is_pair(p)) {
+        if (MINI_LIKELY(mini_is_pair(p))) {
             sp[-1] = ((const MiniPairCells *)UNTAG_PTR(p))->cdr;
             DISPATCH();
         }
@@ -694,12 +961,13 @@ vm_loop:
     do_op_nullp:  BOOL_RESULT(sp[-1] == MINI_CONST_NIL, 1);
     do_op_pairp:  BOOL_RESULT(mini_is_pair(sp[-1]), 1);
     do_op_eq:     BOOL_RESULT(sp[-2] == sp[-1], 2);
+
     do_op_vector_ref: {
         Value v = sp[-2], k = sp[-1];
-        if (mini_is_vector(v) && mini_is_fixnum(k)) {
+        if (MINI_LIKELY(mini_is_vector(v) && mini_is_fixnum(k))) {
             const VectorObj *vec = (const VectorObj *)UNTAG_PTR(v);
             int64_t i = mini_to_fixnum(k);
-            if (i >= 0 && (uint64_t)i < (uint64_t)vec->length) {
+            if (MINI_LIKELY(i >= 0 && (uint64_t)i < (uint64_t)vec->length)) {
                 sp--;
                 sp[-1] = vec->data[i];
                 DISPATCH();
@@ -708,35 +976,285 @@ vm_loop:
         PRIM_SLOW(prim_vector_ref, 2);
     }
 
-    /* (f a ...) of API procedure number id (API 1.15): its C function straight away, as OP_CALL
-     * calls a C procedure, but with no global lookup and no procedure on the stack */
+    do_op_vector_set: {
+        Value v = sp[-3], k = sp[-2], val = sp[-1];
+        if (MINI_LIKELY(mini_is_vector(v) && mini_is_fixnum(k))) {
+            VectorObj *vec = (VectorObj *)UNTAG_PTR(v);
+            int64_t i = mini_to_fixnum(k);
+            size_t rom_len = (size_t)(vm->xrom_end - vm->xrom_start);
+            bool in_rom = rom_len > 0 && ((uintptr_t)vec - (uintptr_t)vm->xrom_start) < rom_len;
+            if (MINI_LIKELY(i >= 0 && (uint64_t)i < (uint64_t)vec->length && !in_rom)) {
+                vec->data[i] = val;
+                mini_write_barrier(vm, v, val);
+                if (*pc == OP_POP) {
+                    pc++;
+                    sp -= 3;
+                    DISPATCH();
+                }
+                sp -= 2;
+                sp[-1] = MINI_CONST_VOID;
+                DISPATCH();
+            }
+        }
+        PRIM_SLOW(prim_vector_set, 3);
+    }
+
+    do_op_cons: {
+        size_t aligned_sz = ALIGN8(sizeof(PairObj));
+        if (MINI_LIKELY(vm->eden_hp + aligned_sz <= vm->eden_limit)) {
+            PairObj *p = (PairObj *)vm->eden_hp;
+            vm->eden_hp += aligned_sz;
+            vm->stat_alloc_bytes += aligned_sz;
+            PROF_SAVE(prof_prev);
+            PROF_SITE("cons");
+#ifdef MINI_ALLOC_PROFILE
+            mini_prof_alloc(aligned_sz, OBJ_PAIR);
+#endif
+            PROF_SITE(prof_prev);
+            p->header.type = OBJ_PAIR;
+            p->header.size = (uint32_t)aligned_sz;
+            p->car = sp[-2];
+            p->cdr = sp[-1];
+            sp--;
+            sp[-1] = ((uintptr_t)p) | MINI_TAG_PAIR;
+            DISPATCH();
+        }
+        PRIM_SLOW(prim_cons_slow, 2);
+    }
+
+    do_op_rem: {
+        Value a = sp[-2], b = sp[-1];
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && b != 0)) {
+            sp--;
+            sp[-1] = (Value)((intptr_t)a % (intptr_t)b);
+            DISPATCH();
+        }
+        ARITH_SLOW(prim_remainder);
+    }
+
+    do_op_quot: {
+        Value a = sp[-2], b = sp[-1];
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && b != 0)) {
+            int64_t q = (intptr_t)a / (intptr_t)b;
+            if (MINI_LIKELY(q <= MINI_FIXNUM_MAX)) {
+                sp--;
+                sp[-1] = mini_make_fixnum(q);
+                DISPATCH();
+            }
+        }
+        ARITH_SLOW(prim_quotient);
+    }
+
+    /* API 1.16 Local Operand Superinstructions */
+    do_op_get_local2: {
+        uint8_t s0 = pc[0], s1 = pc[1];
+        pc += 2;
+        if (MINI_LIKELY(!code->has_inner_lambdas)) {
+            sp[0] = fp[s0];
+            sp[1] = fp[s1];
+            sp += 2;
+            DISPATCH();
+        }
+        Value env = frames[frame_count - 1].env;
+        sp[0] = vm_get_heap_local(env, s0);
+        sp[1] = vm_get_heap_local(env, s1);
+        sp += 2;
+        DISPATCH();
+    }
+
+    do_op_set_local_pop: {
+        uint8_t slot = *pc++;
+        Value val = *(--sp);
+        fp[slot] = val;
+        if (MINI_UNLIKELY(code->has_inner_lambdas)) {
+            vm_set_heap_local(vm, frames[frame_count - 1].env, slot, val);
+        }
+        DISPATCH();
+    }
+
+    do_op_add_loc_imm: {
+        uint8_t slot = pc[0];
+        Value imm = mini_make_fixnum((int8_t)pc[1]);
+        pc += 2;
+        Value a = READ_LOCAL(slot);
+        intptr_t r;
+        if (MINI_LIKELY(mini_is_fixnum(a) && fixnum_add_ok(a, imm, &r))) {
+            *sp++ = (Value)r;
+            DISPATCH();
+        }
+        sp[0] = a; sp[1] = imm; sp += 2;
+        BIN_FLONUM_FAST(a, imm, +);
+        ARITH_SLOW(prim_add);
+    }
+
+    do_op_sub_loc_imm: {
+        uint8_t slot = pc[0];
+        Value imm = mini_make_fixnum((int8_t)pc[1]);
+        pc += 2;
+        Value a = READ_LOCAL(slot);
+        intptr_t r;
+        if (MINI_LIKELY(mini_is_fixnum(a) && fixnum_sub_ok(a, imm, &r))) {
+            *sp++ = (Value)r;
+            DISPATCH();
+        }
+        sp[0] = a; sp[1] = imm; sp += 2;
+        BIN_FLONUM_FAST(a, imm, -);
+        ARITH_SLOW(prim_sub);
+    }
+
+    do_op_add_loc_loc: {
+        uint8_t s0 = pc[0], s1 = pc[1];
+        pc += 2;
+        Value a = READ_LOCAL(s0), b = READ_LOCAL(s1);
+        intptr_t r;
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_add_ok(a, b, &r))) {
+            *sp++ = (Value)r;
+            DISPATCH();
+        }
+        double da, db;
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a, b, &da, &db))) {
+            Value fv;
+            if (MINI_LIKELY(vm_try_make_flonum_inline(vm, da + db, &fv))) {
+                *sp++ = fv;
+                DISPATCH();
+            }
+        }
+        sp[0] = a; sp[1] = b; sp += 2;
+        ARITH_SLOW(prim_add);
+    }
+
+    do_op_sub_loc_loc: {
+        uint8_t s0 = pc[0], s1 = pc[1];
+        pc += 2;
+        Value a = READ_LOCAL(s0), b = READ_LOCAL(s1);
+        intptr_t r;
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_sub_ok(a, b, &r))) {
+            *sp++ = (Value)r;
+            DISPATCH();
+        }
+        double da, db;
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a, b, &da, &db))) {
+            Value fv;
+            if (MINI_LIKELY(vm_try_make_flonum_inline(vm, da - db, &fv))) {
+                *sp++ = fv;
+                DISPATCH();
+            }
+        }
+        sp[0] = a; sp[1] = b; sp += 2;
+        ARITH_SLOW(prim_sub);
+    }
+
+    do_op_mul_loc_loc: {
+        uint8_t s0 = pc[0], s1 = pc[1];
+        pc += 2;
+        Value a = READ_LOCAL(s0), b = READ_LOCAL(s1);
+        intptr_t r;
+        if (MINI_LIKELY(((a | b) & MINI_TAG_MASK) == 0 && fixnum_mul_ok(a, b, &r))) {
+            *sp++ = (Value)r;
+            DISPATCH();
+        }
+        double da, db;
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a, b, &da, &db))) {
+            Value fv;
+            if (MINI_LIKELY(vm_try_make_flonum_inline(vm, da * db, &fv))) {
+                *sp++ = fv;
+                DISPATCH();
+            }
+        }
+        sp[0] = a; sp[1] = b; sp += 2;
+        ARITH_SLOW(prim_mul);
+    }
+
+#define CMP_LOC_IMM_IMPL(cmp, prim) do { \
+        uint8_t slot_ = pc[0]; \
+        Value imm_ = mini_make_fixnum((int8_t)pc[1]); \
+        pc += 2; \
+        Value a_ = READ_LOCAL(slot_); \
+        if (MINI_LIKELY(mini_is_fixnum(a_))) { \
+            BOOL_RESULT((intptr_t)a_ cmp (intptr_t)imm_, 0); \
+        } \
+        double da_; \
+        if (MINI_LIKELY(mini_is_flonum(a_) && vm_num_to_double_fast(a_, &da_))) { \
+            BOOL_RESULT(da_ cmp (double)mini_to_fixnum(imm_), 0); \
+        } \
+        sp[0] = a_; sp[1] = imm_; sp += 2; \
+        ARITH_SLOW(prim); \
+    } while (0)
+
+#define CMP_LOC_LOC_IMPL(cmp, prim) do { \
+        uint8_t s0_ = pc[0], s1_ = pc[1]; \
+        pc += 2; \
+        Value a_ = READ_LOCAL(s0_), b_ = READ_LOCAL(s1_); \
+        if (MINI_LIKELY(((a_ | b_) & MINI_TAG_MASK) == 0)) { \
+            BOOL_RESULT((intptr_t)a_ cmp (intptr_t)b_, 0); \
+        } \
+        double da_, db_; \
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a_, b_, &da_, &db_))) { \
+            BOOL_RESULT(da_ cmp db_, 0); \
+        } \
+        sp[0] = a_; sp[1] = b_; sp += 2; \
+        ARITH_SLOW(prim); \
+    } while (0)
+
+    do_op_eq_loc_imm: CMP_LOC_IMM_IMPL(==, prim_num_eq);
+    do_op_lt_loc_imm: CMP_LOC_IMM_IMPL(<,  prim_lt);
+    do_op_gt_loc_imm: CMP_LOC_IMM_IMPL(>,  prim_gt);
+
+    do_op_eq_loc_loc: CMP_LOC_LOC_IMPL(==, prim_num_eq);
+    do_op_lt_loc_loc: CMP_LOC_LOC_IMPL(<,  prim_lt);
+    do_op_le_loc_loc: CMP_LOC_LOC_IMPL(<=, prim_le);
+    do_op_gt_loc_loc: CMP_LOC_LOC_IMPL(>,  prim_gt);
+
+    do_op_car_loc: {
+        uint8_t slot = *pc++;
+        Value p = READ_LOCAL(slot);
+        if (MINI_LIKELY(mini_is_pair(p))) {
+            *sp++ = ((const MiniPairCells *)UNTAG_PTR(p))->car;
+            DISPATCH();
+        }
+        *sp++ = p;
+        PRIM_SLOW(prim_car, 1);
+    }
+
+    do_op_cdr_loc: {
+        uint8_t slot = *pc++;
+        Value p = READ_LOCAL(slot);
+        if (MINI_LIKELY(mini_is_pair(p))) {
+            *sp++ = ((const MiniPairCells *)UNTAG_PTR(p))->cdr;
+            DISPATCH();
+        }
+        *sp++ = p;
+        PRIM_SLOW(prim_cdr, 1);
+    }
+
+    do_op_nullp_loc: {
+        uint8_t slot = *pc++;
+        Value v = READ_LOCAL(slot);
+        BOOL_RESULT(v == MINI_CONST_NIL, 0);
+    }
+
     do_op_call_prim: {
         uint16_t id = (uint16_t)(pc[0] | ((uint16_t)pc[1] << 8));
         call_argc = pc[2];
         pc += 3;
         MiniCFunc fn = (vm->prim_fns && id < MINI_API_ID_COUNT) ? vm->prim_fns[id] : NULL;
-        if (!fn) {
+        if (MINI_UNLIKELY(!fn)) {
             SYNC_VM_STATE();
             fn = prim_resolve(vm, id);
             RELOAD_VM_STATE();
             if (!fn) goto vm_err;
         }
-        if (fn == prim_by_call) {
-            /* the ordinary call of the global: its value below the arguments, as OP_CALL has it */
-            SYNC_VM_STATE();
-            Value val = MINI_CONST_VOID;
-            const char *name;
-            for (size_t k = 0; mini_is_void(val) && !vm->has_error && (name = api_id_name(id, k)) != NULL; k++) {
-                Value sym = mini_make_symbol(vm, name);
-                val = env_lookup(vm, vm->global_env, sym);
-                if (mini_is_void(val)) val = global_miss(vm, sym);
-            }
-            RELOAD_VM_STATE();
-            if (vm->has_error) goto vm_err;
-            if (mini_is_void(val)) {
-                const char *hint = mini_api_unbound_hook ? mini_api_unbound_hook(mini_api_id_names[id]) : NULL;
-                vm_error(vm, "unbound variable: %s%s", mini_api_id_names[id], hint ? hint : "");
-                goto vm_err;
+        if (MINI_UNLIKELY(fn == prim_by_call)) {
+            uint32_t slot = (uint32_t)id & 31u;
+            Value val;
+            if (MINI_LIKELY(vm->prim_bcache[slot].id1 == (uint32_t)id + 1u &&
+                            vm->prim_bcache[slot].gen == vm->gcache_gen)) {
+                val = mini_cdr(vm->prim_bcache[slot].binding);
+            } else {
+                SYNC_VM_STATE();
+                val = vm_prim_by_call_lookup(vm, id);
+                RELOAD_VM_STATE();
+                if (MINI_UNLIKELY(vm->has_error)) goto vm_err;
             }
             for (int i = 0; i < call_argc; i++) sp[-i] = sp[-i - 1];
             sp[-call_argc] = val;
@@ -744,50 +1262,53 @@ vm_loop:
             callee = val;
             goto do_call_dispatch;
         }
-        frames[frame_count - 1].pc = pc;
-        vm->sp = sp;
-        vm->call_frame_count = frame_count;
+        SYNC_VM_STATE();
         {
             PROF_SAVE(prof_prev);
             PROF_SITE(mini_api_id_names[id]);
             Value res = fn(vm, call_argc, sp - call_argc);
             PROF_SITE(prof_prev);
-            if (vm->has_error) goto vm_err;
-            if (vm->state_reloaded) {
+            if (MINI_UNLIKELY(vm->has_error)) goto vm_err;
+            if (MINI_UNLIKELY(vm->state_reloaded)) {
                 vm->state_reloaded = false;
                 vm->sp = vm->stack;
                 vm->call_frame_count = 0;
                 return res;
             }
-            code = frames[frame_count - 1].code;
-            pc = frames[frame_count - 1].pc;
-            consts = CODE_CONSTS(code);
-            sp = vm->sp;
+            RELOAD_VM_STATE();
             sp -= call_argc;
             *sp++ = res;
         }
         DISPATCH();
     }
+
+#undef CMP_LOC_LOC_IMPL
+#undef CMP_LOC_IMM_IMPL
+#undef BIN_FLONUM_FAST
 #undef ARITH_COMPARE
 #undef ARITH_SLOW
 #undef PRIM_SLOW
 #undef BOOL_RESULT
 
-    /* Load constant from pool: operand is 16-bit little-endian index */
     do_op_const: {
         uint16_t idx = pc[0] | ((uint16_t)pc[1] << 8);
         pc += 2;
-        *sp++ = vm_fetch_const(vm, code, consts, idx);
+        if (MINI_UNLIKELY(vm->rom_base != NULL)) {
+            SYNC_VM_STATE();
+            Value cv = vm_fetch_const(vm, code, idx);
+            RELOAD_VM_STATE();
+            *sp++ = cv;
+            DISPATCH();
+        }
+        *sp++ = CODE_CONSTS(code)[idx];
         DISPATCH();
     }
 
-    /* Load 8-bit signed immediate integer (-128 to 127) */
     do_op_int8: {
         *sp++ = mini_make_fixnum((int8_t)*pc++);
         DISPATCH();
     }
 
-    /* Push singleton constants */
     do_op_nil: {
         *sp++ = MINI_CONST_NIL;
         DISPATCH();
@@ -810,15 +1331,9 @@ vm_loop:
 
     do_op_get_local: {
         uint8_t slot = *pc++;
-        if (code->has_inner_lambdas) {
-            Value node = mini_car(frames[frame_count - 1].env);
-            for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
-                node = mini_cdr(node);
-            }
-            if (mini_is_pair(node)) {
-                *sp++ = mini_car(node);
-                DISPATCH();
-            }
+        if (MINI_UNLIKELY(code->has_inner_lambdas)) {
+            *sp++ = vm_get_heap_local(frames[frame_count - 1].env, slot);
+            DISPATCH();
         }
         *sp++ = fp[slot];
         DISPATCH();
@@ -828,15 +1343,8 @@ vm_loop:
         uint8_t slot = *pc++;
         Value val = *(sp - 1);
         fp[slot] = val;
-        if (code->has_inner_lambdas) {
-            Value node = mini_car(frames[frame_count - 1].env);
-            for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
-                node = mini_cdr(node);
-            }
-            if (mini_is_pair(node)) {
-                mini_set_car(node, val);
-                mini_write_barrier(vm, node, val);
-            }
+        if (MINI_UNLIKELY(code->has_inner_lambdas)) {
+            vm_set_heap_local(vm, frames[frame_count - 1].env, slot, val);
         }
         DISPATCH();
     }
@@ -879,17 +1387,16 @@ vm_loop:
         DISPATCH();
     }
 
-    /* Read global variable from global environment */
     do_op_get_global: {
         uint16_t idx = pc[0] | ((uint16_t)pc[1] << 8);
         pc += 2;
-        Value sym = vm_fetch_const(vm, code, consts, idx);
+        Value sym = vm_fetch_const(vm, code, idx);
         Value val = env_lookup(vm, vm->global_env, sym);
-        if (mini_is_void(val)) {
+        if (MINI_UNLIKELY(mini_is_void(val))) {
             SYNC_VM_STATE();
             val = global_miss(vm, sym);
             RELOAD_VM_STATE();
-            if (mini_is_void(val)) {
+            if (MINI_UNLIKELY(mini_is_void(val))) {
                 const char *hint = mini_api_unbound_hook ? mini_api_unbound_hook(mini_symbol_name(sym)) : NULL;
                 vm_error(vm, "unbound variable: %s%s", mini_symbol_name(sym), hint ? hint : "");
                 goto vm_err;
@@ -899,11 +1406,10 @@ vm_loop:
         DISPATCH();
     }
 
-    /* Mutate existing global variable */
     do_op_set_global: {
         uint16_t idx = pc[0] | ((uint16_t)pc[1] << 8);
         pc += 2;
-        Value sym = vm_fetch_const(vm, code, consts, idx);
+        Value sym = vm_fetch_const(vm, code, idx);
         SYNC_VM_STATE();
         env_set(vm, vm->global_env, sym, *(sp - 1));
         RELOAD_VM_STATE();
@@ -911,11 +1417,10 @@ vm_loop:
         DISPATCH();
     }
 
-    /* Define new global variable binding */
     do_op_def_global: {
         uint16_t idx = pc[0] | ((uint16_t)pc[1] << 8);
         pc += 2;
-        Value sym = vm_fetch_const(vm, code, consts, idx);
+        Value sym = vm_fetch_const(vm, code, idx);
         Value val = *(--sp);
         SYNC_VM_STATE();
         env_define(vm, vm->global_env, sym, val);
@@ -925,20 +1430,17 @@ vm_loop:
         DISPATCH();
     }
 
-    /* Pop top operand from stack */
     do_op_pop: {
         --sp;
         DISPATCH();
     }
 
-    /* Unconditional relative jump */
     do_op_jump: {
         int16_t offset = (int16_t)(pc[0] | ((uint16_t)pc[1] << 8));
         pc += 2 + offset;
         DISPATCH();
     }
 
-    /* Conditional jump: branch if condition is #f */
     do_op_jump_if_false: {
         int16_t offset = (int16_t)(pc[0] | ((uint16_t)pc[1] << 8));
         pc += 2;
@@ -949,32 +1451,146 @@ vm_loop:
         DISPATCH();
     }
 
-    /* Instantiate a closure capturing the current lexical environment */
+    do_op_jump_if_true_keep: {
+        int16_t offset = (int16_t)(pc[0] | ((uint16_t)pc[1] << 8));
+        pc += 2;
+        if (sp[-1] != MINI_CONST_FALSE) {
+            pc += offset;
+        } else {
+            --sp;
+        }
+        DISPATCH();
+    }
+
     do_op_closure: {
         uint16_t idx = pc[0] | ((uint16_t)pc[1] << 8);
         pc += 2;
-        Value code_val = vm_fetch_const(vm, code, consts, idx);
+        Value code_val = vm_fetch_const(vm, code, idx);
         SYNC_VM_STATE();
         PROF_SAVE(prof_prev);
         PROF_SITE("<closure>");
         PROF_CODE(UNTAG_PTR(code_val));
         Value clo = mini_make_closure(vm, code_val, frames[frame_count - 1].env);
         PROF_SITE(prof_prev);
-        if (vm->has_error) goto vm_err;
+        if (MINI_UNLIKELY(vm->has_error)) goto vm_err;
         RELOAD_VM_STATE();
         *sp++ = clo;
         DISPATCH();
     }
 
-    /* General procedure invocation */
+    /* API 1.16 Direct Self-Recursion (non-tail & tail) */
+    do_op_call_self: {
+        call_argc = *pc++;
+        ClosureObj *self_cl = frames[frame_count - 1].closure;
+        Value self_val = ((uintptr_t)self_cl) | MINI_TAG_CLOSURE;
+        for (int i = 0; i < (int)call_argc; i++) sp[-i] = sp[-i - 1];
+        sp[-call_argc] = self_val;
+        sp++;
+        if (MINI_LIKELY(!code->is_variadic && !code->has_inner_lambdas &&
+                        call_argc == code->num_params &&
+                        (size_t)frame_count < vm->frame_cap)) {
+            Value *new_fp = sp - call_argc;
+            int needed_locals = get_code_num_locals(code);
+            if (MINI_UNLIKELY(new_fp + needed_locals + 64 >= vm->stack + vm->stack_cap)) {
+                vm_error(vm, "stack overflow");
+                goto vm_err;
+            }
+            frames[frame_count - 1].pc = pc;
+            frames[frame_count].closure = self_cl;
+            frames[frame_count].code = code;
+            frames[frame_count].pc = CODE_BYTES(code);
+            frames[frame_count].fp = new_fp;
+            frames[frame_count].env = self_cl->env;
+            frame_count++;
+            while (sp < new_fp + needed_locals) *sp++ = MINI_CONST_VOID;
+            fp = new_fp;
+            pc = CODE_BYTES(code);
+            DISPATCH();
+        }
+        callee = self_val;
+        goto do_call_dispatch;
+    }
+
+    do_op_tail_call_self: {
+        call_argc = *pc++;
+        if (MINI_LIKELY(!code->is_variadic && !code->has_inner_lambdas &&
+                        call_argc == code->num_params)) {
+            Value *args_src = sp - call_argc;
+            for (int i = 0; i < (int)call_argc; i++) {
+                fp[i] = args_src[i];
+            }
+            int locals = get_code_num_locals(code);
+            sp = fp + call_argc;
+            while (sp < fp + locals) *sp++ = MINI_CONST_VOID;
+            pc = CODE_BYTES(code);
+            DISPATCH();
+        }
+        ClosureObj *self_cl = frames[frame_count - 1].closure;
+        Value self_val = ((uintptr_t)self_cl) | MINI_TAG_CLOSURE;
+        for (int i = 0; i < (int)call_argc; i++) sp[-i] = sp[-i - 1];
+        sp[-call_argc] = self_val;
+        sp++;
+        callee = self_val;
+        goto do_tail_call_dispatch;
+    }
+
+    /* General procedure invocation — closure fast path first! */
     do_op_call: {
         call_argc = *pc++;
         callee = *(sp - call_argc - 1);
 
     do_call_dispatch:
+        if (MINI_LIKELY(mini_is_closure(callee))) {
+            if (MINI_UNLIKELY((size_t)frame_count >= vm->frame_cap)) {
+                vm_error(vm, "call stack overflow");
+                goto vm_err;
+            }
+            frames[frame_count - 1].pc = pc;
+
+            ClosureObj *callee_cl = (ClosureObj *)UNTAG_PTR(callee);
+            CodeObj *callee_code = (CodeObj *)UNTAG_PTR(callee_cl->code);
+            Value *new_fp = sp - call_argc;
+
+            frames[frame_count].closure = callee_cl;
+            frames[frame_count].code = callee_code;
+            frames[frame_count].pc = CODE_BYTES(callee_code);
+            frames[frame_count].fp = new_fp;
+            frames[frame_count].env = callee_cl->env;
+            frame_count++;
+
+            if (MINI_UNLIKELY(callee_code->is_variadic)) {
+                vm->sp = sp;
+                vm->call_frame_count = frame_count;
+                callee_code = vm_pack_variadic(vm, frame_count - 1, call_argc, callee_code->num_params - 1);
+                new_fp = frames[frame_count - 1].fp;
+                sp = vm->sp;
+            }
+
+            int needed_locals = get_code_num_locals(callee_code);
+            if (MINI_UNLIKELY(new_fp + needed_locals + 64 >= vm->stack + vm->stack_cap)) {
+                vm_error(vm, "stack overflow");
+                goto vm_err;
+            }
+            while (sp < new_fp + needed_locals) *sp++ = MINI_CONST_VOID;
+
+            if (MINI_UNLIKELY(callee_code->has_inner_lambdas)) {
+                vm->sp = sp;
+                vm->call_frame_count = frame_count;
+                callee_code = vm_alloc_env_frame(vm, frame_count - 1, needed_locals);
+                new_fp = frames[frame_count - 1].fp;
+                sp = vm->sp;
+                frames[frame_count - 1].pc = CODE_BYTES(callee_code);
+            }
+
+            fp = new_fp;
+            pc = CODE_BYTES(callee_code);
+            code = callee_code;
+            DISPATCH();
+        }
+
         if (mini_is_cfunc(callee)) {
             CFuncObj *cf = (CFuncObj *)UNTAG_PTR(callee);
-            if (cf->fn == prim_callcc) {
+            if (MINI_UNLIKELY(cf->fn == prim_callcc)) {
                 if (call_argc != 1) {
                     vm_error(vm, "call/cc: expected 1 argument, got %d", (int)call_argc);
                     goto vm_err;
@@ -984,7 +1600,6 @@ vm_loop:
                     vm_error(vm, "call/cc: argument must be a procedure");
                     goto vm_err;
                 }
-                frames[frame_count - 1].pc = pc;
                 Value *caller_sp = sp - call_argc - 1;
                 size_t stack_len = (size_t)(caller_sp - vm->stack);
                 SYNC_VM_STATE();
@@ -1002,24 +1617,19 @@ vm_loop:
                 goto do_call_dispatch;
             }
 
-            frames[frame_count - 1].pc = pc;
-            vm->sp = sp;
-            vm->call_frame_count = frame_count;
+            SYNC_VM_STATE();
             PROF_SAVE(prof_prev);
             PROF_SITE(cf->name);
             Value res = cf->fn(vm, call_argc, sp - call_argc);
             PROF_SITE(prof_prev);
-            if (vm->has_error) goto vm_err;
-            if (vm->state_reloaded) {
+            if (MINI_UNLIKELY(vm->has_error)) goto vm_err;
+            if (MINI_UNLIKELY(vm->state_reloaded)) {
                 vm->state_reloaded = false;
                 vm->sp = vm->stack;
                 vm->call_frame_count = 0;
                 return res;
             }
-            code = frames[frame_count - 1].code;
-            pc = frames[frame_count - 1].pc;
-            consts = CODE_CONSTS(code);
-            sp = vm->sp;
+            RELOAD_VM_STATE();
             sp -= (call_argc + 1);
             *sp++ = res;
             DISPATCH();
@@ -1027,78 +1637,6 @@ vm_loop:
 
         if (mini_is_continuation(callee)) {
             goto do_continuation_restore;
-        }
-
-        if (mini_is_closure(callee)) {
-            if ((size_t)frame_count >= vm->frame_cap) {
-                vm_error(vm, "call stack overflow");
-                goto vm_err;
-            }
-            frames[frame_count - 1].pc = pc;
-
-            ClosureObj *callee_cl = (ClosureObj *)UNTAG_PTR(callee);
-            CodeObj *callee_code = (CodeObj *)UNTAG_PTR(callee_cl->code);
-            Value *new_fp = sp - call_argc;
-
-            frames[frame_count].closure = callee_cl;
-            frames[frame_count].code = callee_code;
-            frames[frame_count].pc = CODE_BYTES(callee_code);
-            frames[frame_count].fp = new_fp;
-            frames[frame_count].env = callee_cl->env;
-            frame_count++;
-            vm->call_frame_count = frame_count;
-            if ((uint32_t)frame_count > vm->stat_frame_peak) vm->stat_frame_peak = (uint32_t)frame_count;
-            if ((uint32_t)(sp - vm->stack) > vm->stat_stack_peak) vm->stat_stack_peak = (uint32_t)(sp - vm->stack);
-
-            if (callee_code->is_variadic) {
-                int fixed = callee_code->num_params - 1;
-                vm->sp = sp;
-                Value rest = mini_nil();
-                mini_push_root(vm, &rest);
-                for (int i = call_argc - 1; i >= fixed; i--) {
-                    rest = mini_make_cons(vm, new_fp[i], rest);
-                }
-                new_fp[fixed] = rest;
-                mini_pop_root(vm);
-                sp = new_fp + fixed + 1;
-                vm->sp = sp;
-                callee_code = frames[frame_count - 1].code;
-            }
-
-            int needed_locals = get_code_num_locals(callee_code);
-            if (new_fp + needed_locals + 64 >= vm->stack + vm->stack_cap) {
-                vm_error(vm, "stack overflow");
-                goto vm_err;
-            }
-            while (sp < new_fp + needed_locals) *sp++ = MINI_CONST_VOID;
-            vm->sp = sp;
-
-            if (callee_code->has_inner_lambdas) {
-                PROF_SAVE(prof_prev);
-                PROF_SITE("<env-frame>");
-                PROF_CODE(callee_code);
-                Value fvals = mini_nil();
-                mini_push_root(vm, &fvals);
-                for (int i = needed_locals - 1; i >= 0; i--) {
-                    fvals = mini_make_cons(vm, new_fp[i], fvals);
-                }
-                Value parent_env = frames[frame_count - 1].closure->env;
-                Value new_env = mini_make_cons(vm, fvals, parent_env);
-                PROF_SITE(prof_prev);
-                mini_pop_root(vm);
-                frames[frame_count - 1].env = new_env;
-                callee_code = frames[frame_count - 1].code;
-            } else {
-                frames[frame_count - 1].env = frames[frame_count - 1].closure->env;
-            }
-            frames[frame_count - 1].pc = CODE_BYTES(callee_code);
-
-            fp = new_fp;
-            pc = CODE_BYTES(callee_code);
-            code = callee_code;
-            consts = CODE_CONSTS(callee_code);
-
-            DISPATCH();
         }
 
         CodeObj *caller_code = (frame_count > 0) ? frames[frame_count - 1].code : NULL;
@@ -1114,9 +1652,62 @@ vm_loop:
         callee = *(sp - call_argc - 1);
 
     do_tail_call_dispatch:
+        if (MINI_LIKELY(mini_is_closure(callee))) {
+            ClosureObj *callee_cl = (ClosureObj *)UNTAG_PTR(callee);
+            CodeObj *callee_code = (CodeObj *)UNTAG_PTR(callee_cl->code);
+            Value *args_src = sp - call_argc;
+
+            for (int i = 0; i < call_argc; i++) {
+                fp[i] = args_src[i];
+            }
+            sp = fp + call_argc;
+
+            if (callee_cl == frames[frame_count - 1].closure && !callee_code->is_variadic &&
+                !callee_code->has_inner_lambdas && call_argc == callee_code->num_params) {
+                int locals = get_code_num_locals(callee_code);
+                while (sp < fp + locals) *sp++ = MINI_CONST_VOID;
+                pc = CODE_BYTES(callee_code);
+                DISPATCH();
+            }
+
+            frames[frame_count - 1].closure = callee_cl;
+            frames[frame_count - 1].code = callee_code;
+            frames[frame_count - 1].pc = CODE_BYTES(callee_code);
+            frames[frame_count - 1].fp = fp;
+            frames[frame_count - 1].env = callee_cl->env;
+
+            if (MINI_UNLIKELY(callee_code->is_variadic)) {
+                vm->sp = sp;
+                vm->call_frame_count = frame_count;
+                callee_code = vm_pack_variadic(vm, frame_count - 1, call_argc, callee_code->num_params - 1);
+                fp = frames[frame_count - 1].fp;
+                sp = vm->sp;
+            }
+
+            int needed_locals = get_code_num_locals(callee_code);
+            if (MINI_UNLIKELY(fp + needed_locals + 64 >= vm->stack + vm->stack_cap)) {
+                vm_error(vm, "stack overflow");
+                goto vm_err;
+            }
+            while (sp < fp + needed_locals) *sp++ = MINI_CONST_VOID;
+
+            if (MINI_UNLIKELY(callee_code->has_inner_lambdas)) {
+                vm->sp = sp;
+                vm->call_frame_count = frame_count;
+                callee_code = vm_alloc_env_frame(vm, frame_count - 1, needed_locals);
+                fp = frames[frame_count - 1].fp;
+                sp = vm->sp;
+                frames[frame_count - 1].pc = CODE_BYTES(callee_code);
+            }
+
+            pc = CODE_BYTES(callee_code);
+            code = callee_code;
+            DISPATCH();
+        }
+
         if (mini_is_cfunc(callee)) {
             CFuncObj *cf = (CFuncObj *)UNTAG_PTR(callee);
-            if (cf->fn == prim_callcc) {
+            if (MINI_UNLIKELY(cf->fn == prim_callcc)) {
                 if (call_argc != 1) {
                     vm_error(vm, "call/cc: expected 1 argument, got %d", (int)call_argc);
                     goto vm_err;
@@ -1144,15 +1735,13 @@ vm_loop:
                 goto do_tail_call_dispatch;
             }
 
-            frames[frame_count - 1].pc = pc;
-            vm->sp = sp;
-            vm->call_frame_count = frame_count;
+            SYNC_VM_STATE();
             PROF_SAVE(prof_prev);
             PROF_SITE(cf->name);
             Value res = cf->fn(vm, call_argc, sp - call_argc);
             PROF_SITE(prof_prev);
-            if (vm->has_error) goto vm_err;
-            if (vm->state_reloaded) {
+            if (MINI_UNLIKELY(vm->has_error)) goto vm_err;
+            if (MINI_UNLIKELY(vm->state_reloaded)) {
                 vm->state_reloaded = false;
                 vm->sp = vm->stack;
                 vm->call_frame_count = 0;
@@ -1172,90 +1761,11 @@ vm_loop:
             fp = parent_f->fp;
             code = parent_f->code;
             pc = parent_f->pc;
-            consts = CODE_CONSTS(code);
             DISPATCH();
         }
 
         if (mini_is_continuation(callee)) {
             goto do_continuation_restore;
-        }
-
-        if (mini_is_closure(callee)) {
-            ClosureObj *callee_cl = (ClosureObj *)UNTAG_PTR(callee);
-            CodeObj *callee_code = (CodeObj *)UNTAG_PTR(callee_cl->code);
-            Value *args_src = sp - call_argc;
-
-            for (int i = 0; i < call_argc; i++) {
-                fp[i] = args_src[i];
-            }
-            sp = fp + call_argc;
-
-            /* A loop: the running closure calls itself. Its frame, code and environment stay;
-             * only the arguments and the other locals start again. */
-            if (callee_cl == frames[frame_count - 1].closure && !callee_code->is_variadic &&
-                !callee_code->has_inner_lambdas && call_argc == callee_code->num_params) {
-                int locals = get_code_num_locals(callee_code);
-                while (sp < fp + locals) *sp++ = MINI_CONST_VOID;
-                vm->sp = sp;
-                pc = CODE_BYTES(callee_code);
-                DISPATCH();
-            }
-
-            frames[frame_count - 1].closure = callee_cl;
-            frames[frame_count - 1].code = callee_code;
-            frames[frame_count - 1].pc = CODE_BYTES(callee_code);
-            frames[frame_count - 1].fp = fp;
-            frames[frame_count - 1].env = callee_cl->env;
-            vm->call_frame_count = frame_count;
-
-            if (callee_code->is_variadic) {
-                int fixed = callee_code->num_params - 1;
-                vm->sp = sp;
-                Value rest = mini_nil();
-                mini_push_root(vm, &rest);
-                for (int i = call_argc - 1; i >= fixed; i--) {
-                    rest = mini_make_cons(vm, fp[i], rest);
-                }
-                fp[fixed] = rest;
-                mini_pop_root(vm);
-                sp = fp + fixed + 1;
-                vm->sp = sp;
-                callee_code = frames[frame_count - 1].code;
-            }
-
-            int needed_locals = get_code_num_locals(callee_code);
-            if (fp + needed_locals + 64 >= vm->stack + vm->stack_cap) {
-                vm_error(vm, "stack overflow");
-                goto vm_err;
-            }
-            while (sp < fp + needed_locals) *sp++ = MINI_CONST_VOID;
-            vm->sp = sp;
-
-            if (callee_code->has_inner_lambdas) {
-                PROF_SAVE(prof_prev);
-                PROF_SITE("<env-frame>");
-                PROF_CODE(callee_code);
-                Value fvals = mini_nil();
-                mini_push_root(vm, &fvals);
-                for (int i = needed_locals - 1; i >= 0; i--) {
-                    fvals = mini_make_cons(vm, fp[i], fvals);
-                }
-                Value parent_env = frames[frame_count - 1].closure->env;
-                Value new_env = mini_make_cons(vm, fvals, parent_env);
-                PROF_SITE(prof_prev);
-                mini_pop_root(vm);
-                frames[frame_count - 1].env = new_env;
-                callee_code = frames[frame_count - 1].code;
-            } else {
-                frames[frame_count - 1].env = frames[frame_count - 1].closure->env;
-            }
-            frames[frame_count - 1].pc = CODE_BYTES(callee_code);
-
-            pc = CODE_BYTES(callee_code);
-            code = callee_code;
-            consts = CODE_CONSTS(callee_code);
-
-            DISPATCH();
         }
 
         CodeObj *caller_code = (frame_count > 0) ? frames[frame_count - 1].code : NULL;
@@ -1269,8 +1779,8 @@ vm_loop:
     do_op_return: {
         Value ret_val = *(--sp);
         frame_count--;
-        vm->call_frame_count = frame_count;
-        if (frame_count == base_frame) {
+        if (MINI_UNLIKELY(frame_count == base_frame)) {
+            vm->call_frame_count = frame_count;
             vm->sp = fp - 1;
             return ret_val;
         }
@@ -1280,7 +1790,6 @@ vm_loop:
         fp = parent_f->fp;
         pc = parent_f->pc;
         code = parent_f->code;
-        consts = CODE_CONSTS(code);
         DISPATCH();
     }
 
@@ -1325,11 +1834,14 @@ vm_loop:
         fp = top_f->fp;
         pc = top_f->pc;
         code = top_f->code;
-        consts = CODE_CONSTS(code);
         DISPATCH();
     }
 
     }
+
+#undef READ_LOCAL
+#undef RELOAD_VM_STATE
+#undef SYNC_VM_STATE
 
 vm_done:
     vm->sp = entry_sp;

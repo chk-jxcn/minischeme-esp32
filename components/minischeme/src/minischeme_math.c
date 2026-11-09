@@ -218,8 +218,8 @@ Value prim_quotient(MiniVM *vm, int argc, Value *argv) {
         if (!fix_div(vm, "quotient", argv[0], argv[1], &fq, &fr)) return mini_void();
         return bigint_from_int64(vm, fq); /* only MIN / -1 leaves fixnum range */
     }
-    Value q, r;
-    if (!bigint_div_rem(vm, argv[0], argv[1], &q, &r)) return mini_void();
+    Value q;
+    if (!bigint_div_rem(vm, argv[0], argv[1], &q, NULL)) return mini_void();
     return q;
 }
 
@@ -233,8 +233,8 @@ Value prim_remainder(MiniVM *vm, int argc, Value *argv) {
         if (!fix_div(vm, "remainder", argv[0], argv[1], &fq, &fr)) return mini_void();
         return mini_make_fixnum(fr);
     }
-    Value q, r;
-    if (!bigint_div_rem(vm, argv[0], argv[1], &q, &r)) return mini_void();
+    Value r;
+    if (!bigint_div_rem(vm, argv[0], argv[1], NULL, &r)) return mini_void();
     return r;
 }
 

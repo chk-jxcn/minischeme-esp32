@@ -25,7 +25,7 @@ typedef uint64_t DoubleLimb;
 /* Allocation and Normalization                                              */
 /* ========================================================================= */
 
-Value bigint_alloc(MiniVM *vm, int32_t sign, uint32_t length) {
+static Value bigint_alloc_uninit(MiniVM *vm, int32_t sign, uint32_t length) {
     if (length == 0) {
         return mini_make_fixnum(0);
     }
@@ -33,11 +33,18 @@ Value bigint_alloc(MiniVM *vm, int32_t sign, uint32_t length) {
     BigIntObj *b = (BigIntObj *)gc_alloc(vm, sz, OBJ_BIGINT);
     if (!b) return mini_void();
     b->header.type = OBJ_BIGINT;
-    b->header.size = (uint32_t)sz;
+    b->header.size = (uint32_t)ALIGN8(sz);
     b->sign = sign;
     b->length = length;
-    memset(b->digits, 0, length * sizeof(Limb));
     return ((uintptr_t)b) | MINI_TAG_RECORD;
+}
+
+Value bigint_alloc(MiniVM *vm, int32_t sign, uint32_t length) {
+    Value v = bigint_alloc_uninit(vm, sign, length);
+    if (!mini_is_bigint(v)) return v;
+    BigIntObj *b = (BigIntObj *)UNTAG_PTR(v);
+    memset(b->digits, 0, length * sizeof(Limb));
+    return v;
 }
 
 Value bigint_normalize(MiniVM *vm, Value v) {
@@ -201,6 +208,22 @@ static void sub_limbs(const Limb *a, uint32_t la, const Limb *b, uint32_t lb, Li
     *out_len = la;
 }
 
+static void mul_limbs_1(const Limb *a, uint32_t la, Limb b0, Limb *res, uint32_t *out_len) {
+    DoubleLimb carry = 0;
+    for (uint32_t i = 0; i < la; i++) {
+        DoubleLimb cur = (DoubleLimb)a[i] * (DoubleLimb)b0 + carry;
+        res[i] = (Limb)cur;
+        carry = cur >> 32;
+    }
+    if (carry != 0) {
+        res[la] = (Limb)carry;
+        *out_len = la + 1;
+    } else {
+        while (la > 0 && res[la - 1] == 0) la--;
+        *out_len = la;
+    }
+}
+
 static void mul_limbs(const Limb *a, uint32_t la, const Limb *b, uint32_t lb, Limb *res, uint32_t *out_len) {
     uint32_t rlen = la + lb;
     memset(res, 0, rlen * sizeof(Limb));
@@ -344,7 +367,8 @@ Value bigint_add(MiniVM *vm, Value a, Value b) {
     if (sb == 0) return a;
 
     uint32_t max_len = (la_len > lb_len ? la_len : lb_len) + 1;
-    Limb *temp = (Limb *)malloc(max_len * sizeof(Limb));
+    Limb sbuf[512];
+    Limb *temp = (max_len <= 512) ? sbuf : (Limb *)malloc(max_len * sizeof(Limb));
     if (!temp) return mini_void();
 
     int32_t sres;
@@ -356,7 +380,7 @@ Value bigint_add(MiniVM *vm, Value a, Value b) {
     } else {
         int c = cmp_limbs(la, la_len, lb, lb_len);
         if (c == 0) {
-            free(temp);
+            if (temp != sbuf) free(temp);
             return mini_make_fixnum(0);
         } else if (c > 0) {
             sub_limbs(la, la_len, lb, lb_len, temp, &rlen);
@@ -367,12 +391,12 @@ Value bigint_add(MiniVM *vm, Value a, Value b) {
         }
     }
 
-    Value res = bigint_alloc(vm, sres, rlen);
-    if (!mini_is_void(res)) {
+    Value res = bigint_alloc_uninit(vm, sres, rlen);
+    if (mini_is_bigint(res)) {
         BigIntObj *rb = (BigIntObj *)UNTAG_PTR(res);
         memcpy(rb->digits, temp, rlen * sizeof(Limb));
     }
-    free(temp);
+    if (temp != sbuf) free(temp);
     return bigint_normalize(vm, res);
 }
 
@@ -436,19 +460,50 @@ Value bigint_mul(MiniVM *vm, Value a, Value b) {
 
     if (sa == 0 || sb == 0) return mini_make_fixnum(0);
 
+    /* Fast path: BigInt * 1-limb Fixnum directly in Eden with zero temp copy/calloc */
+    if (lb_len == 1 || la_len == 1) {
+        const Limb *pa = (lb_len == 1) ? la : lb;
+        uint32_t pa_len = (lb_len == 1) ? la_len : lb_len;
+        Limb b0 = (lb_len == 1) ? lb[0] : la[0];
+        uint32_t max_rlen = pa_len + 1;
+        size_t aligned_sz = ALIGN8(sizeof(BigIntObj) + (max_rlen > 1 ? (size_t)(max_rlen - 1) * sizeof(Limb) : 0));
+        if (MINI_LIKELY(vm->eden_hp + aligned_sz <= vm->eden_limit)) {
+            BigIntObj *rb = (BigIntObj *)vm->eden_hp;
+            vm->eden_hp += aligned_sz;
+            vm->stat_alloc_bytes += aligned_sz;
+#ifdef MINI_ALLOC_PROFILE
+            mini_prof_alloc(aligned_sz, OBJ_BIGINT);
+#endif
+            uint32_t actual_len;
+            mul_limbs_1(pa, pa_len, b0, rb->digits, &actual_len);
+            rb->header.type = OBJ_BIGINT;
+            rb->header.size = (uint32_t)aligned_sz;
+            rb->sign = sa * sb;
+            rb->length = actual_len;
+            return bigint_normalize(vm, ((uintptr_t)rb) | MINI_TAG_RECORD);
+        }
+    }
+
     uint32_t rlen = la_len + lb_len;
-    Limb *temp = (Limb *)calloc(rlen, sizeof(Limb));
+    Limb sbuf[512];
+    Limb *temp = (rlen <= 512) ? sbuf : (Limb *)malloc(rlen * sizeof(Limb));
     if (!temp) return mini_void();
 
     uint32_t actual_len;
-    mul_limbs(la, la_len, lb, lb_len, temp, &actual_len);
+    if (lb_len == 1) {
+        mul_limbs_1(la, la_len, lb[0], temp, &actual_len);
+    } else if (la_len == 1) {
+        mul_limbs_1(lb, lb_len, la[0], temp, &actual_len);
+    } else {
+        mul_limbs(la, la_len, lb, lb_len, temp, &actual_len);
+    }
 
-    Value res = bigint_alloc(vm, sa * sb, actual_len);
-    if (!mini_is_void(res)) {
+    Value res = bigint_alloc_uninit(vm, sa * sb, actual_len);
+    if (mini_is_bigint(res)) {
         BigIntObj *rb = (BigIntObj *)UNTAG_PTR(res);
         memcpy(rb->digits, temp, actual_len * sizeof(Limb));
     }
-    free(temp);
+    if (temp != sbuf) free(temp);
     return bigint_normalize(vm, res);
 }
 
@@ -565,19 +620,35 @@ bool bigint_div_rem(MiniVM *vm, Value a, Value b, Value *out_quot, Value *out_re
         lb = bb->digits; lb_len = bb->length; sb = bb->sign;
     }
 
-    Limb *q_limbs = (Limb *)calloc(la_len + 1, sizeof(Limb));
-    Limb *r_limbs = (Limb *)calloc(la_len + 2, sizeof(Limb));
+    /* Zero-alloc fast path when only remainder is requested and divisor fits in 1 limb */
+    if (!out_quot && out_rem && lb_len == 1) {
+        DoubleLimb rem_acc = 0;
+        Limb d0 = lb[0];
+        for (int i = (int)la_len - 1; i >= 0; i--) {
+            rem_acc = ((rem_acc << 32) | la[i]) % d0;
+        }
+        int64_t sr = (sa < 0) ? -(int64_t)rem_acc : (int64_t)rem_acc;
+        *out_rem = bigint_from_int64(vm, sr);
+        return true;
+    }
+
+    Limb sq_buf[256], sr_buf[258];
+    Limb *q_limbs = (la_len + 1 <= 256) ? sq_buf : (Limb *)malloc((la_len + 1) * sizeof(Limb));
+    Limb *r_limbs = (la_len + 2 <= 258) ? sr_buf : (Limb *)malloc((la_len + 2) * sizeof(Limb));
+    if (!q_limbs || !r_limbs) {
+        if (q_limbs != sq_buf) free(q_limbs);
+        if (r_limbs != sr_buf) free(r_limbs);
+        return false;
+    }
     uint32_t ql, rl;
 
     div_rem_limbs(la, la_len, lb, lb_len, q_limbs, &ql, r_limbs, &rl);
 
-    /* the quotient stays rooted while the remainder is allocated */
     Value quot = mini_void(), rem = mini_void();
-    mini_push_root(vm, &quot);
     if (out_quot) {
         int32_t sq = (ql == 0) ? 1 : (sa * sb);
-        quot = bigint_alloc(vm, sq, ql);
-        if (!mini_is_void(quot) && ql > 0) {
+        quot = bigint_alloc_uninit(vm, sq, ql);
+        if (mini_is_bigint(quot) && ql > 0) {
             BigIntObj *qb = (BigIntObj *)UNTAG_PTR(quot);
             memcpy(qb->digits, q_limbs, ql * sizeof(Limb));
             quot = bigint_normalize(vm, quot);
@@ -585,20 +656,21 @@ bool bigint_div_rem(MiniVM *vm, Value a, Value b, Value *out_quot, Value *out_re
     }
 
     if (out_rem) {
-        int32_t sr = (rl == 0) ? 1 : sa; /* Scheme remainder has sign of dividend */
-        rem = bigint_alloc(vm, sr, rl);
-        if (!mini_is_void(rem) && rl > 0) {
+        if (out_quot) mini_push_root(vm, &quot);
+        int32_t sr = (rl == 0) ? 1 : sa;
+        rem = bigint_alloc_uninit(vm, sr, rl);
+        if (mini_is_bigint(rem) && rl > 0) {
             BigIntObj *rb = (BigIntObj *)UNTAG_PTR(rem);
             memcpy(rb->digits, r_limbs, rl * sizeof(Limb));
             rem = bigint_normalize(vm, rem);
         }
+        if (out_quot) mini_pop_root(vm);
     }
-    mini_pop_root(vm);
     if (out_quot) *out_quot = quot;
     if (out_rem) *out_rem = rem;
 
-    free(q_limbs);
-    free(r_limbs);
+    if (q_limbs != sq_buf) free(q_limbs);
+    if (r_limbs != sr_buf) free(r_limbs);
     return true;
 }
 

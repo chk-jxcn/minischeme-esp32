@@ -20,6 +20,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define MINI_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define MINI_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define MINI_NOINLINE    __attribute__((noinline))
+#else
+#define MINI_LIKELY(x)   (x)
+#define MINI_UNLIKELY(x) (x)
+#define MINI_NOINLINE
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -391,7 +402,48 @@ static inline bool mini_is_code(Value v) {
 static inline bool mini_is_vector(Value v) {
     return mini_is_record(v) && (((MiniHeapObj *)(v & ~MINI_TAG_MASK))->type & MINI_OBJ_TYPE_MASK) == MINI_OBJ_VECTOR;
 }
+/* 64-bit Lossless Hybrid Immediate Flonum:
+ * Encodes +/-0.0 and IEEE-754 doubles with biased exponent in [0x3C1, 0x43F]
+ * ([2^-62, 2^65), i.e. ~2.168e-19 .. ~3.689e19) with all 52 mantissa bits intact
+ * inside MINI_TAG_CONST (low 4 bits = 0xF, magnitude >= 0x2F so it never collides
+ * with NIL=0x07, TRUE=0x0F, FALSE=0x17, VOID=0x1F, EOF=0x27).
+ * Out-of-range magnitudes, subnormals, Inf and NaN fall back seamlessly to heap FlonumObj. */
+#if defined(UINTPTR_MAX) && (UINTPTR_MAX > 0xFFFFFFFFULL)
+#define MINI_HAS_IMM_FLONUM 1
+static inline bool mini_is_imm_flonum(Value v) {
+    return ((v & 0xFULL) == 0xFULL) && (((uint64_t)v & 0x7FFFFFFFFFFFFFFFULL) >= 0x2FULL);
+}
+static inline double mini_imm_flonum_to_double(Value v) {
+    uint64_t abs_v = (uint64_t)v & 0x7FFFFFFFFFFFFFFFULL;
+    uint64_t sign  = (uint64_t)v & 0x8000000000000000ULL;
+    uint64_t u = MINI_UNLIKELY(abs_v == 0x2FULL)
+                 ? sign
+                 : (sign | ((abs_v >> 4) + (0x3C0ULL << 52)));
+    double d;
+    memcpy(&d, &u, sizeof(double));
+    return d;
+}
+static inline bool mini_try_imm_flonum(double d, Value *out) {
+    uint64_t u;
+    memcpy(&u, &d, sizeof(uint64_t));
+    uint64_t abs_u = u & 0x7FFFFFFFFFFFFFFFULL;
+    uint64_t sign  = u & 0x8000000000000000ULL;
+    if (MINI_LIKELY((abs_u - (0x3C1ULL << 52)) < (0x7FULL << 52))) {
+        *out = (Value)(sign | ((abs_u - (0x3C0ULL << 52)) << 4) | 0xFULL);
+        return true;
+    }
+    if (abs_u == 0) {
+        *out = (Value)(sign | 0x2FULL);
+        return true;
+    }
+    return false;
+}
+#endif
+
 static inline bool mini_is_flonum(Value v) {
+#ifdef MINI_HAS_IMM_FLONUM
+    if (mini_is_imm_flonum(v)) return true;
+#endif
     return mini_is_record(v) && (((MiniHeapObj *)(v & ~MINI_TAG_MASK))->type & MINI_OBJ_TYPE_MASK) == MINI_OBJ_FLONUM;
 }
 static inline bool mini_is_continuation(Value v) {

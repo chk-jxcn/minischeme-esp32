@@ -41,15 +41,29 @@ void *mini_word_alloc(size_t bytes) {
 }
 
 void mini_words_copy(void *dst, const void *src, size_t bytes) {
+#if defined(ESP_PLATFORM)
     /* volatile: the compiler must not turn the loop back into memcpy */
     volatile uint32_t *d = (volatile uint32_t *)dst;
     const volatile uint32_t *s = (const volatile uint32_t *)src;
     for (size_t i = 0; i < bytes / 4; i++) d[i] = s[i];
+#else
+    if (bytes > 0) memcpy(dst, src, bytes);
+#endif
 }
 
 void mini_words_fill(void *dst, uint32_t value, size_t bytes) {
+#if defined(ESP_PLATFORM)
     volatile uint32_t *d = (volatile uint32_t *)dst;
     for (size_t i = 0; i < bytes / 4; i++) d[i] = value;
+#else
+    if (bytes == 0) return;
+    if (value == 0) {
+        memset(dst, 0, bytes);
+    } else {
+        uint32_t *d = (uint32_t *)dst;
+        for (size_t i = 0; i < bytes / 4; i++) d[i] = value;
+    }
+#endif
 }
 
 void *mini_word_grow(void *old, size_t old_bytes, size_t new_bytes) {
@@ -449,6 +463,13 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
     vm->stat_major_gcs++;
     vm->gcache_gen++; /* objects move */
 
+    /* bench patch: clear the remembered set while its pointers are still valid */
+    for (size_t i = 0; i < vm->remset_count; i++) {
+        HeapObj *robj = (HeapObj *)UNTAG_PTR(vm->remset[i]);
+        if (robj) robj->type &= ~MINI_GC_REMSET_BIT;
+    }
+    vm->remset_count = 0;
+
     size_t tenured_used = (size_t)(vm->tenured_hp - vm->tenured_start);
     size_t eden_used = (size_t)(vm->eden_hp - vm->eden_start);
     size_t total_used = tenured_used + eden_used;
@@ -521,6 +542,12 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
         if (frame->closure) mark_val(vm, ((uintptr_t)frame->closure) | MINI_TAG_CLOSURE);
         if (frame->code)    mark_val(vm, ((uintptr_t)frame->code) | MINI_TAG_CODE);
         mark_val(vm, frame->env);
+    }
+
+    if (vm->gslots) {
+        for (uint32_t i = 0; i < vm->gslot_count; i++) {
+            if (vm->gslots[i]) mark_val(vm, vm->gslots[i]);
+        }
     }
 
     while (vm->mark_stack_count > 0) {
@@ -775,11 +802,7 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
     /* Reset Eden generation to empty */
     vm->eden_hp = vm->eden_start;
 
-    /* Clear Remembered Set */
-    for (size_t i = 0; i < vm->remset_count; i++) {
-        HeapObj *obj = (HeapObj *)UNTAG_PTR(vm->remset[i]);
-        if (obj) obj->type &= ~MINI_GC_REMSET_BIT;
-    }
+    /* Remembered Set: already cleared at the start of major_gc (bench patch) */
     vm->remset_count = 0;
 
     /* Legacy compatibility pointers */
@@ -897,6 +920,20 @@ void mini_pop_root(MiniVM *vm) {
 /* ========================================================================= */
 
 Value mini_make_cons(MiniVM *vm, Value car, Value cdr) {
+    size_t aligned_sz = ALIGN8(sizeof(PairObj));
+    if (MINI_LIKELY(vm->eden_hp + aligned_sz <= vm->eden_limit)) {
+        PairObj *p = (PairObj *)vm->eden_hp;
+        vm->eden_hp += aligned_sz;
+        vm->stat_alloc_bytes += aligned_sz;
+#ifdef MINI_ALLOC_PROFILE
+        mini_prof_alloc(aligned_sz, OBJ_PAIR);
+#endif
+        p->header.type = OBJ_PAIR;
+        p->header.size = (uint32_t)aligned_sz;
+        p->car = car;
+        p->cdr = cdr;
+        return ((uintptr_t)p) | MINI_TAG_PAIR;
+    }
     mini_push_root(vm, &car);
     mini_push_root(vm, &cdr);
     PairObj *p = (PairObj *)gc_alloc(vm, sizeof(PairObj), OBJ_PAIR);
@@ -906,8 +943,10 @@ Value mini_make_cons(MiniVM *vm, Value car, Value cdr) {
     p->car = car;
     p->cdr = cdr;
     Value res = ((uintptr_t)p) | MINI_TAG_PAIR;
-    mini_write_barrier(vm, res, car);
-    mini_write_barrier(vm, res, cdr);
+    if (MINI_UNLIKELY((char *)p >= vm->tenured_start && (char *)p < vm->tenured_limit)) {
+        mini_write_barrier(vm, res, car);
+        mini_write_barrier(vm, res, cdr);
+    }
     return res;
 }
 
@@ -1028,6 +1067,10 @@ Value mini_make_string_len(MiniVM *vm, const char *str, size_t len) {
 }
 
 Value mini_make_flonum(MiniVM *vm, double num) {
+#ifdef MINI_HAS_IMM_FLONUM
+    Value imm;
+    if (MINI_LIKELY(mini_try_imm_flonum(num, &imm))) return imm;
+#endif
     FlonumObj *f = (FlonumObj *)gc_alloc(vm, sizeof(FlonumObj), OBJ_FLONUM);
     if (!f) return mini_void();
     f->val = num;
@@ -1035,7 +1078,10 @@ Value mini_make_flonum(MiniVM *vm, double num) {
 }
 
 double mini_to_flonum(Value v) {
-    if (mini_is_flonum(v)) {
+#ifdef MINI_HAS_IMM_FLONUM
+    if (MINI_LIKELY(mini_is_imm_flonum(v))) return mini_imm_flonum_to_double(v);
+#endif
+    if (mini_is_record(v) && (((MiniHeapObj *)(v & ~MINI_TAG_MASK))->type & MINI_OBJ_TYPE_MASK) == MINI_OBJ_FLONUM) {
         return ((FlonumObj *)UNTAG_PTR(v))->val;
     }
     return 0.0;

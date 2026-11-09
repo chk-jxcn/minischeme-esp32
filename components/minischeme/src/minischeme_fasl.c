@@ -331,7 +331,27 @@ static bool fl_small_bigint(const FaslConv *c, const uint8_t *s, int64_t *out) {
 static uint64_t fl_value(FaslConv *c, uint64_t r) {
     uint64_t mask = c->dp == 4 ? 0xFFFFFFFFu : ~(uint64_t)0;
     unsigned tag = (unsigned)(r & MINI_TAG_MASK);
-    if (tag == MINI_TAG_CONST) return r & mask;
+    if (tag == MINI_TAG_CONST) {
+        if (c->sp == 8 && c->dp == 4 && (r & 0xFULL) == 0xFULL &&
+            (r & 0x7FFFFFFFFFFFFFFFULL) >= 0x2FULL) {
+            if (!c->dst) {
+                c->extra_bytes += 16;
+                return 0;
+            }
+            uint64_t abs_v = r & 0x7FFFFFFFFFFFFFFFULL;
+            uint64_t sign_v = r & 0x8000000000000000ULL;
+            uint64_t u = (abs_v == 0x2FULL) ? sign_v : (sign_v | ((abs_v >> 4) + (0x3C0ULL << 52)));
+            uint8_t *b = c->dst + c->extra_at;
+            uint32_t type = OBJ_FLONUM, size = 16;
+            memcpy(b, &type, 4);
+            memcpy(b + 4, &size, 4);
+            memcpy(b + 8, &u, 8);
+            uint64_t res = (uint64_t)c->extra_at | MINI_TAG_RECORD;
+            c->extra_at += 16;
+            return res;
+        }
+        return r & mask;
+    }
     if (tag == MINI_TAG_FIXNUM) {
         int64_t n = c->sp == 4 ? (int64_t)((int32_t)(uint32_t)r >> 3) : (int64_t)r >> 3;
         if (n >= fl_fixnum_min(c->dp) && n <= fl_fixnum_max(c->dp)) return ((uint64_t)n << 3) & mask;
@@ -2346,6 +2366,9 @@ static Value rs_value(RomStream *s, uint8_t tag) {
             FlonumObj f;
             memset(&f, 0, sizeof(f));
             rs_in(s, &f.val, sizeof(double));
+#ifdef MINI_HAS_IMM_FLONUM
+            if (mini_try_imm_flonum(f.val, &v)) break;
+#endif
             bool large;
             size_t off = rs_alloc(s, sizeof(FlonumObj), &large);
             f.header.type = OBJ_FLONUM;

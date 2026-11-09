@@ -246,6 +246,33 @@ typedef enum {
     OP_PAIRP,
     OP_EQ,
     OP_VECTOR_REF,
+
+    /* API 1.16: self-recursion, short-circuit jump, inline primitives & local superinstructions */
+    OP_CALL_SELF,
+    OP_TAIL_CALL_SELF,
+    OP_JUMP_IF_TRUE_KEEP,
+    OP_CONS,
+    OP_VECTOR_SET,
+    OP_REM,
+    OP_QUOT,
+    OP_DIV,
+    OP_GET_LOCAL2,
+    OP_SET_LOCAL_POP,
+    OP_ADD_LOC_IMM,
+    OP_SUB_LOC_IMM,
+    OP_ADD_LOC_LOC,
+    OP_SUB_LOC_LOC,
+    OP_MUL_LOC_LOC,
+    OP_EQ_LOC_IMM,
+    OP_LT_LOC_IMM,
+    OP_GT_LOC_IMM,
+    OP_EQ_LOC_LOC,
+    OP_LT_LOC_LOC,
+    OP_LE_LOC_LOC,
+    OP_GT_LOC_LOC,
+    OP_CAR_LOC,
+    OP_CDR_LOC,
+    OP_NULLP_LOC,
     OP_COUNT
 } OpCode;
 
@@ -383,6 +410,7 @@ struct MiniVM {
     uint32_t gslot_count;
     /* OP_CALL_PRIM: the procedure of each API number, found at its first call (NULL until then) */
     MiniCFunc *prim_fns;
+    struct { uint32_t id1; uint32_t gen; Value binding; } prim_bcache[32];
 
     /* Runtime statistics (see mini_get_stats) */
     uint64_t stat_alloc_bytes;
@@ -495,6 +523,7 @@ Value prim_callcc(MiniVM *vm, int argc, Value *argv);
 Value prim_car(MiniVM *vm, int argc, Value *argv);
 Value prim_cdr(MiniVM *vm, int argc, Value *argv);
 Value prim_vector_ref(MiniVM *vm, int argc, Value *argv);
+Value prim_vector_set(MiniVM *vm, int argc, Value *argv);
 /* (%api-id name): the API procedure's permanent number, or #f (the compiler's OP_CALL_PRIM) */
 Value prim_api_id(MiniVM *vm, int argc, Value *argv);
 
@@ -543,10 +572,17 @@ Value prim_number_p(MiniVM *vm, int argc, Value *argv);
 Value prim_min(MiniVM *vm, int argc, Value *argv);
 Value prim_max(MiniVM *vm, int argc, Value *argv);
 
+static inline double mini_flonum_val(Value v) {
+#ifdef MINI_HAS_IMM_FLONUM
+    if (MINI_LIKELY(mini_is_imm_flonum(v))) return mini_imm_flonum_to_double(v);
+#endif
+    return ((const FlonumObj *)UNTAG_PTR(v))->val;
+}
+
 /* Helper for double conversion */
 static inline double to_double_val(Value v) {
     if (mini_is_fixnum(v)) return (double)mini_to_fixnum(v);
-    if (mini_is_flonum(v)) return mini_to_flonum(v);
+    if (mini_is_flonum(v)) return mini_flonum_val(v);
     if (mini_is_bigint(v)) return bigint_to_double(v);
     return 0.0;
 }

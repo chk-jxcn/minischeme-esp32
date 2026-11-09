@@ -68,7 +68,7 @@ Value prim_vector_ref(MiniVM *vm, int argc, Value *argv) {
     return mini_vector_ref(vm, argv[0], (size_t)idx);
 }
 
-static Value prim_vector_set(MiniVM *vm, int argc, Value *argv) {
+Value prim_vector_set(MiniVM *vm, int argc, Value *argv) {
     if (argc != 3 || !mini_is_vector(argv[0]) || !mini_is_fixnum(argv[1])) {
         vm_error(vm, "vector-set!: expected vector, index, and value");
         return mini_void();
@@ -1240,13 +1240,22 @@ static Value prim_append(MiniVM *vm, int argc, Value *argv) {
         cur = argv[i];
         while (mini_is_pair(cur)) {
             Value cell = mini_make_cons(vm, mini_car(cur), mini_nil());
-            if (mini_is_nil(head)) head = cell; else mini_set_cdr(tail, cell);
+            if (mini_is_nil(head)) {
+                head = cell;
+            } else {
+                mini_set_cdr(tail, cell);
+                mini_write_barrier(vm, tail, cell);
+            }
             tail = cell;
             cur = mini_cdr(cur);
         }
     }
-    if (mini_is_nil(head)) head = argv[argc - 1];
-    else mini_set_cdr(tail, argv[argc - 1]);
+    if (mini_is_nil(head)) {
+        head = argv[argc - 1];
+    } else {
+        mini_set_cdr(tail, argv[argc - 1]);
+        mini_write_barrier(vm, tail, argv[argc - 1]);
+    }
     mini_pop_root(vm);
     mini_pop_root(vm);
     mini_pop_root(vm);
@@ -1314,7 +1323,9 @@ static Value hof_map_each(MiniVM *vm, int argc, Value *argv, bool collect, const
         vm_error(vm, "%s: expected a procedure and 1-%d lists", who, HOF_MAX_LISTS);
         return mini_void();
     }
-    int nl = argc - 1;
+    /* the bound once more, as the loops see it: gcc 5 at -O3 unrolls them past it otherwise
+     * (a false -Warray-bounds) */
+    int nl = argc - 1 < HOF_MAX_LISTS ? argc - 1 : HOF_MAX_LISTS;
     Value cur[HOF_MAX_LISTS];
     Value head = mini_nil(), tail = mini_nil();
     for (int i = 0; i < nl; i++) cur[i] = argv[i + 1];

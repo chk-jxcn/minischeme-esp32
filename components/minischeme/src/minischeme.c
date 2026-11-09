@@ -244,11 +244,20 @@ MiniVM *mini_create_ext(const MiniConfig *config) {
     }
 
     size_t eden_sz = (config && config->eden_bytes > 0) ? config->eden_bytes : 0;
+#ifndef MINI_DEFAULT_HOST_EDEN
+#if defined(UINTPTR_MAX) && (UINTPTR_MAX > 0xFFFFFFFFULL) && !defined(ESP_PLATFORM)
+#define MINI_DEFAULT_HOST_EDEN (512 * 1024)
+#else
+#define MINI_DEFAULT_HOST_EDEN (16 * 1024)
+#endif
+#endif
     if (eden_sz == 0) {
         if (initial_heap <= 16 * 1024) {
             eden_sz = 8 * 1024;
-        } else {
+        } else if (config && config->max_heap_bytes > 0 && config->max_heap_bytes <= 256 * 1024) {
             eden_sz = 16 * 1024;
+        } else {
+            eden_sz = MINI_DEFAULT_HOST_EDEN;
         }
     }
     eden_sz = ALIGN8(eden_sz);
@@ -411,9 +420,9 @@ MiniVM *mini_create_profile(MiniProfile profile) {
             break;
         case MINI_PROFILE_DEFAULT:
         default:
-            cfg.initial_heap_bytes = 64 * 1024;
+            cfg.initial_heap_bytes = (MINI_DEFAULT_HOST_EDEN >= 512 * 1024) ? (1024 * 1024) : (64 * 1024);
             cfg.max_heap_bytes     = 0;
-            cfg.eden_bytes         = 16 * 1024;
+            cfg.eden_bytes         = MINI_DEFAULT_HOST_EDEN;
             cfg.stack_size         = 65536;
             cfg.frame_capacity     = 4096;
             cfg.skip_init_fasl     = true;
@@ -425,9 +434,11 @@ MiniVM *mini_create_profile(MiniProfile profile) {
 MiniVM *mini_create(size_t initial_heap_bytes) {
     MiniConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
-    cfg.initial_heap_bytes = initial_heap_bytes > 0 ? initial_heap_bytes : (64 * 1024);
+    cfg.initial_heap_bytes = initial_heap_bytes > 0 ? initial_heap_bytes
+                             : ((MINI_DEFAULT_HOST_EDEN >= 512 * 1024) ? (1024 * 1024) : (64 * 1024));
     cfg.max_heap_bytes     = 0;
-    cfg.eden_bytes         = 16 * 1024;
+    cfg.eden_bytes         = (initial_heap_bytes > 0 && initial_heap_bytes <= 64 * 1024)
+                             ? (16 * 1024) : MINI_DEFAULT_HOST_EDEN;
     cfg.stack_size         = 65536;
     cfg.frame_capacity     = 4096;
 #ifdef MINISCHEME_EMBED_INIT
