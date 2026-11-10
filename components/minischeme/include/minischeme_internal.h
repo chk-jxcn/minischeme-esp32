@@ -273,6 +273,17 @@ typedef enum {
     OP_CAR_LOC,
     OP_CDR_LOC,
     OP_NULLP_LOC,
+    /* API 1.17 */
+    OP_LOOP,            /* n, n slots (the first takes the top), int16: named-let jump */
+    OP_ADD_L,           /* slot: top + local */
+    OP_SUB_L,
+    OP_MUL_L,
+    OP_LT_L,            /* slot: top < local */
+    OP_LE_L,
+    OP_GT_L,
+    OP_GE_L,
+    OP_NUM_EQ_L,
+    OP_VECTOR_REF_L,    /* slot: (vector-ref top local) */
     OP_COUNT
 } OpCode;
 

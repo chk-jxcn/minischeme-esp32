@@ -727,6 +727,31 @@ static Value prim_string_to_ints(MiniVM *vm, int argc, Value *argv) {
     return list;
 }
 
+/* A fixnum in radix 2, 8, 10 or 16, formatted on the stack: the text of bigint_to_str (lower-case
+ * digits, a leading '-'), without a 64-bit snprintf and a heap copy (36 us a call on the ESP32) */
+static Value fixnum_to_string(MiniVM *vm, int64_t val, unsigned radix) {
+    char buf[72];
+    char *p = buf + sizeof(buf);
+    *--p = '\0';
+    uint64_t u = val < 0 ? (uint64_t)0 - (uint64_t)val : (uint64_t)val;
+    if (u <= 0xFFFFFFFFu) {
+        uint32_t w = (uint32_t)u;
+        do {
+            uint32_t d = w % radix;
+            *--p = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
+            w /= radix;
+        } while (w);
+    } else {
+        do {
+            uint32_t d = (uint32_t)(u % radix);
+            *--p = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
+            u /= radix;
+        } while (u);
+    }
+    if (val < 0) *--p = '-';
+    return mini_make_string(vm, p);
+}
+
 static Value prim_number_to_string(MiniVM *vm, int argc, Value *argv) {
     if (argc < 1 || (!mini_is_number(argv[0]))) {
         vm_error(vm, "number->string: expected number");
@@ -737,6 +762,9 @@ static Value prim_number_to_string(MiniVM *vm, int argc, Value *argv) {
         radix = (int)mini_to_fixnum(argv[1]);
     }
 
+    if (mini_is_fixnum(argv[0]) && (radix == 10 || radix == 16 || radix == 8 || radix == 2)) {
+        return fixnum_to_string(vm, (int64_t)mini_to_fixnum(argv[0]), (unsigned)radix);
+    }
     if (mini_is_integer(argv[0])) {
         char *str = bigint_to_str(argv[0], radix);
         if (!str) return mini_void();

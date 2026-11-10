@@ -388,16 +388,16 @@ static inline Value vm_fetch_const(MiniVM *vm, CodeObj *code, uint16_t idx) {
     return v;
 }
 
-static MINI_NOINLINE Value vm_get_heap_local(Value env, uint8_t slot) {
-    Value node = mini_car(env);
+/* A captured frame's values (the car of an environment node): a vector, made by
+ * vm_alloc_env_frame, or a list (closures of older heap snapshots) */
+static MINI_NOINLINE Value vm_frame_list_ref(Value node, uint8_t slot) {
     for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
         node = mini_cdr(node);
     }
     return mini_is_pair(node) ? mini_car(node) : MINI_CONST_VOID;
 }
 
-static MINI_NOINLINE void vm_set_heap_local(MiniVM *vm, Value env, uint8_t slot, Value val) {
-    Value node = mini_car(env);
+static MINI_NOINLINE void vm_frame_list_set(MiniVM *vm, Value node, uint8_t slot, Value val) {
     for (uint8_t s = 0; s < slot && mini_is_pair(node); s++) {
         node = mini_cdr(node);
     }
@@ -405,6 +405,34 @@ static MINI_NOINLINE void vm_set_heap_local(MiniVM *vm, Value env, uint8_t slot,
         mini_set_car(node, val);
         mini_write_barrier(vm, node, val);
     }
+}
+
+static inline Value vm_frame_ref(Value fvals, uint8_t slot) {
+    if (MINI_LIKELY(mini_is_record(fvals))) {
+        const VectorObj *vec = (const VectorObj *)UNTAG_PTR(fvals);
+        return slot < vec->length ? vec->data[slot] : MINI_CONST_VOID;
+    }
+    return vm_frame_list_ref(fvals, slot);
+}
+
+static inline void vm_frame_set(MiniVM *vm, Value fvals, uint8_t slot, Value val) {
+    if (MINI_LIKELY(mini_is_record(fvals))) {
+        VectorObj *vec = (VectorObj *)UNTAG_PTR(fvals);
+        if (slot < vec->length) {
+            vec->data[slot] = val;
+            mini_write_barrier(vm, fvals, val);
+        }
+        return;
+    }
+    vm_frame_list_set(vm, fvals, slot, val);
+}
+
+static MINI_NOINLINE Value vm_get_heap_local(Value env, uint8_t slot) {
+    return vm_frame_ref(mini_car(env), slot);
+}
+
+static MINI_NOINLINE void vm_set_heap_local(MiniVM *vm, Value env, uint8_t slot, Value val) {
+    vm_frame_set(vm, mini_car(env), slot, val);
 }
 
 static MINI_NOINLINE CodeObj *vm_pack_variadic(MiniVM *vm, int frame_idx, int call_argc, int fixed) {
@@ -428,10 +456,19 @@ static MINI_NOINLINE CodeObj *vm_alloc_env_frame(MiniVM *vm, int frame_idx, int 
     PROF_SAVE(prof_prev);
     PROF_SITE("<env-frame>");
     PROF_CODE(frames[frame_idx].code);
-    Value fvals = mini_nil();
+    Value fvals = mini_make_vector(vm, (size_t)needed_locals, MINI_CONST_VOID);
     mini_push_root(vm, &fvals);
-    for (int i = needed_locals - 1; i >= 0; i--) {
-        fvals = mini_make_cons(vm, vm->stack[fp_off + (size_t)i], fvals);
+    if (mini_is_vector(fvals)) {
+        for (int i = 0; i < needed_locals; i++) {
+            Value v = vm->stack[fp_off + (size_t)i];
+            ((VectorObj *)UNTAG_PTR(fvals))->data[i] = v;
+            mini_write_barrier(vm, fvals, v);
+        }
+    } else {
+        fvals = mini_nil();
+        for (int i = needed_locals - 1; i >= 0; i--) {
+            fvals = mini_make_cons(vm, vm->stack[fp_off + (size_t)i], fvals);
+        }
     }
     Value parent_env = frames[frame_idx].closure->env;
     Value new_env = mini_make_cons(vm, fvals, parent_env);
@@ -471,6 +508,14 @@ static inline bool vm_num_to_double_fast(Value v, double *out) {
 /* True ONLY when at least one operand is an inexact flonum and the other is fixnum or flonum.
  * Prevents exact fixnum overflow (both fixnums) from turning into an inexact flonum instead of BigInt! */
 static inline bool vm_flonum_pair_to_double(Value a, Value b, double *da, double *db) {
+#ifdef MINI_HAS_IMM_FLONUM
+    /* two immediate flonums: the usual case of floating-point loops */
+    if (MINI_LIKELY(mini_is_imm_flonum(a) && mini_is_imm_flonum(b))) {
+        *da = mini_imm_flonum_to_double(a);
+        *db = mini_imm_flonum_to_double(b);
+        return true;
+    }
+#endif
     if (MINI_UNLIKELY(((a | b) & MINI_TAG_MASK) == 0)) return false;
     return vm_num_to_double_fast(a, da) && vm_num_to_double_fast(b, db);
 }
@@ -715,6 +760,16 @@ Value mini_vm_run(MiniVM *vm, Value initial_closure, int argc, Value *argv) {
         [OP_CAR_LOC]           = &&do_op_car_loc,
         [OP_CDR_LOC]           = &&do_op_cdr_loc,
         [OP_NULLP_LOC]         = &&do_op_nullp_loc,
+        [OP_LOOP]              = &&do_op_loop,
+        [OP_ADD_L]             = &&do_op_add_l,
+        [OP_SUB_L]             = &&do_op_sub_l,
+        [OP_MUL_L]             = &&do_op_mul_l,
+        [OP_LT_L]              = &&do_op_lt_l,
+        [OP_LE_L]              = &&do_op_le_l,
+        [OP_GT_L]              = &&do_op_gt_l,
+        [OP_GE_L]              = &&do_op_ge_l,
+        [OP_NUM_EQ_L]          = &&do_op_num_eq_l,
+        [OP_VECTOR_REF_L]      = &&do_op_vector_ref_l,
         [OP_COUNT ... 255]     = &&do_op_bad
     };
     #define DISPATCH() goto *dispatch_table[*pc++]
@@ -787,6 +842,16 @@ vm_loop:
         case OP_CAR_LOC:           goto do_op_car_loc;
         case OP_CDR_LOC:           goto do_op_cdr_loc;
         case OP_NULLP_LOC:         goto do_op_nullp_loc;
+        case OP_LOOP:              goto do_op_loop;
+        case OP_ADD_L:             goto do_op_add_l;
+        case OP_SUB_L:             goto do_op_sub_l;
+        case OP_MUL_L:             goto do_op_mul_l;
+        case OP_LT_L:              goto do_op_lt_l;
+        case OP_LE_L:              goto do_op_le_l;
+        case OP_GT_L:              goto do_op_gt_l;
+        case OP_GE_L:              goto do_op_ge_l;
+        case OP_NUM_EQ_L:          goto do_op_num_eq_l;
+        case OP_VECTOR_REF_L:      goto do_op_vector_ref_l;
         default:                   goto do_op_bad;
     }
 #endif
@@ -812,6 +877,12 @@ vm_loop:
     } while (0)
 #define ARITH_SLOW(prim) PRIM_SLOW(prim, 2)
 
+#if defined(__GNUC__) || defined(__clang__)
+#define VM_NO_IF_CONVERSION() __asm__ volatile ("")
+#else
+#define VM_NO_IF_CONVERSION() ((void)0)
+#endif
+
 #define BOOL_RESULT(r, n) do { \
         bool r_ = (r); \
         uint8_t next_op_ = *pc; \
@@ -819,7 +890,13 @@ vm_loop:
             int16_t off_ = (int16_t)(pc[1] | ((uint16_t)pc[2] << 8)); \
             pc += 3; \
             sp -= (int)(n); \
-            if (!r_) pc += off_; \
+            /* two dispatches, not a conditional move: a test that depends on the data \
+             * (sorting) then costs one mispredicted branch, not a late indirect jump */ \
+            if (r_) { \
+                VM_NO_IF_CONVERSION(); \
+                DISPATCH(); \
+            } \
+            pc += off_; \
             DISPATCH(); \
         } \
         if (next_op_ == OP_JUMP_IF_TRUE_KEEP) { \
@@ -1233,6 +1310,97 @@ vm_loop:
         BOOL_RESULT(v == MINI_CONST_NIL, 0);
     }
 
+    /* API 1.17: the jump of a named-let loop with its new values (popped into the slots) */
+    do_op_loop: {
+        uint8_t n = *pc++;
+        const uint8_t *slots = pc;
+        pc += n;
+        if (MINI_LIKELY(!code->has_inner_lambdas)) {
+            fp[slots[0]] = sp[-1];
+            if (n == 1) {
+                sp -= 1;
+            } else if (n == 2) {
+                fp[slots[1]] = sp[-2];
+                sp -= 2;
+            } else {
+                for (uint8_t k = 1; k < n; k++) fp[slots[k]] = sp[-1 - (int)k];
+                sp -= n;
+            }
+        } else {
+            Value env = frames[frame_count - 1].env;
+            for (uint8_t k = 0; k < n; k++) {
+                Value val = *(--sp);
+                fp[slots[k]] = val;
+                vm_set_heap_local(vm, env, slots[k], val);
+            }
+        }
+        int16_t offset = (int16_t)(pc[0] | ((uint16_t)pc[1] << 8));
+        pc += 2 + offset;
+        DISPATCH();
+    }
+
+    /* API 1.17: the top of the stack and a local; anything but two fixnums goes the way of
+     * the two-operand instruction (flonums inline there) */
+#define LOCAL_ARITH_IMPL(ok_fn, fop, general) do { \
+        Value b_ = READ_LOCAL(*pc); \
+        pc++; \
+        Value a_ = sp[-1]; \
+        intptr_t r_; \
+        if (MINI_LIKELY(((a_ | b_) & MINI_TAG_MASK) == 0 && ok_fn(a_, b_, &r_))) { \
+            sp[-1] = (Value)r_; \
+            DISPATCH(); \
+        } \
+        double da_, db_; \
+        Value fv_; \
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a_, b_, &da_, &db_) && \
+                        vm_try_make_flonum_inline(vm, da_ fop db_, &fv_))) { \
+            sp[-1] = fv_; \
+            DISPATCH(); \
+        } \
+        *sp++ = b_; \
+        goto general; \
+    } while (0)
+
+#define LOCAL_COMPARE_IMPL(cmp, general) do { \
+        Value b_ = READ_LOCAL(*pc); \
+        pc++; \
+        Value a_ = sp[-1]; \
+        if (MINI_LIKELY(((a_ | b_) & MINI_TAG_MASK) == 0)) { \
+            BOOL_RESULT((intptr_t)a_ cmp (intptr_t)b_, 1); \
+        } \
+        double da_, db_; \
+        if (MINI_LIKELY(vm_flonum_pair_to_double(a_, b_, &da_, &db_))) { \
+            BOOL_RESULT(da_ cmp db_, 1); \
+        } \
+        *sp++ = b_; \
+        goto general; \
+    } while (0)
+
+    do_op_add_l:    LOCAL_ARITH_IMPL(fixnum_add_ok, +, do_op_add);
+    do_op_sub_l:    LOCAL_ARITH_IMPL(fixnum_sub_ok, -, do_op_sub);
+    do_op_mul_l:    LOCAL_ARITH_IMPL(fixnum_mul_ok, *, do_op_mul);
+    do_op_lt_l:     LOCAL_COMPARE_IMPL(<,  do_op_lt);
+    do_op_le_l:     LOCAL_COMPARE_IMPL(<=, do_op_le);
+    do_op_gt_l:     LOCAL_COMPARE_IMPL(>,  do_op_gt);
+    do_op_ge_l:     LOCAL_COMPARE_IMPL(>=, do_op_ge);
+    do_op_num_eq_l: LOCAL_COMPARE_IMPL(==, do_op_num_eq);
+
+    do_op_vector_ref_l: {
+        Value k = READ_LOCAL(*pc);
+        pc++;
+        Value v = sp[-1];
+        if (MINI_LIKELY(mini_is_vector(v) && mini_is_fixnum(k))) {
+            const VectorObj *vec = (const VectorObj *)UNTAG_PTR(v);
+            int64_t i = mini_to_fixnum(k);
+            if (MINI_LIKELY(i >= 0 && (uint64_t)i < (uint64_t)vec->length)) {
+                sp[-1] = vec->data[i];
+                DISPATCH();
+            }
+        }
+        *sp++ = k;
+        goto do_op_vector_ref;
+    }
+
     do_op_call_prim: {
         uint16_t id = (uint16_t)(pc[0] | ((uint16_t)pc[1] << 8));
         call_argc = pc[2];
@@ -1359,11 +1527,7 @@ vm_loop:
         for (uint8_t d = 0; d < depth - 1 && mini_is_pair(env_node); d++) {
             env_node = mini_cdr(env_node);
         }
-        Value fvals = mini_car(env_node);
-        for (uint8_t s = 0; s < slot && mini_is_pair(fvals); s++) {
-            fvals = mini_cdr(fvals);
-        }
-        *sp++ = mini_car(fvals);
+        *sp++ = vm_frame_ref(mini_car(env_node), slot);
         DISPATCH();
     }
 
@@ -1378,12 +1542,7 @@ vm_loop:
         for (uint8_t d = 0; d < depth - 1 && mini_is_pair(env_node); d++) {
             env_node = mini_cdr(env_node);
         }
-        Value fvals = mini_car(env_node);
-        for (uint8_t s = 0; s < slot && mini_is_pair(fvals); s++) {
-            fvals = mini_cdr(fvals);
-        }
-        mini_set_car(fvals, val);
-        mini_write_barrier(vm, fvals, val);
+        vm_frame_set(vm, mini_car(env_node), slot, val);
         DISPATCH();
     }
 
@@ -1445,9 +1604,11 @@ vm_loop:
         int16_t offset = (int16_t)(pc[0] | ((uint16_t)pc[1] << 8));
         pc += 2;
         Value cond = *(--sp);
-        if (cond == MINI_CONST_FALSE) {
-            pc += offset;
+        if (cond != MINI_CONST_FALSE) {
+            VM_NO_IF_CONVERSION();
+            DISPATCH();
         }
+        pc += offset;
         DISPATCH();
     }
 
