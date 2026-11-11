@@ -1506,7 +1506,7 @@ typedef struct {
 
 static const char *const HEAPMAP_TASKS[] = {
     "main", "IDLE0", "IDLE1", "ipc0", "ipc1", "esp_timer", "sys_evt", "tiT", "wifi", "httpd",
-    "jsonfeed", "market", "setup_dns", "ip_geo_task", "Tmr Svc",
+    "jsonfeed", "market", "setup_dns", "Tmr Svc",
 };
 #define HEAPMAP_NTASKS (sizeof(HEAPMAP_TASKS) / sizeof(HEAPMAP_TASKS[0]))
 

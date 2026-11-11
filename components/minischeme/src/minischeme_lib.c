@@ -667,44 +667,6 @@ void esp32_sntp_init(void) {
         tzset();
     }
 }
-
-static void ip_geo_task(void *pvParameters) {
-    (void)pvParameters;
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    struct hostent *he = gethostbyname("myip.ipip.net");
-    if (he && he->h_addr_list && he->h_addr_list[0]) {
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s >= 0) {
-            struct timeval tv;
-            tv.tv_sec = 3;
-            tv.tv_usec = 0;
-            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            struct sockaddr_in dest;
-            memset(&dest, 0, sizeof(dest));
-            dest.sin_family = AF_INET;
-            dest.sin_port = htons(80);
-            dest.sin_addr.s_addr = *(in_addr_t *)he->h_addr_list[0];
-            if (connect(s, (struct sockaddr *)&dest, sizeof(dest)) == 0) {
-                const char *req = "GET / HTTP/1.1\r\nHost: myip.ipip.net\r\nUser-Agent: curl/7.79.1\r\nConnection: close\r\n\r\n";
-                send(s, req, strlen(req), 0);
-                char buf[256];
-                int n = recv(s, buf, sizeof(buf) - 1, 0);
-                if (n > 0) {
-                    buf[n] = '\0';
-                    ESP_LOGI("MiniScheme_Geo", "IP location report: %s", buf);
-                    if (strstr(buf, "\xe4\xb8\xad\xe5\x9b\xbd") || strstr(buf, "China")) {
-                        setenv("TZ", "CST-8", 1);
-                        tzset();
-                        ESP_LOGI("MiniScheme_Geo", "Timezone automatically selected: CST-8 (Asia/Shanghai)");
-                    }
-                }
-            }
-            close(s);
-        }
-    }
-    vTaskDelete(NULL);
-}
 #endif
 
 /* A watchdog for the station: the reconnect chain above runs on the
@@ -795,7 +757,6 @@ static void esp32_wifi_event_handler(void* arg, esp_event_base_t event_base,
             esp_sntp_restart();
         }
         esp32_sntp_init();
-        xTaskCreate(ip_geo_task, "ip_geo_task", 3072, NULL, 3, NULL);
 #endif
     }
 }
