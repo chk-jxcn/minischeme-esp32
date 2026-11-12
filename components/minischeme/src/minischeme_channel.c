@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(ESP_PLATFORM)
 #include "esp_http_client.h"
@@ -190,10 +191,25 @@ int mini_chan_step(char *server, size_t cap) {
     return MINI_CHAN_STEP_NONE;
 }
 
-/* The headers of a request to origin: the device id, and the password of
- * that server when it has one */
+/* How far the device's clock is from UTC now, in minutes east (480 in China): the app proxy
+ * answers dates and times ("today", "updated at") in the asking device's zone */
+static int utc_offset_minutes(void) {
+    time_t now = time(NULL);
+    struct tm local, utc;
+    localtime_r(&now, &local);
+    gmtime_r(&now, &utc);
+    int days = local.tm_yday - utc.tm_yday;
+    if (days > 1) days = -1;          /* across a new year */
+    else if (days < -1) days = 1;
+    return days * 1440 + (local.tm_hour - utc.tm_hour) * 60 + (local.tm_min - utc.tm_min);
+}
+
+/* The headers of a request to origin: the device id, the password of that server when it
+ * has one, the clock's offset from UTC */
 static void put_headers(esp_http_client_handle_t h, const char *origin) {
-    char id[MINI_CHAN_ID_MAX + 1], pw64[B64_MAX];
+    char id[MINI_CHAN_ID_MAX + 1], pw64[B64_MAX], offset[12];
+    snprintf(offset, sizeof(offset), "%d", utc_offset_minutes());
+    esp_http_client_set_header(h, "X-MiniScheme-UTC-Offset", offset);
     chan_lock();
     ChanServer *s = find_server(origin);
     snprintf(id, sizeof(id), "%s", s_dev_id);
