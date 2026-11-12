@@ -198,6 +198,7 @@ static void rom_slots_json(char *out, size_t cap);   /* the slots for /api/hardw
 static bool file_has_magic(const char *path, const char *magic);
 static bool root_app_shadowed(const char *path);
 static bool config_save(const char *section, const char *const *keys, const char *const *values, int n);
+static volatile bool s_tz_dirty;   /* [system] timezone* written: tz_poll applies it */
 static void configured_boot_path(char *out, size_t cap);
 static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 #define EXEC_MAX_BYTES       (24 * 1024)
@@ -1506,7 +1507,7 @@ typedef struct {
 
 static const char *const HEAPMAP_TASKS[] = {
     "main", "IDLE0", "IDLE1", "ipc0", "ipc1", "esp_timer", "sys_evt", "tiT", "wifi", "httpd",
-    "jsonfeed", "market", "setup_dns", "Tmr Svc",
+    "jsonfeed", "market", "setup_dns", "timezone", "Tmr Svc",
 };
 #define HEAPMAP_NTASKS (sizeof(HEAPMAP_TASKS) / sizeof(HEAPMAP_TASKS[0]))
 
@@ -1986,7 +1987,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                         "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
-                                        "panel", "font_server", "font_server_on", "font_server_first", "font_server_face" };
+                                        "panel", "font_server", "font_server_on", "font_server_first", "font_server_face",
+                                        "timezone", "timezone_name", "timezone_auto", "timezone_place" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
     char (*vals)[200] = (char (*)[200])malloc(NKEYS * 200);
     if (!cfg || !out || !esc || !vals) {
@@ -2022,7 +2024,8 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                          "market_auto_update", "web_in_app", "https_proxy", "factory_reset_key",
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                          "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
-                                         "panel", "font_server", "font_server_on", "font_server_first", "font_server_face" };
+                                         "panel", "font_server", "font_server_on", "font_server_first", "font_server_face",
+                                         "timezone", "timezone_name", "timezone_auto", "timezone_place" };
     /* the servers this device uses: with a password or not, the last outcome */
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
     n += mini_chan_status_json(out + n, 1100);
@@ -3872,6 +3875,8 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
          * (applib, the GUI's text settings, the market); rom_build_heap: retired */
     } else if (strncasecmp(key, "font_", 5) == 0) {
         /* [fonts]: applied by apply_font_config once the font ROM is mapped */
+    } else if (strncasecmp(key, "timezone", 8) == 0) {
+        /* [system] timezone, timezone_name, timezone_auto, timezone_place: tz_apply */
     } else if (strcasecmp(key, "http_stack") == 0) {
         if (!parse_long(val, 3072, 32768, &v)) return false;
         cfg->http_stack = (size_t)v;
@@ -5463,6 +5468,9 @@ static MiniVM *create_app_vm(size_t heap) {
  * temporary file first, then renamed over the old one */
 static bool config_save(const char *section, const char *const *keys, const char *const *values, int n) {
     const char *path = "/spiffs/config.ini", *tmp = "/spiffs/config.tmp";
+    for (int i = 0; i < n; i++) {
+        if (strncmp(keys[i], "timezone", 8) == 0) s_tz_dirty = true;   /* the main loop: tz_poll */
+    }
     FILE *fp = fopen(path, "rb");
     long size = 0;
     if (fp) {
@@ -5949,6 +5957,148 @@ static void open_system_settings(void) {
 /* Entry Point                                                               */
 /* ========================================================================= */
 
+/* ========================================================================= */
+/* Time zone: config.ini [system] timezone                                   */
+/* ========================================================================= */
+/* timezone = auto (the default): the app server ([app] proxy, GET /app/geo) tells the zone
+ * of the address this device asks from, as a TZ rule with its daylight saving changes; the
+ * answer is kept in timezone_auto (and timezone_place, to show) and used from the next boot
+ * on at once. timezone = <TZ rule> (timezone_name: its name in the settings): that zone.
+ * Asked TZ_ASK_FIRST_MS after the boot (the VM heap is sized by then and the app's first
+ * downloads are over), every TZ_ASK_AGAIN_MS after an answer, TZ_ASK_RETRY_MS after none. */
+#define TZ_DEFAULT       "CST-8"
+#define TZ_RULE_MAX      48
+#define TZ_ASK_FIRST_MS  30000
+#define TZ_ASK_RETRY_MS  (10 * 60 * 1000)
+#define TZ_ASK_AGAIN_MS  (24 * 3600 * 1000)
+#define TZ_TASK_STACK    4096
+
+static bool s_tz_auto = true;
+static char s_tz_auto_rule[TZ_RULE_MAX];   /* timezone_auto as stored */
+static char s_tz_place[64];                /* timezone_place as stored */
+static int64_t s_tz_ask_at = TZ_ASK_FIRST_MS;
+static struct {
+    volatile int state;                    /* 0 idle, 1 asking, 2 answered, -1 failed */
+    char url[200];
+    char rule[TZ_RULE_MAX];
+    char place[64];
+} s_tzq;
+
+static bool tz_rule_ok(const char *s) {
+    size_t n = strlen(s);
+    if (n < 3 || n >= TZ_RULE_MAX) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || strchr("<>+-.,/:", c))) return false;
+    }
+    return true;
+}
+
+/* config.ini's zone into the C library; s_tz_auto and what is stored */
+static void tz_apply(void) {
+    char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+    char zone[TZ_RULE_MAX + 16] = "";
+    s_tz_auto_rule[0] = s_tz_place[0] = '\0';
+    if (cfg) {
+        mini_device_config_value(cfg, "timezone", zone, sizeof(zone));
+        mini_device_config_value(cfg, "timezone_auto", s_tz_auto_rule, sizeof(s_tz_auto_rule));
+        mini_device_config_value(cfg, "timezone_place", s_tz_place, sizeof(s_tz_place));
+        free(cfg);
+    }
+    s_tz_auto = !zone[0] || strcasecmp(zone, "auto") == 0;
+    const char *rule = s_tz_auto ? (tz_rule_ok(s_tz_auto_rule) ? s_tz_auto_rule : TZ_DEFAULT)
+                                 : (tz_rule_ok(zone) ? zone : TZ_DEFAULT);
+    const char *now = getenv("TZ");
+    if (!now || strcmp(now, rule) != 0) {
+        esp32_set_timezone(rule);
+        ESP_LOGI(TAG, "Time zone: %s (%s)", rule, s_tz_auto ? "auto" : "set");
+    }
+}
+
+/* "key":"value" of a small JSON object into out; false when absent or too long */
+static bool tz_json_string(const char *json, const char *key, char *out, size_t cap) {
+    char pat[24];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(json, pat);
+    if (!p) return false;
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return false;
+    const char *e = strchr(++p, '"');
+    if (!e || (size_t)(e - p) >= cap) return false;
+    memcpy(out, p, (size_t)(e - p));
+    out[e - p] = '\0';
+    return true;
+}
+
+static void tz_task(void *arg) {
+    (void)arg;
+    char body[400], err[48] = "";
+    int status = 0, got = 0, result = -1;
+    int64_t length = -1;
+    MiniFetch *c = mini_fetch_open(s_tzq.url, 8000, 0, &status, &length, err, sizeof(err));
+    if (c) {
+        int n;
+        while (status == 200 && got < (int)sizeof(body) - 1 && (n = mini_fetch_read(c, body + got, (int)sizeof(body) - 1 - got)) > 0) got += n;
+        mini_fetch_close(c);
+    }
+    body[got] = '\0';
+    char city[40] = "", name[40] = "";
+    if (status == 200 && tz_json_string(body, "posix", s_tzq.rule, sizeof(s_tzq.rule)) && tz_rule_ok(s_tzq.rule)) {
+        tz_json_string(body, "city", city, sizeof(city));
+        tz_json_string(body, "tz", name, sizeof(name));
+        snprintf(s_tzq.place, sizeof(s_tzq.place), "%s%s%s", city, city[0] && name[0] ? " " : "", name);
+        for (char *p = s_tzq.place; *p; p++) {
+            if (*p == ';' || *p == '\\' || (unsigned char)*p < 0x20) *p = ' ';   /* one line of config.ini */
+        }
+        result = 2;
+    } else {
+        ESP_LOGW(TAG, "Time zone: no answer from the app server (HTTP %d %s)", status, err);
+    }
+    s_tzq.state = result;
+    vTaskDelete(NULL);
+}
+
+/* The main loop: a changed setting; the app server's answer; the next question */
+static void tz_poll(int64_t ms) {
+    if (s_tz_dirty) {
+        bool was_auto = s_tz_auto;
+        s_tz_dirty = false;
+        tz_apply();
+        if (s_tz_auto && !was_auto && s_tz_ask_at > ms + 2000) s_tz_ask_at = ms + 2000;   /* switched to auto */
+    }
+    if (s_tzq.state == 2) {
+        s_tzq.state = 0;
+        s_tz_ask_at = ms + TZ_ASK_AGAIN_MS;
+        if (s_tz_auto && (strcmp(s_tzq.rule, s_tz_auto_rule) != 0 || strcmp(s_tzq.place, s_tz_place) != 0)) {
+            static const char *const keys[] = { "timezone_auto", "timezone_place" };
+            const char *const vals[] = { s_tzq.rule, s_tzq.place };
+            ESP_LOGI(TAG, "Time zone: the app server says %s (%s)", s_tzq.rule, s_tzq.place);
+            config_save("system", keys, vals, 2);   /* tz_apply at the next turn */
+        }
+    } else if (s_tzq.state == -1) {
+        s_tzq.state = 0;
+        s_tz_ask_at = ms + TZ_ASK_RETRY_MS;
+    }
+    if (!s_tz_auto || s_tzq.state != 0 || ms < s_tz_ask_at) return;
+    s_tz_ask_at = ms + TZ_ASK_RETRY_MS;   /* unless an answer says otherwise */
+    MiniMarketState market = mini_market_state();   /* one download at a time: memory */
+    if (!esp32_wifi_connected() || market == MINI_MARKET_REFRESHING || market == MINI_MARKET_INSTALLING) return;
+    char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
+    char proxy[160] = "";
+    if (cfg) {
+        mini_device_config_value(cfg, "proxy", proxy, sizeof(proxy));
+        free(cfg);
+    }
+    const char *base = mini_chan_url_of(proxy);   /* proxy = <key>@http://...: the address */
+    size_t n = strlen(base);
+    while (n > 0 && base[n - 1] == '/') n--;
+    if (n < 8 || n > sizeof(s_tzq.url) - 12) return;   /* no app server: the stored zone stays */
+    snprintf(s_tzq.url, sizeof(s_tzq.url), "%.*s/app/geo", (int)n, base);
+    s_tzq.state = 1;
+    if (xTaskCreate(tz_task, "timezone", TZ_TASK_STACK, NULL, 3, NULL) != pdPASS) s_tzq.state = -1;
+}
+
 void app_main(void) {
     mini_api_set_extensions(mini_api_extension_bit("esp32"));   /* this board's extension APIs */
     market_host_init();
@@ -6084,6 +6234,7 @@ void app_main(void) {
 
     /* 3. WiFi, SNTP and the HTTP API (started before the heap probe) */
     esp32_wifi_early_init();
+    tz_apply();   /* before the clock is read: [system] timezone, or the zone found last time */
     esp32_sntp_init();
     hal_wifi_connect(s_sys_cfg.wifi_ssid, s_sys_cfg.wifi_pass);
     s_job_lock = xSemaphoreCreateMutex();
@@ -6396,6 +6547,7 @@ void app_main(void) {
         /* the app market: downloads in progress; the automatic update round */
         mini_market_poll();
         mini_fontnet_poll();   /* glyphs from the font server: a due request, a finished one */
+        tz_poll(loop_t0 / 1000);   /* the time zone: a changed setting, the app server's answer */
         if (!s_settings_restart_at) mini_market_auto((uint32_t)(loop_t0 / 1000));
         if (s_factory_restart_at && esp_timer_get_time() >= s_factory_restart_at) {
             ESP_LOGW(TAG, "Restarting into the built-in settings after a factory reset");

@@ -154,6 +154,9 @@ h2 button.small{margin-top:-4px}
 <label><input type="checkbox" id="mauto"> 自动更新应用：开机联网时检查一次，有更新就进入设置模式安装，完成后回到应用</label>
 <label><input type="checkbox" id="webapp"> 运行应用时也开启本网页（关闭后只在设置模式可用，应用的 VM 堆可多约 12 KB）</label>
 <label><input type="checkbox" id="frkey"> 开机按住按键 10 秒恢复出厂设置（清空程序 ROM，进入内置的系统设置）</label>
+<label for="tz">时区（保存后立即生效；这个列表和系统设置里的一样）</label>
+<select id="tz"><option value="auto">自动（按网络位置）</option><option value="CST-8">UTC+8 北京、香港、台北、新加坡</option><option value="JST-9">UTC+9 东京、首尔</option><option value="ACST-9:30ACDT,M10.1.0,M4.1.0/3">UTC+9:30 阿德莱德</option><option value="AEST-10AEDT,M10.1.0,M4.1.0/3">UTC+10 悉尼、墨尔本</option><option value="NZST-12NZDT,M9.5.0,M4.1.0/3">UTC+12 奥克兰</option><option value="HST10">UTC-10 夏威夷</option><option value="AKST9AKDT,M3.2.0,M11.1.0">UTC-9 阿拉斯加</option><option value="PST8PDT,M3.2.0,M11.1.0">UTC-8 洛杉矶、温哥华</option><option value="MST7MDT,M3.2.0,M11.1.0">UTC-7 丹佛</option><option value="CST6CDT,M3.2.0,M11.1.0">UTC-6 芝加哥</option><option value="EST5EDT,M3.2.0,M11.1.0">UTC-5 纽约、多伦多</option><option value="&lt;-03&gt;3">UTC-3 圣保罗</option><option value="UTC0">UTC+0 协调世界时</option><option value="GMT0BST,M3.5.0/1,M10.5.0">UTC+0 伦敦、里斯本</option><option value="CET-1CEST,M3.5.0,M10.5.0/3">UTC+1 巴黎、柏林、罗马</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">UTC+2 雅典、赫尔辛基</option><option value="MSK-3">UTC+3 莫斯科、伊斯坦布尔</option><option value="&lt;+04&gt;-4">UTC+4 迪拜</option><option value="PKT-5">UTC+5 卡拉奇</option><option value="IST-5:30">UTC+5:30 新德里</option><option value="&lt;+06&gt;-6">UTC+6 达卡</option><option value="&lt;+07&gt;-7">UTC+7 曼谷、河内、雅加达</option></select>
+<div class="desc" id="tzstate"></div>
 <label for="panel">屏幕类型（保存后立即生效；颜色像底片一样反了就换另一种）</label>
 <select id="panel"><option value="ips">IPS（默认，驱动中设置反色）</option><option value="tft">TFT（不反色）</option></select>
 <div class="desc" style="margin-top:10px">屏幕亮度与光感调节（保存后立即生效）：</div>
@@ -575,6 +578,14 @@ async function refresh() {
   if (document.activeElement !== $('frkey')) $('frkey').checked = !/^(0|false|no|off)$/i.test(state.factory_reset_key || '');
   if (document.activeElement !== $('blfixed')) $('blfixed').checked = /^(0|false|no|off)$/i.test(state.auto_backlight || '1');
   keep('panel', /^tft$/i.test(state.panel || '') ? 'tft' : 'ips');
+  {   // the time zone: a rule that is not in the list (set by hand in config.ini) gets a row of its own
+    const zone = /^(auto)?$/i.test(state.timezone || '') ? 'auto' : state.timezone;
+    if (![...$('tz').options].some((o) => o.value === zone)) $('tz').add(new Option(state.timezone_name || zone, zone));
+    keep('tz', zone);
+    $('tzstate').textContent = '自动：应用服务器按本机的网络地址判断时区（含夏令时），每天问一次。' +
+      (state.timezone_place ? '上次得到：' + state.timezone_place : '还没有得到过，暂用北京时间') +
+      (state.proxy ? '' : '。没有填应用代理地址时不会查询');
+  }
   keep('blval', state.backlight || '220');
   keep('bloff', state.backlight_offset || '0');
   keep('blmin', state.backlight_min || '30');
@@ -1132,6 +1143,8 @@ async function saveCommon(andRestart) {
                 'system.web_in_app': $('webapp').checked ? '1' : '0',
                 'system.factory_reset_key': $('frkey').checked ? '1' : '0',
                 'display.panel': $('panel').value,
+                'system.timezone': $('tz').value,
+                'system.timezone_name': $('tz').value === 'auto' ? '' : $('tz').selectedOptions[0].textContent,
                 'display.auto_backlight': $('blfixed').checked ? '0' : '1',
                 'display.backlight': blval,
                 'display.backlight_offset': bloff,

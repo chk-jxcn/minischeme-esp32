@@ -655,6 +655,11 @@ static char s_esp32_wifi_ssid[33] = "";
 static esp_netif_t *s_esp32_sta_netif = NULL;
 
 #if defined(ESP_PLATFORM)
+void esp32_set_timezone(const char *rule) {
+    setenv("TZ", rule && rule[0] ? rule : "CST-8", 1);
+    tzset();
+}
+
 void esp32_sntp_init(void) {
     if (!esp_sntp_enabled()) {
         ESP_LOGI("MiniScheme_SNTP", "Initializing SNTP client (ntp.aliyun.com, cn.pool.ntp.org)...");
@@ -663,8 +668,7 @@ void esp32_sntp_init(void) {
         esp_sntp_setservername(1, "cn.pool.ntp.org");
         esp_sntp_setservername(2, "pool.ntp.org");
         esp_sntp_init();
-        setenv("TZ", "CST-8", 1);
-        tzset();
+        if (!getenv("TZ")) esp32_set_timezone(NULL);   /* the host sets it from config.ini */
     }
 }
 #endif

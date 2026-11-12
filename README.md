@@ -62,6 +62,8 @@ config_version = 3          ; keep it: an older or missing version is replaced b
 
 [system]
 boot_app =                  ; empty: the built-in settings
+timezone = auto             ; auto: the app proxy tells the zone of this network address (/app/geo);
+                            ; or a TZ rule (CST-8, EST5EDT,M3.2.0,M11.1.0): the settings and the web page list zones
 
 [wifi]
 wifi_ssid = your-wifi-ssid

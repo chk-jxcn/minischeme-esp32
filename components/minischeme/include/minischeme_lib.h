@@ -74,6 +74,9 @@ void  mini_console_history_free(void);
 #if defined(ESP_PLATFORM)
 void  esp32_wifi_early_init(void);
 void  esp32_sntp_init(void);
+/** @brief The clock's time zone: a POSIX TZ rule ("CST-8", "EST5EDT,M3.2.0,M11.1.0"); NULL or
+ *  "": China Standard Time. */
+void  esp32_set_timezone(const char *rule);
 bool  hal_wifi_connect(const char *ssid, const char *pass);
 /* Access point next to the station (APSTA): open when pass is shorter than 8 */
 bool  hal_wifi_ap(const char *ssid, const char *pass);
