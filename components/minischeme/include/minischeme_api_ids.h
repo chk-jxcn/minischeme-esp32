@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#define MINI_API_ID_COUNT 423
+#define MINI_API_ID_COUNT 431
 /* the name of each number (NULL: a number no procedure has any more) */
 static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "void",  /* 0 */
@@ -432,6 +432,14 @@ static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "ble-hid-connect",  /* 420 */
     "ble-mtu",  /* 421 */
     "ble-rssi",  /* 422 */
+    "matrix-size",  /* 423 */
+    "matrix-set",  /* 424 */
+    "matrix-get",  /* 425 */
+    "matrix-fill",  /* 426 */
+    "matrix-draw",  /* 427 */
+    "matrix-show",  /* 428 */
+    "matrix-clear",  /* 429 */
+    "matrix-brightness",  /* 430 */
 };
 
 typedef struct MiniApiIdEntry {
@@ -439,7 +447,7 @@ typedef struct MiniApiIdEntry {
     uint16_t id;
 } MiniApiIdEntry;
 
-#define MINI_API_ID_INDEX_COUNT 450
+#define MINI_API_ID_INDEX_COUNT 458
 /* names (older names too) sorted by strcmp, with their numbers: the compiler's %api-id */
 static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "*", 45 },
@@ -754,6 +762,14 @@ static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "market-install", 199 },
     { "market-refresh", 196 },
     { "market-status", 197 },
+    { "matrix-brightness", 430 },
+    { "matrix-clear", 429 },
+    { "matrix-draw", 427 },
+    { "matrix-fill", 426 },
+    { "matrix-get", 425 },
+    { "matrix-set", 424 },
+    { "matrix-show", 428 },
+    { "matrix-size", 423 },
     { "max", 74 },
     { "max-alloc-heap", 165 },
     { "mem-free", 162 },

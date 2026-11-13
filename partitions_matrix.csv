@@ -1,0 +1,10 @@
+# ESP-IDF Partition Table: Waveshare ESP32-S3-Matrix (4 MB flash, fully used)
+# Name,   Type, SubType, Offset,   Size, Flags
+# factory: the S3 firmware built for size; fontrom, approm as on the ESP32; storage
+# (LittleFS) takes the rest. All on 64 KB boundaries.
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  1792K,
+fontrom,  data, 0x41,    0x1d0000, 320K,
+approm,   data, 0x40,    0x220000, 512K,
+storage,  data, spiffs,  0x2a0000, 1408K,

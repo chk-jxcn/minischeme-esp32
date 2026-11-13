@@ -574,7 +574,9 @@ void esp32_set_storage_info(bool (*info)(size_t *total, size_t *used)) {
 }
 
 static inline bool is_display_bus_pin(int pin) {
-#if CONFIG_IDF_TARGET_ESP32S3
+#if defined(MINI_BOARD_MATRIX)
+    return pin == 14;                        /* no display: the LED matrix's data line */
+#elif CONFIG_IDF_TARGET_ESP32S3
     return pin == 39 || pin == 40 || pin == 41 || pin == 42 || pin == 45 || pin == 48;
 #endif
     return (pin == 2 || pin == 4 || pin == 15 || pin == 32 || pin == 33 ||

@@ -77,6 +77,10 @@
 #include "minischeme_fontnet.h"
 #include "market_host.h"
 #include "ble.h"
+#if defined(MINI_BOARD_MATRIX)
+#include "matrix.h"
+#include "minischeme_matrix.h"
+#endif
 #include "minischeme.h"
 #include "minischeme_internal.h"
 #include "minischeme_lib.h"
@@ -5523,6 +5527,9 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_c_func(vm, "config-set!", prim_config_set);
     mini_register_c_func(vm, "time-set!", prim_time_set);
     ble_register(vm);
+#if defined(MINI_BOARD_MATRIX)
+    matrix_register(vm);
+#endif
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
     mini_register_c_func(vm, "app-list", prim_app_list);
@@ -6412,7 +6419,26 @@ void app_main(void) {
     mini_backlight_auto_set(s_sys_cfg.auto_backlight);
     mini_backlight_set_hook(backlight_changed);
     esp32_ws2812_init();
+#if defined(MINI_BOARD_MATRIX)
+    {
+        /* config.ini [matrix]: how the LEDs are wired and how bright they start. The status
+         * LED of the other boards would light all 64: it stays off. */
+        char v[16];
+        bool rgb = ini_file_value("/spiffs/config.ini", "matrix_order", v, sizeof(v)) && strcasecmp(v, "rgb") == 0;
+        bool snake = ini_file_value("/spiffs/config.ini", "matrix_layout", v, sizeof(v)) &&
+                     strcasecmp(v, "serpentine") == 0;
+        int turn = ini_file_value("/spiffs/config.ini", "matrix_rotate", v, sizeof(v)) ? atoi(v) / 90 : 0;
+        mini_matrix_configure(rgb, snake, turn);
+        if (ini_file_value("/spiffs/config.ini", "matrix_brightness", v, sizeof(v))) mini_matrix_set_brightness(atoi(v));
+        if (mini_matrix_ready()) {
+            mini_api_set_extensions(mini_api_get_extensions() | mini_api_extension_bit("matrix"));
+            mini_matrix_set(0, 0, 0x00ffff);     /* one LED: the firmware is up */
+            mini_matrix_show();
+        }
+    }
+#else
     mini_ws2812_set(0, 255, 255);
+#endif
     esp32_light_init();
     esp32_button_init();
 

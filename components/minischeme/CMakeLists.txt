@@ -1,6 +1,8 @@
 # the board: the ESP32 desk display (parallel ILI9488 / ST7796) or the ESP32-S3 research
 # board (Waveshare ESP32-S3-LCD-1.47, SPI ST7789); both give the esp32_ili9488_* interface
-if(IDF_TARGET STREQUAL "esp32s3")
+if(MINI_BOARD STREQUAL "matrix")
+    set(BOARD_SRC "src/minischeme_board_matrix.c")   # Waveshare ESP32-S3-Matrix: LEDs, no display
+elseif(IDF_TARGET STREQUAL "esp32s3")
     set(BOARD_SRC "src/minischeme_board_s3.c")
 else()
     set(BOARD_SRC "src/minischeme_ili9488.c")
@@ -39,6 +41,7 @@ idf_component_register(
         esp_driver_ledc
         esp_driver_uart
         esp_driver_spi
+        esp_driver_rmt
         esp_adc
         driver
         esp_timer

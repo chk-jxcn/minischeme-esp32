@@ -4,15 +4,15 @@
 
 #include <stdint.h>
 
-#define MINI_API_VERSION       "1.18.0"
+#define MINI_API_VERSION       "1.19.0"
 #define MINI_API_VERSION_MAJOR 1
-#define MINI_API_VERSION_MINOR 18
+#define MINI_API_VERSION_MINOR 19
 #define MINI_API_VERSION_PATCH 0
 
 enum { MINI_API_STABLE, MINI_API_RESERVED, MINI_API_ALIAS };
 enum { MINI_API_ALL, MINI_API_DEVICE, MINI_API_PC };
 
-#define MINI_API_COMPONENT_COUNT 54
+#define MINI_API_COMPONENT_COUNT 55
 static const char *const mini_api_components[MINI_API_COMPONENT_COUNT] = {
     "syntax",
     "math",
@@ -66,15 +66,17 @@ static const char *const mini_api_components[MINI_API_COMPONENT_COUNT] = {
     "codec",
     "random",
     "esp32",
+    "matrix",
     "ble",
     "host",
 };
 
-#define MINI_API_EXTENSION_COUNT 2
+#define MINI_API_EXTENSION_COUNT 3
 /* extension ids and versions; an entry's ext is 1 + its index here (0: core) */
 static const char *const mini_api_extensions[MINI_API_EXTENSION_COUNT][2] = {
     { "esp32", "1.0.0" },
     { "ble", "1.0.0" },
+    { "matrix", "1.0.0" },
 };
 
 typedef struct MiniApiEntry {
@@ -87,7 +89,7 @@ typedef struct MiniApiEntry {
     uint8_t where;       /* MINI_API_ALL / _DEVICE / _PC */
 } MiniApiEntry;
 
-#define MINI_API_ENTRY_COUNT 467
+#define MINI_API_ENTRY_COUNT 475
 /* sorted by name (strcmp) for a binary search */
 static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "*", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -140,33 +142,33 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "begin", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "bench-display", 0x010000, -1, 21, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "bench-tick", 0x010000, -1, 21, MINI_API_STABLE, 0, MINI_API_DEVICE },
-    { "ble-adv-field", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-advertise", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-advertise-stop", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-bonds", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-bytes->hex", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-connect", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-connections", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-disconnect", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-discover", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-event", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-hex->bytes", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-hid-connect", 0x010000, -1, 52, MINI_API_RESERVED, 2, MINI_API_DEVICE },
-    { "ble-mtu", 0x010000, -1, 52, MINI_API_RESERVED, 2, MINI_API_DEVICE },
-    { "ble-pair", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-read", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-rssi", 0x010000, -1, 52, MINI_API_RESERVED, 2, MINI_API_DEVICE },
-    { "ble-scan-results", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-scan-start", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-scan-stop", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-service-add", 0x010000, -1, 52, MINI_API_RESERVED, 2, MINI_API_DEVICE },
-    { "ble-services", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-status", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-subscribe", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-uart-write", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-unpair", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
-    { "ble-value-set!", 0x010000, -1, 52, MINI_API_RESERVED, 2, MINI_API_DEVICE },
-    { "ble-write", 0x010000, -1, 52, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-adv-field", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-advertise", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-advertise-stop", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-bonds", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-bytes->hex", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-connect", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-connections", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-disconnect", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-discover", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-event", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-hex->bytes", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-hid-connect", 0x010000, -1, 53, MINI_API_RESERVED, 2, MINI_API_DEVICE },
+    { "ble-mtu", 0x010000, -1, 53, MINI_API_RESERVED, 2, MINI_API_DEVICE },
+    { "ble-pair", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-read", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-rssi", 0x010000, -1, 53, MINI_API_RESERVED, 2, MINI_API_DEVICE },
+    { "ble-scan-results", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-scan-start", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-scan-stop", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-service-add", 0x010000, -1, 53, MINI_API_RESERVED, 2, MINI_API_DEVICE },
+    { "ble-services", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-status", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-subscribe", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-uart-write", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-unpair", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
+    { "ble-value-set!", 0x010000, -1, 53, MINI_API_RESERVED, 2, MINI_API_DEVICE },
+    { "ble-write", 0x010000, -1, 53, MINI_API_STABLE, 2, MINI_API_DEVICE },
     { "boolean?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
     { "button-pressed?", 0x010000, -1, 30, MINI_API_STABLE, 0, MINI_API_ALL },
     { "button-read", 0x010000, -1, 30, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -197,8 +199,8 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "char>=?", 0x010000, -1, 5, MINI_API_STABLE, 0, MINI_API_ALL },
     { "char>?", 0x010000, -1, 5, MINI_API_STABLE, 0, MINI_API_ALL },
     { "char?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "chip-info", 0x010000, 403, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "chip-model", 0x010000, 404, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "chip-info", 0x010000, 411, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "chip-model", 0x010000, 412, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "cond", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "config-get", 0x010000, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "config-set!", 0x010000, -1, 18, MINI_API_STABLE, 0, MINI_API_DEVICE },
@@ -206,13 +208,13 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "cos", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "crc32", 0x010000, -1, 49, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "dac-write", 0x010000, -1, 24, MINI_API_RESERVED, 0, MINI_API_ALL },
-    { "deep-sleep", 0x010000, 352, 15, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "deep-sleep", 0x010000, 360, 15, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "define", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "define-macro", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "define-syntax", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
     { "defined?", 0x010000, -1, 9, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "delay-ms", 0x010000, 417, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "delay-us", 0x010000, 418, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "delay-ms", 0x010000, 425, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "delay-us", 0x010000, 426, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "digital-read", 0x010000, 189, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "digital-write", 0x010000, 191, 22, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "display", 0x010000, -1, 8, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -238,9 +240,9 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "exp", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "expt", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "factory-reset", 0x010100, -1, 19, MINI_API_STABLE, 0, MINI_API_DEVICE },
-    { "fasl-to-c", 0x010000, -1, 53, MINI_API_STABLE, 0, MINI_API_PC },
-    { "file-remove", 0x010000, -1, 53, MINI_API_STABLE, 0, MINI_API_PC },
-    { "file-size", 0x010000, -1, 53, MINI_API_STABLE, 0, MINI_API_PC },
+    { "fasl-to-c", 0x010000, -1, 54, MINI_API_STABLE, 0, MINI_API_PC },
+    { "file-remove", 0x010000, -1, 54, MINI_API_STABLE, 0, MINI_API_PC },
+    { "file-size", 0x010000, -1, 54, MINI_API_STABLE, 0, MINI_API_PC },
     { "filter", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "flash-app-bytes", 0x010000, -1, 14, MINI_API_STABLE, 0, MINI_API_ALL },
     { "flash-app-partition-bytes", 0x010000, -1, 14, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -263,7 +265,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "fontrom-list", 0x010000, -1, 38, MINI_API_STABLE, 0, MINI_API_ALL },
     { "fontrom-remove", 0x010000, -1, 38, MINI_API_STABLE, 0, MINI_API_ALL },
     { "for-each", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "free-heap", 0x010000, 325, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "free-heap", 0x010000, 333, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "fs-append", 0x010000, -1, 45, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "fs-download", 0x010a00, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "fs-download-status", 0x010a00, -1, 45, MINI_API_STABLE, 0, MINI_API_DEVICE },
@@ -348,7 +350,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "gui-touch-poll", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
     { "gui-visible?", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
     { "gui-width", 0x010000, -1, 36, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "heap-total", 0x010000, 329, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "heap-total", 0x010000, 337, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "help", 0x010000, -1, 9, MINI_API_STABLE, 0, MINI_API_ALL },
     { "http-get", 0x010000, -1, 43, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "http-post", 0x010000, -1, 43, MINI_API_RESERVED, 0, MINI_API_ALL },
@@ -413,8 +415,16 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "market-install", 0x010100, -1, 20, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "market-refresh", 0x010100, -1, 20, MINI_API_STABLE, 0, MINI_API_DEVICE },
     { "market-status", 0x010100, -1, 20, MINI_API_STABLE, 0, MINI_API_DEVICE },
+    { "matrix-brightness", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-clear", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-draw", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-fill", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-get", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-set", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-show", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
+    { "matrix-size", 0x010000, -1, 52, MINI_API_STABLE, 3, MINI_API_DEVICE },
     { "max", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "max-alloc-heap", 0x010000, 326, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "max-alloc-heap", 0x010000, 334, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "mem-free", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mem-max-block", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mem-min-free", 0x010000, -1, 13, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -423,10 +433,10 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "member", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "memq", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "memv", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "micros", 0x010000, 420, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
-    { "millis", 0x010000, 414, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "micros", 0x010000, 428, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "millis", 0x010000, 422, 16, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "min", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "min-free-heap", 0x010000, 327, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "min-free-heap", 0x010000, 335, 13, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "modulo", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "mqtt-connect", 0x010000, -1, 44, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "mqtt-disconnect", 0x010000, -1, 44, MINI_API_RESERVED, 0, MINI_API_ALL },
@@ -455,7 +465,7 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "random-seed!", 0x010000, -1, 50, MINI_API_RESERVED, 0, MINI_API_ALL },
     { "real?", 0x010000, -1, 6, MINI_API_STABLE, 0, MINI_API_ALL },
     { "remainder", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "restart", 0x010000, 406, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "restart", 0x010000, 414, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "reverse", 0x010000, -1, 2, MINI_API_STABLE, 0, MINI_API_ALL },
     { "round", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "set!", 0x010000, -1, 0, MINI_API_STABLE, 0, MINI_API_ALL },
@@ -497,8 +507,8 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "sys-chip-model", 0x010000, -1, 12, MINI_API_STABLE, 0, MINI_API_ALL },
     { "sys-info", 0x010000, -1, 12, MINI_API_STABLE, 0, MINI_API_ALL },
     { "sys-restart", 0x010000, -1, 12, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "system", 0x010000, -1, 53, MINI_API_STABLE, 0, MINI_API_PC },
-    { "system-info", 0x010000, 405, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "system", 0x010000, -1, 54, MINI_API_STABLE, 0, MINI_API_PC },
+    { "system-info", 0x010000, 413, 12, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "tan", 0x010000, -1, 1, MINI_API_STABLE, 0, MINI_API_ALL },
     { "theme-css", 0x010800, -1, 40, MINI_API_STABLE, 0, MINI_API_ALL },
     { "tick-bench", 0x010000, 49, 21, MINI_API_ALIAS, 0, MINI_API_DEVICE },
@@ -549,9 +559,9 @@ static const MiniApiEntry mini_api_table[MINI_API_ENTRY_COUNT] = {
     { "wifi-ip", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
     { "wifi-rssi", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
     { "wifi-ssid", 0x010000, -1, 41, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "wifi-status", 0x010000, 454, 41, MINI_API_ALIAS, 0, MINI_API_ALL },
+    { "wifi-status", 0x010000, 462, 41, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "write", 0x010000, -1, 8, MINI_API_STABLE, 0, MINI_API_ALL },
-    { "write-file-string", 0x010000, -1, 53, MINI_API_STABLE, 0, MINI_API_PC },
+    { "write-file-string", 0x010000, -1, 54, MINI_API_STABLE, 0, MINI_API_PC },
     { "ws2812-clear", 0x010000, 294, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "ws2812-get", 0x010000, 295, 31, MINI_API_ALIAS, 0, MINI_API_ALL },
     { "ws2812-set", 0x010000, 296, 31, MINI_API_ALIAS, 0, MINI_API_ALL },

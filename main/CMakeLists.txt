@@ -1,9 +1,17 @@
+# the `matrix` API extension: only for the board with the LED matrix
+if(MINI_BOARD STREQUAL "matrix")
+    set(BOARD_API_SRC "matrix.c")
+else()
+    set(BOARD_API_SRC "")
+endif()
+
 idf_component_register(
     SRCS
         "main.c"
         "setup_portal.c"
         "market_host.c"
         "ble.c"
+        ${BOARD_API_SRC}
     INCLUDE_DIRS
         "."
     REQUIRES
