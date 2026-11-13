@@ -79,6 +79,7 @@
 #include "ble.h"
 #if defined(MINI_BOARD_MATRIX)
 #include "matrix.h"
+#include "imu.h"
 #include "minischeme_matrix.h"
 #endif
 #include "minischeme.h"
@@ -5529,6 +5530,7 @@ static MiniVM *create_app_vm(size_t heap) {
     ble_register(vm);
 #if defined(MINI_BOARD_MATRIX)
     matrix_register(vm);
+    imu_register(vm);
 #endif
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
@@ -6434,6 +6436,9 @@ void app_main(void) {
             mini_api_set_extensions(mini_api_get_extensions() | mini_api_extension_bit("matrix"));
             mini_matrix_set(0, 0, 0x00ffff);     /* one LED: the firmware is up */
             mini_matrix_show();
+        }
+        if (imu_init()) {
+            mini_api_set_extensions(mini_api_get_extensions() | mini_api_extension_bit("imu"));
         }
     }
 #else

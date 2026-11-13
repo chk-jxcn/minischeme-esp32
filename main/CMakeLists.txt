@@ -1,6 +1,6 @@
-# the `matrix` API extension: only for the board with the LED matrix
+# the `matrix` and `imu` API extensions: only for the board with the LED matrix and the motion sensor
 if(MINI_BOARD STREQUAL "matrix")
-    set(BOARD_API_SRC "matrix.c")
+    set(BOARD_API_SRC "matrix.c" "imu.c")
 else()
     set(BOARD_API_SRC "")
 endif()
@@ -17,6 +17,7 @@ idf_component_register(
     REQUIRES
         minischeme
         esp_driver_gpio
+        esp_driver_i2c
         esp_driver_ledc
         esp_driver_uart
         esp_driver_usb_serial_jtag

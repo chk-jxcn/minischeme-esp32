@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#define MINI_API_ID_COUNT 434
+#define MINI_API_ID_COUNT 437
 /* the name of each number (NULL: a number no procedure has any more) */
 static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "void",  /* 0 */
@@ -443,6 +443,9 @@ static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "gc-pause",  /* 431 */
     "gc-resume",  /* 432 */
     "gc-paused?",  /* 433 */
+    "imu-accel",  /* 434 */
+    "imu-gyro",  /* 435 */
+    "imu-temperature",  /* 436 */
 };
 
 typedef struct MiniApiIdEntry {
@@ -450,7 +453,7 @@ typedef struct MiniApiIdEntry {
     uint16_t id;
 } MiniApiIdEntry;
 
-#define MINI_API_ID_INDEX_COUNT 461
+#define MINI_API_ID_INDEX_COUNT 464
 /* names (older names too) sorted by strcmp, with their numbers: the compiler's %api-id */
 static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "*", 45 },
@@ -719,6 +722,9 @@ static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "i2c-write", 219 },
     { "i2c-write-read", 221 },
     { "image-info", 267 },
+    { "imu-accel", 434 },
+    { "imu-gyro", 435 },
+    { "imu-temperature", 436 },
     { "inexact->exact", 73 },
     { "inexact?", 71 },
     { "integer->char", 145 },
