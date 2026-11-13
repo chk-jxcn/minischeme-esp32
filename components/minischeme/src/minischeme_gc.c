@@ -27,7 +27,7 @@
 static size_t s_word_iram = 0;
 
 void *mini_word_alloc(size_t bytes) {
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(MALLOC_CAP_EXEC)   /* a chip with a word-only IRAM heap (ESP32) */
     /* EXEC|32BIT prefers the IRAM-only region; past it the allocator would
      * carve DRAM through its IRAM alias, which saves nothing */
     void *p = heap_caps_malloc(bytes, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT);
@@ -36,12 +36,16 @@ void *mini_word_alloc(size_t bytes) {
         return p;
     }
     if (p) heap_caps_free(p);
+#elif defined(ESP_PLATFORM)
+    /* no word-only heap (ESP32-S3): internal RAM, not PSRAM, for the stack and the frames */
+    void *p = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (p) return p;
 #endif
     return malloc(bytes);
 }
 
 void mini_words_copy(void *dst, const void *src, size_t bytes) {
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(MALLOC_CAP_EXEC)   /* a chip with a word-only IRAM heap (ESP32) */
     /* volatile: the compiler must not turn the loop back into memcpy */
     volatile uint32_t *d = (volatile uint32_t *)dst;
     const volatile uint32_t *s = (const volatile uint32_t *)src;
@@ -52,7 +56,7 @@ void mini_words_copy(void *dst, const void *src, size_t bytes) {
 }
 
 void mini_words_fill(void *dst, uint32_t value, size_t bytes) {
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(MALLOC_CAP_EXEC)   /* a chip with a word-only IRAM heap (ESP32) */
     volatile uint32_t *d = (volatile uint32_t *)dst;
     for (size_t i = 0; i < bytes / 4; i++) d[i] = value;
 #else
@@ -71,7 +75,7 @@ void *mini_word_grow(void *old, size_t old_bytes, size_t new_bytes) {
     if (!p) return NULL;
     if (old) {
         mini_words_copy(p, old, old_bytes < new_bytes ? old_bytes : new_bytes);
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(MALLOC_CAP_EXEC)   /* a chip with a word-only IRAM heap (ESP32) */
         if (esp_ptr_in_iram(old) && !esp_ptr_in_diram_iram(old)) {
             s_word_iram -= old_bytes < s_word_iram ? old_bytes : s_word_iram;
         }
@@ -101,7 +105,7 @@ void mini_vm_mem_owners(MiniVM *vm, MiniMemOwnerFn fn, void *user) {
 }
 
 char *alloc_aligned8(size_t size, char **raw_ptr) {
-#if defined(ESP_PLATFORM)
+#if defined(ESP_PLATFORM) && defined(MALLOC_CAP_EXEC)   /* a chip with a word-only IRAM heap (ESP32) */
     char *raw = NULL;
     if (size >= 64 * 1024) {
         raw = (char *)heap_caps_malloc(size + 8, MALLOC_CAP_EXEC | MALLOC_CAP_8BIT);
@@ -117,6 +121,15 @@ char *alloc_aligned8(size_t size, char **raw_ptr) {
     if (!raw) {
         raw = (char *)heap_caps_malloc(size + 8, MALLOC_CAP_8BIT);
     }
+#elif defined(ESP_PLATFORM)
+    /* with PSRAM: the heap (large) goes there unless the build keeps it internal
+     * (VM_HEAP_INTERNAL); the eden and other small blocks stay in internal RAM */
+    char *raw = NULL;
+#if CONFIG_SPIRAM && !VM_HEAP_INTERNAL
+    if (size >= 16 * 1024) raw = (char *)heap_caps_malloc(size + 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (!raw) raw = (char *)heap_caps_malloc(size + 8, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!raw) raw = (char *)malloc(size + 8);
 #else
     char *raw = (char *)malloc(size + 8);
 #endif

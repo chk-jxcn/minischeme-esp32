@@ -1,3 +1,11 @@
+# the board: the ESP32 desk display (parallel ILI9488 / ST7796) or the ESP32-S3 research
+# board (Waveshare ESP32-S3-LCD-1.47, SPI ST7789); both give the esp32_ili9488_* interface
+if(IDF_TARGET STREQUAL "esp32s3")
+    set(BOARD_SRC "src/minischeme_board_s3.c")
+else()
+    set(BOARD_SRC "src/minischeme_ili9488.c")
+endif()
+
 idf_component_register(
     SRCS
         "src/minischeme.c"
@@ -15,7 +23,7 @@ idf_component_register(
         "src/minischeme_fontrom.c"
         "src/minischeme_fontnet.c"
         "src/minischeme_mirror.c"
-        "src/minischeme_ili9488.c"
+        ${BOARD_SRC}
         "src/minischeme_help.c"
         "src/minischeme_device.c"
         "src/minischeme_jsonfeed.c"
@@ -30,6 +38,7 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_ledc
         esp_driver_uart
+        esp_driver_spi
         esp_adc
         driver
         esp_timer

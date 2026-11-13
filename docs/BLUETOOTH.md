@@ -14,7 +14,8 @@
      代价是没有网页、没有网络时间、没有联网数据。
   2. **WiFi 和蓝牙同时开**：VM 堆 43 KB，只够一个应用（天气实测用到 34 KB），网页可用。
 - **蓝牙编进固件但不开**也有代价：VM 堆少 7 KB，系统空闲少 11 KB（见第 3 节）。
-  所以在 ESP32 上不建议把蓝牙合进主线固件；ESP32-S3 上没有这个问题（见第 6 节）。
+  所以在 ESP32 上不建议把蓝牙合进主线固件；带 PSRAM 的 ESP32-S3 上 WiFi 加蓝牙同开，
+  VM 堆仍是满额 128 KB（实测，见第 7 节）。
 - **协议栈再精简**（不要配对加密、一条连接、缓冲区减小）还能省约 7.6 KB 内存、35 KB 固件，
   代价是不能连需要配对的设备。默认配置没有这样做。
 
@@ -116,25 +117,63 @@ bt_name =          ; 广播名，默认 Desk-XXXX
 - 广播：状态变为 advertising。
 - `api-version` 为 1.18.0，`(api-extensions)` 含 `ble 1.0.0`，`api-has?` 对预留接口返回 `#f`。
 
-未验证：
+两块板互连（ESP32 做主机，ESP32-S3 做外设，脚本 scratchpad 的 `two_boards.py`）：
 
-- **当外设的数据收发**（手机连上来、串口服务读写）：测试用的电脑蓝牙是关着的。
-  用手机的 nRF Connect 或把电脑蓝牙打开后运行 scratchpad 的 `pc_uart.py` 即可测。
+- S3 `(ble-advertise #t)`，ESP32 按名字过滤扫描到它，连接、发现到串口服务（6e400001，写 16、通知 18）。
+- ESP32 订阅后写入，S3 收到 `(uart 2 "hello ESP32!!")`；S3 `(ble-uart-write ...)`，ESP32 收到通知。
+  两个方向都通，断开后两边都收到 `disconnected`。
+
+未验证和已知问题：
+
+- 手机或电脑做主机连板子（只测了板子对板子）。
 - 配对和绑定（`ble-pair`）：手边没有需要配对的 BLE 设备参与测试。
 - 只开蓝牙模式下的长时间运行和内存最低值。
-- WiFi 和蓝牙共存时的连接成功率（实测第一次连接超时过一次）。
+- 连接偶尔第一次建立失败（原因 0x3E 或超时，WiFi 同开时见过三次）。其中一次 ESP32 之后停在
+  `connecting` 状态，`ble-connect` 返回 `#f`，要先 `(ble-disconnect 0)` 才能再连：`main/ble.c`
+  里失败后的状态清理还要补。
 
-## 7. 搬到 ESP32-S3 时
+## 7. ESP32-S3 实测
 
-以下是按芯片资料做的判断，没有在 S3 上实测。
+板子：微雪 ESP32-S3-LCD-1.47（ESP32-S3R8：16 MB flash，8 MB 八线 PSRAM，ST7789 172x320 SPI 屏，
+只有芯片自带的 USB 口）。同一份源码按芯片编译：
 
-- S3 有 512 KB 内存（常见模组还带 PSRAM），内存布局不同，预计不会再有
-  "蓝牙编进去不开也少内存"的问题，WiFi 加蓝牙同时开也应该放得下合集。
-- S3 的控制器只有 BLE（支持 BLE 5），配置项前缀不同（`BT_CTRL_*`、`BT_LE_*`，不是
-  `BTDM_*`），`sdkconfig.defaults` 里控制器那几行要按芯片分开；NimBLE 主机的配置通用。
-- `main/ble.c` 只用了 NimBLE 的通用接口；启动时归还经典蓝牙内存的那一行
-  （`esp_bt_controller_mem_release`）是 ESP32 专用的，S3 上要确认是否需要。
-- 预留的 5 个接口（自定义 GATT 服务、HID 遥控器、MTU、信号强度）建议在 S3 上补齐：
-  自定义服务需要 NimBLE 的动态服务支持，HID 需要报告描述符解析，内存开销在 ESP32 上不划算。
-- 体积优化的三项设置（库按体积优化、断言不带字符串、去掉错误名称表）在 S3 上不需要，
-  flash 足够。
+```
+idf.py -B build_s3 -DSDKCONFIG=sdkconfig.s3 -DIDF_TARGET=esp32s3 build
+esptool --chip esp32s3 write-flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 minischeme_esp32.bin
+```
+
+| 配置（WiFi + 蓝牙，系统设置应用） | VM 堆 | 内部内存空闲 | PSRAM 空闲 |
+|---|---|---|---|
+| 不用 PSRAM | 71 KB | 24 KB | - |
+| 用 PSRAM，VM 堆留在内部内存 | 63 KB | - | 8 MB |
+| 用 PSRAM，VM 堆放 PSRAM（现在的做法） | 128 KB（`max_heap` 上限） | 88 KB（最低 47 KB） | 8 MB |
+
+结论和原先的估计不一样的地方：
+
+- **S3 不带 PSRAM 时并不宽裕。** 内部堆一共 284 KB，WiFi 的 IRAM 代码和它共用同一块内存；
+  S3 的 BLE 5 控制器加主机占 52~55 KB（ESP32 上是 24~27 KB）。不用 PSRAM 时 WiFi 加蓝牙后
+  VM 只有 71 KB。要买带 PSRAM 的型号。
+- **VM 堆放 PSRAM 代价很小。** 同一段测试（毫秒）：递归 fib 145 / 145，建表求和（分配和 GC 多）
+  207 / 236，向量循环 222 / 222（内部内存 / PSRAM）。eden、VM 栈和调用帧仍在内部内存。
+- 蓝牙不开时没有 ESP32 那种"编进去也少内存"的问题（S3 没有 IRAM 专用堆可挤）。
+- 蓝牙各接口在 S3 上不用改：扫描、连接温湿度计、发现、读、订阅通知、做外设收发都通过
+  （第 6 节）。
+
+移植时改的地方（都在本分支）：
+
+- `components/minischeme/src/minischeme_board_s3.c`：这块板的屏、背光、BOOT 键、RGB 灯，接口和
+  `minischeme_ili9488.c` 相同，CMake 按芯片二选一。屏只有 172x320，默认分辨率跟着改了；
+  现有应用按 320x480 排版，在这块屏上只是能显示，不是适配。
+- 串口控制台走芯片的 USB（`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`），`@INFO`、`@READ` 等命令照常。
+- `sdkconfig.defaults` 拆成公共部分加 `sdkconfig.defaults.esp32` / `.esp32s3`；S3 用
+  `partitions_s3.csv`，不做体积优化，任务栈放大（主任务 9216 在 S3 上会溢出）。
+- `MALLOC_CAP_EXEC` 在 S3 上不存在：`mini_word_alloc` 改为取内部内存；`alloc_aligned8` 把大块
+  （VM 堆）放 PSRAM；`main.c` 里量 VM 堆大小的地方改用 `VM_HEAP_CAPS` / `vm_side_free()`。
+- `esp_bt_controller_mem_release(CLASSIC_BT)` 只在 ESP32 上调用。
+
+还没做：
+
+- `max_heap` 仍是 128 KB 上限，PSRAM 有 8 MB，可以放开给大应用。
+- 预留的 5 个接口（自定义 GATT 服务、HID 遥控器、MTU、信号强度）。
+- S3 控制器的内存配置没有精简（连接数、缓冲区都是默认值）。
+- 另一种 S3 板（4 MB flash、2 MB 四线 PSRAM 的小板）需要自己的 `sdkconfig` 和分区表。

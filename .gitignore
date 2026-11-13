@@ -12,3 +12,6 @@ sdkconfig.old
 .idea/
 .DS_Store
 Thumbs.db
+build_s3/
+sdkconfig.s3
+sdkconfig.s3.old

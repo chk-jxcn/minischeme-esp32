@@ -574,6 +574,9 @@ void esp32_set_storage_info(bool (*info)(size_t *total, size_t *used)) {
 }
 
 static inline bool is_display_bus_pin(int pin) {
+#if CONFIG_IDF_TARGET_ESP32S3
+    return pin == 39 || pin == 40 || pin == 41 || pin == 42 || pin == 45 || pin == 48;
+#endif
     return (pin == 2 || pin == 4 || pin == 15 || pin == 32 || pin == 33 ||
             pin == 12 || pin == 13 || pin == 26 || pin == 25 ||
             pin == 17 || pin == 16 || pin == 27 || pin == 14);

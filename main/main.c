@@ -65,6 +65,10 @@
 #include "esp_random.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 
 #include "minischeme_api.h"
 #include "minischeme_market.h"
@@ -217,6 +221,23 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
  * lowest under web load. 60 KB still kept 15 KB but served half the requests
  * (the HTTP server starves); without IRAM, 64 KB fell to 8 KB under load. */
 #define MIN_OS_RESERVE       (60 * 1024)
+/* Where the VM heap comes from and what its size is measured against. With PSRAM (the
+ * ESP32-S3 board) the heap is there: internal RAM is left to the radios, the stacks and the
+ * VM's small hot structures (eden, stack, frames). VM_HEAP_INTERNAL=1 keeps the heap in
+ * internal RAM instead (faster, but then WiFi + Bluetooth leave it about 60 KB). */
+#ifndef VM_HEAP_INTERNAL
+#define VM_HEAP_INTERNAL     0
+#endif
+#if CONFIG_SPIRAM && !VM_HEAP_INTERNAL
+#define VM_HEAP_CAPS         (MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM)
+#define vm_side_free()       heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
+#elif CONFIG_SPIRAM
+#define VM_HEAP_CAPS         (MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
+#define vm_side_free()       heap_caps_get_free_size(MALLOC_CAP_INTERNAL)
+#else
+#define VM_HEAP_CAPS         MALLOC_CAP_8BIT
+#define vm_side_free()       esp_get_free_heap_size()
+#endif
 #define WIFI_PROBE_WAIT_MS   4000        /* the heap probe waits this long for WiFi to join */
 /* Largest block claimed at boot for the VM heap (128 KB heap + VM struct/eden) */
 #define VM_HEAP_HOLD_MAX     (136 * 1024)
@@ -1248,7 +1269,11 @@ static void handle_text_line(char *line) {
 
 static void serial_poll(void) {
     uint8_t rx_buf[128];
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    int rx_len = usb_serial_jtag_read_bytes(rx_buf, sizeof(rx_buf), 0);
+#else
     int rx_len = uart_read_bytes(UART_NUM_0, rx_buf, sizeof(rx_buf), 0);
+#endif
     if (rx_len > 0 && !s_line) {
         s_line = (char *)malloc(SERIAL_LINE_MAX);
         if (!s_line) return;   /* no memory now: the bytes are dropped */
@@ -3694,8 +3719,13 @@ static void config_defaults(SystemConfig *cfg) {
     cfg->backlight_offset = 0;
     cfg->backlight_min = 30;
     cfg->backlight_max = 255;
+#if CONFIG_IDF_TARGET_ESP32S3
+    cfg->width = 172;    /* the research board's panel (minischeme_board_s3.c) */
+    cfg->height = 320;
+#else
     cfg->width = 320;
     cfg->height = 480;
+#endif
     cfg->lcd_dma = true;
     cfg->lcd_dma_lines = 0;
     cfg->lcd_clock_hz = DEF_LCD_CLOCK_HZ;
@@ -6132,9 +6162,9 @@ void app_main(void) {
     /* Claim the largest DRAM block for the VM heap first, before NVS, SPIFFS,
      * display, DMA and WiFi buffers split it; released right before the VM
      * is created, whose size is still bounded by MIN_OS_RESERVE */
-    size_t hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t hold_bytes = heap_caps_get_largest_free_block(VM_HEAP_CAPS);
     if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
-    void *vm_heap_hold = heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT);
+    void *vm_heap_hold = heap_caps_malloc(hold_bytes, VM_HEAP_CAPS);
 
     ESP_LOGI(TAG, "==================================================");
     ESP_LOGI(TAG, "MiniScheme Embedded OS - ESP32 3.5\" Desktop Display");
@@ -6174,6 +6204,15 @@ void app_main(void) {
     /* The serial console's driver before the VM takes the heap: installed
      * after it, its 2.5 KB of buffers may not be found and the console stays
      * deaf (@INFO, @EXEC, the WebREPL's serial link) */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    {
+        /* a board whose only port is the chip's USB (ESP32-S3) */
+        usb_serial_jtag_driver_config_t ucfg = { .tx_buffer_size = 1024, .rx_buffer_size = 2048 };
+        esp_err_t uerr = usb_serial_jtag_driver_install(&ucfg);
+        if (uerr != ESP_OK) ESP_LOGE(TAG, "Serial console: usb_serial_jtag_driver_install failed (%d)", (int)uerr);
+        usb_serial_jtag_vfs_use_driver();
+    }
+#else
     {
         const uart_config_t uart_cfg = {
             .baud_rate = 115200,
@@ -6188,6 +6227,7 @@ void app_main(void) {
         uart_param_config(UART_NUM_0, &uart_cfg);
         uart_vfs_dev_use_driver(UART_NUM_0);
     }
+#endif
     s_http_stack = s_sys_cfg.http_stack;
     if (s_sys_cfg.color_fmt == MINI_GUI_COLOR_4BPP) s_sys_cfg.color_fmt = MINI_GUI_COLOR_RGB565;
     bool rgb666 = s_sys_cfg.color_fmt == MINI_GUI_COLOR_RGB666;
@@ -6207,13 +6247,13 @@ void app_main(void) {
     if (full_frame) {
         /* Hold what is left for the VM, minus what WiFi, lwIP and the HTTP
          * server need while they start (measured: ~50 KB) */
-        size_t free_now = esp_get_free_heap_size();
-        hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        size_t free_now = vm_side_free();
+        hold_bytes = heap_caps_get_largest_free_block(VM_HEAP_CAPS);
         if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
         if (hold_bytes + OS_INIT_RESERVE > free_now) {
             hold_bytes = free_now > OS_INIT_RESERVE ? free_now - OS_INIT_RESERVE : 0;
         }
-        vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT) : NULL;
+        vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, VM_HEAP_CAPS) : NULL;
     }
     if (!gui_ok) {
         ESP_LOGW(TAG, "Display: no RAM for the %s buffer at %d bits, using %s mode",
@@ -6255,8 +6295,8 @@ void app_main(void) {
              gui_mode_name(s_sys_cfg.mode), mini_gui_get_color_bits(), mini_gui_scheme_name(mini_gui_get_scheme()),
              rgb666 ? "rgb666" : "rgb565", (unsigned)mini_gui_get_fb_ram());
     ESP_LOGI(TAG, "Heap after GUI buffer: free=%u B, largest=%u B, buffer=%u B",
-             (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)vm_side_free(),
+             (unsigned)heap_caps_get_largest_free_block(VM_HEAP_CAPS),
              (unsigned)mini_gui_get_fb_ram());
 
     /* 3. The radios, SNTP and the HTTP API (started before the heap probe).
@@ -6272,7 +6312,7 @@ void app_main(void) {
         s_bt_only = s_bt_on && ini_file_value("/spiffs/config.ini", "bt_only", v, sizeof(v)) && v[0] == '1';
     }
     ESP_LOGI(TAG, "Heap before the radios: free=%u B, largest=%u B (held for the VM: %u B)",
-             (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)vm_side_free(), (unsigned)heap_caps_get_largest_free_block(VM_HEAP_CAPS),
              (unsigned)hold_bytes);
     tz_apply();   /* before the clock is read: [system] timezone, or the zone found last time */
     if (!s_bt_only) {
@@ -6285,7 +6325,7 @@ void app_main(void) {
         esp_event_loop_create_default();
         ESP_LOGI(TAG, "WiFi off ([bluetooth] bt_only = 1): Bluetooth is this boot's only radio");
     }
-    ESP_LOGI(TAG, "Heap after WiFi: free=%u B", (unsigned)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "Heap after WiFi: free=%u B", (unsigned)vm_side_free());
     if (!s_bt_on) {
         ble_release_memory();
     } else {
@@ -6308,15 +6348,15 @@ void app_main(void) {
         /* held again, but no more than the VM will get: the rest of the start (the HTTP
          * server, the app's files) must not run out (with the whole block held, WiFi and
          * Bluetooth together left 84 B and the web page never came up) */
-        size_t free_now = esp_get_free_heap_size(), reserve = boot_reserve();
-        hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        size_t free_now = vm_side_free(), reserve = boot_reserve();
+        hold_bytes = heap_caps_get_largest_free_block(VM_HEAP_CAPS);
         if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
         if (hold_bytes + reserve > free_now) hold_bytes = free_now > reserve ? free_now - reserve : 0;
-        vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT) : NULL;
+        vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, VM_HEAP_CAPS) : NULL;
     }
     ESP_LOGI(TAG, "Heap after Bluetooth (%s): free=%u B, largest=%u B (held for the VM: %u B)",
-             s_bt_on ? "on" : "off, memory released", (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)hold_bytes);
+             s_bt_on ? "on" : "off, memory released", (unsigned)vm_side_free(),
+             (unsigned)heap_caps_get_largest_free_block(VM_HEAP_CAPS), (unsigned)hold_bytes);
     s_job_lock = xSemaphoreCreateMutex();
     s_job_done = xSemaphoreCreateBinary();
 #if MINISCHEME_FW_HTTP
@@ -6399,10 +6439,10 @@ void app_main(void) {
     if (rom_key && !rom_ok && s_rom_ptr) {
         /* with Bluetooth up little is left beside the VM's block, and in small pieces (16 KB
          * at most: a combined app's build ran out): the block gives the build a tail */
-        if (vm_heap_hold && hold_bytes > 2 * ROM_BUILD_ROOM && heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < ROM_BUILD_ROOM) {
+        if (vm_heap_hold && hold_bytes > 2 * ROM_BUILD_ROOM && heap_caps_get_largest_free_block(VM_HEAP_CAPS) < ROM_BUILD_ROOM) {
             free(vm_heap_hold);
             hold_bytes -= ROM_BUILD_ROOM;
-            vm_heap_hold = heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT);
+            vm_heap_hold = heap_caps_malloc(hold_bytes, VM_HEAP_CAPS);
         }
         rom_ok = stream_app_rom(rom_key, app_path);
         if (!rom_ok) {
@@ -6425,8 +6465,8 @@ void app_main(void) {
         ESP_LOGI(TAG, "Heap probe %s", esp32_wifi_connected() ? "after WiFi joined" : "without WiFi (not joined in time)");
     }
     free(vm_heap_hold);
-    size_t free_heap = esp_get_free_heap_size();
-    size_t largest_8bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t free_heap = vm_side_free();
+    size_t largest_8bit = heap_caps_get_largest_free_block(VM_HEAP_CAPS);
     size_t reserved = boot_reserve();   /* [memory] reserved_heap; less without WiFi */
     size_t avail = (free_heap > reserved) ? (free_heap - reserved) : 16384;
     /* the VM struct (about 1 KB) may be carved from the same block; eden
@@ -6641,7 +6681,8 @@ void app_main(void) {
             static int64_t s_mem_log_at;
             if (s_bt_on && esp_timer_get_time() >= s_mem_log_at) {
                 s_mem_log_at = esp_timer_get_time() + 20000000;
-                ESP_LOGI(TAG, "Memory: free=%u B, min=%u B, largest=%u B, VM %u / %u B", (unsigned)esp_get_free_heap_size(),
+                ESP_LOGI(TAG, "Memory: free=%u B (internal %u B, lowest %u B), min=%u B, largest=%u B, VM %u / %u B", (unsigned)esp_get_free_heap_size(),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                          (unsigned)esp_get_minimum_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                          (unsigned)mini_get_allocated_bytes(s_vm), (unsigned)mini_get_heap_size(s_vm));
             }

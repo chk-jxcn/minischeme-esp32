@@ -1,0 +1,16 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# for size: the IDF libraries (network, Bluetooth host, drivers); the components minischeme,
+# main and lfsvfs set -O2 themselves (the VM, the display, the file system)
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# asserts and checks without their file / line / expression strings (they still stop the
+# firmware), no table of error names: about 40 KB of strings
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# the dual-mode controller, BLE only, two links
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=2
+CONFIG_BTDM_SCAN_DUPL_CACHE_SIZE=20

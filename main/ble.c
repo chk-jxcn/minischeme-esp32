@@ -1154,7 +1154,11 @@ static void host_task(void *arg) {
 }
 
 void ble_release_memory(void) {
+#if CONFIG_IDF_TARGET_ESP32
     esp_bt_mem_release(ESP_BT_MODE_BTDM);
+#else
+    esp_bt_mem_release(ESP_BT_MODE_BLE);
+#endif
 }
 
 bool ble_running(void) { return s_running; }
@@ -1164,7 +1168,9 @@ bool ble_start(const char *name) {
     if (s_running) return true;
     size_t before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     if (name && name[0]) snprintf(s_name, sizeof(s_name), "%s", name);
-    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);   /* BLE only */
+#if CONFIG_IDF_TARGET_ESP32
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);   /* BLE only (a dual-mode controller) */
+#endif
     s_lock = xSemaphoreCreateMutex();
     s_events = (BleEvent *)calloc(BLE_EVENT_MAX, sizeof(BleEvent));
     s_seen = (BleSeen *)calloc(BLE_SCAN_MAX, sizeof(BleSeen));

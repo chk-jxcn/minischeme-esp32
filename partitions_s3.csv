@@ -1,0 +1,8 @@
+# ESP-IDF Partition Table: ESP32-S3 research board (16 MB flash, 8.9 MB used)
+# Name,   Type, SubType, Offset,   Size, Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  3072K,
+fontrom,  data, 0x41,    0x310000, 320K,
+approm,   data, 0x40,    0x360000, 512K,
+storage,  data, spiffs,  0x3e0000, 5120K,
