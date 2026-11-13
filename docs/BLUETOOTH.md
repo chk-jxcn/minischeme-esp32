@@ -128,9 +128,18 @@ bt_name =          ; 广播名，默认 Desk-XXXX
 - 手机或电脑做主机连板子（只测了板子对板子）。
 - 配对和绑定（`ble-pair`）：手边没有需要配对的 BLE 设备参与测试。
 - 只开蓝牙模式下的长时间运行和内存最低值。
-- 连接偶尔第一次建立失败（原因 0x3E 或超时，WiFi 同开时见过三次）。其中一次 ESP32 之后停在
-  `connecting` 状态，`ble-connect` 返回 `#f`，要先 `(ble-disconnect 0)` 才能再连：`main/ble.c`
-  里失败后的状态清理还要补。
+
+修过的问题：
+
+- **连接失败后卡在 `connecting`。** 连接在建立过程中断掉（原因 0x3E）时，协议栈只报一个断开事件，
+  `ble.c` 自己记的"正在连接"标志没有清，之后 `ble-connect` 一直返回 `#f`。现在状态一律问协议栈
+  （`ble_gap_conn_active` / `disc_active` / `adv_active`），这种断开报成 `(disconnected #f 原因)`。
+- **0x3E 本身。** ESP32 做主机连 S3 时 12 次里有 6 次。S3 的主机默认会自动重连（最多 3 次），
+  ESP32 默认不会：`sdkconfig.defaults.esp32` 打开 `BT_NIMBLE_ENABLE_CONN_REATTEMPT` 后 16 次全部
+  连上。另外 WiFi 和蓝牙同开时 WiFi 改用 modem sleep（原来固件把 WiFi 省电关了，蓝牙抢不到射频）。
+- **按名字 / 服务过滤的扫描找不到一部分设备。** 很多设备把名字放在扫描应答里（LYWSD03MMC 就是），
+  而过滤只看广播包，应答单独来时又不建行。现在有过滤条件时，匹配的扫描应答也能建行。
+- 测试脚本：scratchpad `conn_stress.py [轮数] [swap]`（不存在的地址、取消、扫描中连接、N 轮连接断开）。
 
 ## 7. ESP32-S3 实测
 
@@ -146,7 +155,7 @@ esptool --chip esp32s3 write-flash 0x0 bootloader.bin 0x8000 partition-table.bin
 |---|---|---|---|
 | 不用 PSRAM | 71 KB | 24 KB | - |
 | 用 PSRAM，VM 堆留在内部内存 | 63 KB | - | 8 MB |
-| 用 PSRAM，VM 堆放 PSRAM（现在的做法） | 128 KB（`max_heap` 上限） | 88 KB（最低 47 KB） | 8 MB |
+| 用 PSRAM，VM 堆放 PSRAM（现在的做法） | 128 KB 时测的；现在默认 1 MB | 88 KB（最低 47 KB） | 8 MB（1 MB 堆时 7.3 MB） |
 
 结论和原先的估计不一样的地方：
 
@@ -171,9 +180,26 @@ esptool --chip esp32s3 write-flash 0x0 bootloader.bin 0x8000 partition-table.bin
   （VM 堆）放 PSRAM；`main.c` 里量 VM 堆大小的地方改用 `VM_HEAP_CAPS` / `vm_side_free()`。
 - `esp_bt_controller_mem_release(CLASSIC_BT)` 只在 ESP32 上调用。
 
+VM 堆大小：S3 上默认 `max_heap` 是 1 MB（`config.ini [memory] max_heap`，最大 4 MB），整块在 PSRAM。
+新建 `config.ini` 时模板里 ESP32 的值（320x480、131072）会被换成这块板的默认值。实测：堆里放
+950 KB 数据系统稳定；700 KB 存活数据时一次完整回收最长停顿 62 毫秒；堆大了以后回收次数少，
+建表求和的测试从 236 毫秒降到 69 毫秒。
+
 还没做：
 
-- `max_heap` 仍是 128 KB 上限，PSRAM 有 8 MB，可以放开给大应用。
 - 预留的 5 个接口（自定义 GATT 服务、HID 遥控器、MTU、信号强度）。
 - S3 控制器的内存配置没有精简（连接数、缓冲区都是默认值）。
 - 另一种 S3 板（4 MB flash、2 MB 四线 PSRAM 的小板）需要自己的 `sdkconfig` 和分区表。
+
+## 8. 示例应用：蓝牙温湿度（thermo）
+
+在 minischeme-apps 的 `feature/bluetooth` 分支：`apps/thermo/`。读米家温湿度计 LYWSD03MMC：
+按名字扫描（或用设置里的地址）、连接、发现、订阅 ebe0ccc1、取第一个通知后断开，每隔 `interval`
+分钟一次（默认 5，0 为一直连着）；显示温度、湿度、电量、更新时间和温度曲线。每一步有超时，
+失败后 15 秒重试。用 `app-ble-event` 和 `app-step-proc`，没有 `ble` 扩展或蓝牙没开时只显示提示。
+
+版面按屏幕宽度排：172 像素宽时上下排，280 像素以上左右排。在 S3 板（172x320）和 COM42（320x480，
+蓝牙固件，WiFi 加蓝牙）上都自动搜到并读出了数据。安装：
+`python tools/board.py <ip> install thermo --boot`。
+
+ESP32 上 WiFi 加蓝牙跑这个应用很紧：VM 堆 37 KB 用了 26 KB，系统空闲最低到过 2.4 KB。

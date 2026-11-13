@@ -306,13 +306,17 @@ static void scan_report(const struct ble_gap_disc_desc *d) {
         if (!weakest || s_seen[i].rssi < weakest->rssi) weakest = &s_seen[i];
     }
     if (!row) {
-        /* a scan response alone (its advertisement was filtered out or missed) starts no row */
-        if (rsp || !scan_matches(d, &f)) { unlock(); return; }
+        /* without a filter a scan response alone (its advertisement was missed) starts no row.
+         * With one, the response may be what matches: many devices send their name or their
+         * services only there (a LYWSD03MMC was never found by "name:"); the row then waits
+         * for the next advertisement to learn whether the device takes connections */
+        if ((rsp && s_filter_kind == 0) || !scan_matches(d, &f)) { unlock(); return; }
         if (s_seen_count < BLE_SCAN_MAX) row = &s_seen[s_seen_count++];
         else if (weakest && d->rssi > weakest->rssi) row = weakest;
         else { unlock(); return; }
         memset(row, 0, sizeof(*row));
         row->addr = d->addr;
+        row->connectable = rsp;   /* it answered a scan request; an advertisement corrects this */
     }
     row->rssi = d->rssi;
     row->seen_us = esp_timer_get_time();
