@@ -943,6 +943,7 @@ static bool fasl_load(MiniVM *vm, FaslSrc *src) {
     vm->tenured_limit = vm->tenured_start + vm->tenured_size;
     vm->eden_hp = vm->eden_start;
     vm->remset_count = 0;
+    mini_gc_heap_reset(vm);
 
     /* Legacy compatibility pointers */
     vm->to_space = vm->tenured_start;
@@ -1790,7 +1791,8 @@ size_t mini_rom_build(MiniVM *vm, Value root, uintptr_t base, uint32_t key,
         return 0;
     }
     mini_push_root(vm, &root);
-    mini_gc(vm); /* compacts every live object into tenured */
+    minor_gc(vm, 0);
+    major_gc(vm, 0); /* compacts every live object into tenured */
     mini_pop_root(vm); /* nothing below allocates on the heap */
     if (vm->has_error || vm->eden_hp != vm->eden_start) return 0;
 

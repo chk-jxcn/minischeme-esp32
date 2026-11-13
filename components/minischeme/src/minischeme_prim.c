@@ -198,11 +198,12 @@ static void stats_push(MiniVM *vm, Value *lst, const char *key, int64_t v) {
     mini_pop_root(vm);
 }
 
-/* (vm-stats) => alist of allocation, GC and depth counters */
+/* (vm-stats [reset?]) => alist of allocation, GC and depth counters; with a true argument the
+ * longest-stop measurement (gc-max-us) starts anew after this reading */
 static Value prim_vm_stats(MiniVM *vm, int argc, Value *argv) {
-    (void)argc; (void)argv;
     MiniStats st;
     mini_get_stats(vm, &st);
+    if (argc >= 1 && !mini_is_false(argv[0])) mini_gc_stats_reset(vm);
     Value lst = mini_nil();
     mini_push_root(vm, &lst);
     stats_push(vm, &lst, "rom-bytes", (int64_t)st.rom_bytes);
@@ -212,6 +213,9 @@ static Value prim_vm_stats(MiniVM *vm, int argc, Value *argv) {
     stats_push(vm, &lst, "stack-peak", (int64_t)st.stack_peak);
     stats_push(vm, &lst, "live-peak", (int64_t)st.live_peak);
     stats_push(vm, &lst, "live-bytes", (int64_t)st.live_bytes);
+    stats_push(vm, &lst, "gc-total-ms", (int64_t)(st.gc_total_us / 1000));
+    stats_push(vm, &lst, "gc-max-us", (int64_t)st.gc_max_us);
+    stats_push(vm, &lst, "compact-gcs", (int64_t)st.compact_gcs);
     stats_push(vm, &lst, "major-gcs", (int64_t)st.major_gcs);
     stats_push(vm, &lst, "minor-gcs", (int64_t)st.minor_gcs);
     stats_push(vm, &lst, "alloc-kb", (int64_t)(st.alloc_bytes / 1024));

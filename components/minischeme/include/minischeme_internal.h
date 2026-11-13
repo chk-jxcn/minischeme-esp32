@@ -44,6 +44,22 @@ typedef MiniHeapObj HeapObj;
 #define OBJ_CONTINUATION MINI_OBJ_CONTINUATION
 #define OBJ_MACRO        MINI_OBJ_MACRO
 #define OBJ_BIGINT       MINI_OBJ_BIGINT
+#define OBJ_FREE         MINI_OBJ_FREE
+
+/* Old generation collector. 0: sliding mark-compact (small heaps: no fragmentation, the pause
+ * grows with the heap). 1: mark-sweep with free lists and lazy sweeping (large heaps, PSRAM):
+ * the pause is the mark phase alone; objects move only when the heap grows or when
+ * fragmentation leaves no room (then the mark-compact code runs). The nursery is the same. */
+#ifndef MINI_GC_MARKSWEEP
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
+#if defined(ESP_PLATFORM) && defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
+#define MINI_GC_MARKSWEEP 1        /* the VM heap of a PSRAM board is large */
+#else
+#define MINI_GC_MARKSWEEP 0
+#endif
+#endif
 
 /* Generational GC Object Header Bit Allocation (in MiniHeapObj->type) */
 #define MINI_GC_TYPE_MASK   0x000000FFU /* Bits 0..7: Object type tag (1..12) */
@@ -55,6 +71,24 @@ typedef MiniHeapObj HeapObj;
 /* A Code ROM symbol's header carries its global slot (1 + its number in the image) in bits
  * 9..30: the GC never touches the image, so they stay; heap objects use them for forwarding */
 #define MINI_SYM_SLOT_SHIFT 9
+
+/* A free chunk of the mark-sweep old generation (16 bytes at least) */
+typedef struct MsFree {
+    uint32_t type;                 /* OBJ_FREE */
+    uint32_t size;
+    struct MsFree *next;
+} MsFree;
+typedef struct MsRegion {          /* a chunk being handed out from its start */
+    char *ptr;
+    char *end;
+} MsRegion;
+#define MS_MIN_CHUNK   16u
+#define MS_SMALL_MAX   256u        /* exact-size lists for 16..256 bytes */
+#define MS_MEDIUM_MAX  4096u       /* then one list up to here, one above */
+#define MS_BINS        31u
+#define MS_BIN(sz)     (((sz) >> 3) - 2u)
+#define MS_BIN_SIZE(b) (((b) + 2u) << 3)
+#define MS_RESQ        16u         /* chunks lined up behind the promotion reserve */
 
 typedef struct ForwardedObj {
     HeapObj header;
@@ -327,6 +361,7 @@ struct MiniVM {
 
     size_t heap_size;
     size_t max_memory_bytes;
+    bool   heap_at_limit;      /* the last major GC wanted a larger heap and did not get one */
 
     /* Remembered Set (Tenured -> Eden pointers) */
     Value *remset;
@@ -337,6 +372,25 @@ struct MiniVM {
     HeapObj **mark_stack;
     size_t mark_stack_count;
     size_t mark_stack_cap;
+    bool   mark_overflow;      /* an object was marked but not pushed: the heap is rescanned */
+
+#if MINI_GC_MARKSWEEP
+    /* Mark-sweep old generation: free lists, the two chunks being filled, the lazy sweep */
+    MsFree  *ms_bins[MS_BINS];
+    uint32_t ms_bin_count[MS_BINS];
+    MsFree  *ms_medium;
+    MsFree  *ms_big;
+    MsRegion ms_res;           /* promotion falls back on it: checked to be large enough first */
+    MsRegion ms_resq[MS_RESQ]; /* whole free chunks that follow ms_res when it runs out */
+    uint8_t  ms_resq_n;
+    uint8_t  ms_resq_i;
+    MsRegion ms_small;         /* small objects without a hole of their size */
+    bool     ms_res_tail;      /* ms_res is the never-used space above tenured_hp */
+    char    *ms_sweep;         /* chunks from here to ms_sweep_end still carry the last marks */
+    char    *ms_sweep_end;
+    size_t   ms_used;          /* bytes of objects (live or not yet found dead) */
+    size_t   ms_marked;
+#endif
 
     /* Legacy compatibility fields */
     char *from_space_raw;
@@ -427,6 +481,9 @@ struct MiniVM {
     uint64_t stat_alloc_bytes;
     uint32_t stat_minor_gcs;
     uint32_t stat_major_gcs;
+    uint32_t stat_compact_gcs;
+    uint32_t stat_gc_max_us;
+    uint64_t stat_gc_total_us;
     size_t   stat_live_bytes;
     size_t   stat_live_peak;
     uint32_t stat_frame_peak;
@@ -458,6 +515,8 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type);
 void  minor_gc(MiniVM *vm, size_t needed_bytes);
 void  major_gc(MiniVM *vm, size_t needed_bytes);
 void  cheney_gc(MiniVM *vm, size_t needed_bytes);
+/* The heap was replaced or compacted behind the collector's back: tenured_hp is its end */
+void  mini_gc_heap_reset(MiniVM *vm);
 void  mini_remset_add(MiniVM *vm, Value parent);
 void  mini_set_active_vm(MiniVM *vm);
 MiniVM *mini_get_active_vm(void);

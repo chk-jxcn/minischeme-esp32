@@ -191,6 +191,37 @@ VM 堆大小：S3 上默认 `max_heap` 是 1 MB（`config.ini [memory] max_heap`
 - S3 控制器的内存配置没有精简（连接数、缓冲区都是默认值）。
 - 另一种 S3 板（4 MB flash、2 MB 四线 PSRAM 的小板）需要自己的 `sdkconfig` 和分区表。
 
+### 垃圾回收：PSRAM 上的老生代用 mark-sweep
+
+有 PSRAM 的构建（`CONFIG_SPIRAM`）自动打开 `MINI_GC_MARKSWEEP`，没有 PSRAM 的 ESP32 不变（仍是
+滑动压缩）。核心库的改动在 minischeme 的 `feature/gc-marksweep` 分支，这里的
+`components/minischeme` 是它的拷贝。
+
+- 新生代（eden）不变。老生代的对象不再搬动：一次完整回收只做标记，清扫分摊到之后的每次小回收
+  （每次 512 个块）和等空间的分配上。晋升的对象优先放进大小正好的空洞，其余放进事先确认够大的
+  预留块（可以由几个空洞拼成）。
+- 堆要增长，或者空闲空间碎到放不下时，退回原来的压缩式回收。`(vm-stats)` 里 `compact-gcs` 是
+  压缩的次数，`gc-max-us` 是最长一次停顿（`(vm-stats #t)` 读完清零），`gc-total-ms` 是累计时间。
+- 顺带修了一个原有问题：堆固定大小且存活数据超过 80% 时，每次小回收后面都跟一次完整回收。
+
+实测最长停顿（S3，单位毫秒；"原来"是压缩式回收）：
+
+| 堆 | 存活数据 | 原来 | 现在 |
+|---|---|---|---|
+| 4 MB | 3 MB，1500 个向量 | 165（观察到 355） | 78 ~ 83 |
+| 4 MB | 1.9 MB，12 万个 pair | 315 | 58 ~ 60 |
+| 4 MB | 丢掉上面的数据之后 | 103 | 5.7 |
+| 1 MB | 只有应用（约 110 KB） | — | 4.9 |
+| 1 MB | 640 KB，向量 | 62（700 KB 时） | 19.5 |
+| 1 MB | 630 KB，pair | — | 32 |
+
+以上测试里压缩次数都是 0。停顿仍然和存活数据成正比（每 MB 约 25 ~ 30 毫秒），要和数据量无关
+得做增量标记（还没做）。堆接近放满时回收会很频繁并退回压缩，停顿到 150 ~ 200 毫秒。
+
+测试：核心库 `make test` 和 `make GCMS=1 test`（`tests/test_gc.c` 两种回收器都跑；
+`EXTRA=-DMINI_GC_VERIFY` 每次回收后校验整个堆）。板上：scratchpad `s3run.py` + `gc_cases8.txt`。
+注意测试脚本的全局变量别和应用库重名（`big` 是 applib 画大字的函数，覆盖后应用渲染报错重启）。
+
 ## 8. 示例应用：蓝牙温湿度（thermo）
 
 在 minischeme-apps 的 `feature/bluetooth` 分支：`apps/thermo/`。读米家温湿度计 LYWSD03MMC：

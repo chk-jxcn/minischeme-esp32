@@ -85,7 +85,8 @@ typedef enum {
     MINI_OBJ_FORWARDED,
     MINI_OBJ_CONTINUATION,
     MINI_OBJ_MACRO,
-    MINI_OBJ_BIGINT
+    MINI_OBJ_BIGINT,
+    MINI_OBJ_FREE              /* a free chunk of the mark-sweep old generation: never a value */
 } MiniObjType;
 
 #define MINI_OBJ_TYPE_MASK 0x000000FFU
@@ -313,10 +314,16 @@ typedef struct MiniStats {
     size_t   stack_slots;
     size_t   frame_slots;
     size_t   rom_bytes;
+    uint32_t compact_gcs;     /* major collections that moved objects (all of them without mark-sweep) */
+    uint32_t gc_max_us;       /* longest stop of the program by the collector since mini_gc_stats_reset (0: no clock) */
+    uint64_t gc_total_us;     /* time spent collecting since VM creation */
 } MiniStats;
 
 /** @brief Fill *out with the VM's counters. */
 void mini_get_stats(const MiniVM *vm, MiniStats *out);
+
+/** @brief Start a new measurement of the longest collector stop (MiniStats.gc_max_us). */
+void mini_gc_stats_reset(MiniVM *vm);
 
 /**
  * @brief Snapshot current global environment as the baseline.

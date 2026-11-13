@@ -14,6 +14,8 @@
 #if defined(ESP_PLATFORM)
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
+#include "esp_timer.h"
+#define MINI_GC_NOW_US() ((uint64_t)esp_timer_get_time())
 #endif
 
 /* ========================================================================= */
@@ -168,6 +170,369 @@ void mini_remset_add(MiniVM *vm, Value parent) {
     vm->remset[vm->remset_count++] = parent;
 }
 
+
+/* ========================================================================= */
+/* Mark stack (major GC marking; the promotion worklist with mark-sweep)     */
+/* ========================================================================= */
+
+#ifndef MINI_GC_NOW_US
+#define MINI_GC_NOW_US() ((uint64_t)0)       /* no clock: the pause statistics stay 0 */
+#endif
+
+static inline void gc_pause_done(MiniVM *vm, uint64_t t0) {
+    uint64_t d = MINI_GC_NOW_US() - t0;
+    vm->stat_gc_total_us += d;
+    if (d > vm->stat_gc_max_us) vm->stat_gc_max_us = d > 0xffffffffu ? 0xffffffffu : (uint32_t)d;
+}
+
+void mini_gc_stats_reset(MiniVM *vm) {
+    if (vm) vm->stat_gc_max_us = 0;
+}
+
+#ifdef MINI_GC_VERIFY
+static void gc_verify(MiniVM *vm, const char *when);
+#define GC_VERIFY(vm, when) gc_verify(vm, when)
+#else
+#define GC_VERIFY(vm, when) ((void)0)
+#endif
+
+#ifndef MINI_MARK_STACK_MAX
+#define MINI_MARK_STACK_MAX (1u << 20)   /* entries; past it marking rescans the heap instead */
+#endif
+
+static bool mark_stack_grow(MiniVM *vm, size_t want) {
+    if (want <= vm->mark_stack_cap) return true;
+    size_t new_cap = vm->mark_stack_cap < 512 ? 512 : vm->mark_stack_cap * 2;
+    while (new_cap < want) new_cap *= 2;
+    HeapObj **new_stack;
+#if defined(ESP_PLATFORM) && !defined(MALLOC_CAP_EXEC)
+    /* no word-only heap: malloc, so that a large stack lands in PSRAM when there is some */
+    new_stack = (HeapObj **)malloc(new_cap * sizeof(HeapObj *));
+    if (new_stack && vm->mark_stack) {
+        memcpy(new_stack, vm->mark_stack, vm->mark_stack_count * sizeof(HeapObj *));
+        free(vm->mark_stack);
+    }
+#else
+    new_stack = (HeapObj **)mini_word_grow(vm->mark_stack, vm->mark_stack_cap * sizeof(HeapObj *),
+                                           new_cap * sizeof(HeapObj *));
+#endif
+    if (!new_stack) return false;
+    vm->mark_stack = new_stack;
+    vm->mark_stack_cap = new_cap;
+    return true;
+}
+
+#if MINI_GC_MARKSWEEP
+/* ========================================================================= */
+/* Mark-sweep old generation: free lists and the lazy sweep                  */
+/*                                                                           */
+/* The tenured block stays one run of chunks, each with a HeapObj header:    */
+/* objects, and free chunks (OBJ_FREE) linked into lists by size. Above      */
+/* tenured_hp is space never used since the last compaction (the tail).      */
+/* After a mark phase the chunks are swept a few at a time: marked ones lose */
+/* their mark, runs of unmarked ones become free chunks. Allocation takes    */
+/* only swept chunks, so nothing is ever allocated ahead of the sweep.       */
+/* ========================================================================= */
+
+#define MS_SWEEP_PER_MINOR 512u     /* chunks swept after each minor GC */
+#define MS_SWEEP_FORCED    2048u    /* chunks per step when an allocation waits for room */
+
+static void ms_put(MiniVM *vm, char *p, size_t sz) {
+    if (sz == 0) return;
+    MsFree *f = (MsFree *)p;
+    f->type = OBJ_FREE;
+    f->size = (uint32_t)sz;
+    if (sz < MS_MIN_CHUNK) return;          /* 8 bytes: no room for the link, freed with a neighbour */
+    if (sz <= MS_SMALL_MAX) {
+        unsigned b = MS_BIN(sz);
+        f->next = vm->ms_bins[b];
+        vm->ms_bins[b] = f;
+        vm->ms_bin_count[b]++;
+    } else if (sz <= MS_MEDIUM_MAX) {
+        f->next = vm->ms_medium;
+        vm->ms_medium = f;
+    } else {
+        f->next = vm->ms_big;
+        vm->ms_big = f;
+    }
+}
+
+static void ms_lists_reset(MiniVM *vm) {
+    memset(vm->ms_bins, 0, sizeof(vm->ms_bins));
+    memset(vm->ms_bin_count, 0, sizeof(vm->ms_bin_count));
+    vm->ms_medium = NULL;
+    vm->ms_big = NULL;
+}
+
+/* What is left of a region goes back to the lists (the tail simply stays the tail) */
+static void ms_retire(MiniVM *vm, MsRegion *r, bool tail) {
+    if (!tail && r->end > r->ptr) ms_put(vm, r->ptr, (size_t)(r->end - r->ptr));
+    r->ptr = NULL;
+    r->end = NULL;
+}
+
+static void ms_retire_all(MiniVM *vm) {
+    ms_retire(vm, &vm->ms_res, vm->ms_res_tail);
+    vm->ms_res_tail = false;
+    for (unsigned i = vm->ms_resq_i; i < vm->ms_resq_n && i < MS_RESQ; i++) ms_retire(vm, &vm->ms_resq[i], false);
+    vm->ms_resq_i = vm->ms_resq_n = 0;
+    ms_retire(vm, &vm->ms_small, false);
+}
+
+void mini_gc_heap_reset(MiniVM *vm) {
+    ms_lists_reset(vm);
+    vm->ms_res.ptr = vm->ms_res.end = NULL;
+    vm->ms_resq_i = vm->ms_resq_n = 0;
+    vm->ms_small.ptr = vm->ms_small.end = NULL;
+    vm->ms_res_tail = false;
+    vm->ms_sweep = vm->ms_sweep_end = NULL;
+    vm->ms_used = (size_t)(vm->tenured_hp - vm->tenured_start);
+}
+
+static void ms_sweep_step(MiniVM *vm, size_t budget) {
+    char *p = vm->ms_sweep;
+    char *end = vm->ms_sweep_end;
+    while (p < end && budget > 0) {
+        HeapObj *o = (HeapObj *)p;
+        if (o->type & MINI_GC_MARK_BIT) {
+            o->type &= ~MINI_GC_MARK_BIT;
+            p += ALIGN8(o->size);
+            budget--;
+            continue;
+        }
+        char *run = p;                       /* dead objects and old free chunks, merged */
+        do {
+            p += ALIGN8(((HeapObj *)p)->size);
+            if (budget > 0) budget--;
+        } while (p < end && budget > 0 && !(((HeapObj *)p)->type & MINI_GC_MARK_BIT));
+        if (p >= end && end == vm->tenured_hp) {
+            /* garbage right below the tail: the tail grows down over it */
+            vm->tenured_hp = run;
+            if (vm->ms_res_tail) vm->ms_res.ptr = run;
+            end = run;
+            p = run;
+        } else {
+            ms_put(vm, run, (size_t)(p - run));
+        }
+    }
+    vm->ms_sweep = p;
+    vm->ms_sweep_end = end;
+}
+
+static inline bool ms_sweeping(const MiniVM *vm) {
+    return vm->ms_sweep < vm->ms_sweep_end;
+}
+
+/* First chunk of at least `need` bytes among the first max_scan of a list, unlinked */
+static char *ms_take_fit(MsFree **list, size_t need, size_t max_scan, size_t *got) {
+    MsFree **pp = list;
+    while (*pp && max_scan > 0) {
+        MsFree *f = *pp;
+        if (f->size >= need) {
+            *pp = f->next;
+            *got = f->size;
+            return (char *)f;
+        }
+        pp = &f->next;
+        max_scan--;
+    }
+    return NULL;
+}
+
+/* Bytes that objects of at most `largest` bytes can surely take from the reserve: every change
+ * of chunk may leave up to largest - 8 bytes unused */
+static size_t ms_reserve_usable(const MiniVM *vm, size_t largest) {
+    size_t total = (size_t)(vm->ms_res.end - vm->ms_res.ptr);
+    size_t waste = largest > 8 ? largest - 8 : 0;
+    for (unsigned i = vm->ms_resq_i; i < vm->ms_resq_n && i < MS_RESQ; i++) {
+        size_t len = (size_t)(vm->ms_resq[i].end - vm->ms_resq[i].ptr);
+        total += len > waste ? len - waste : 0;
+    }
+    return total;
+}
+
+/* A new reserve for `need` bytes of objects no larger than `largest`: free chunks of at least
+ * `largest` bytes each (holes between live objects will do), or the tail */
+static bool ms_find_reserve(MiniVM *vm, size_t need, size_t largest) {
+    MsRegion got[MS_RESQ + 1];
+    unsigned n = 0;
+    size_t usable = 0;
+    size_t waste = largest > 8 ? largest - 8 : 0;
+    ms_retire_all(vm);                       /* what is left of the old one may serve again */
+    /* holes first (the medium list), those that yield at least half their size; when they do
+     * not add up they go back and the large chunks are tried */
+    for (int pass = 0; pass < 2 && usable < need; pass++) {
+        MsFree **pp = pass == 0 ? &vm->ms_medium : &vm->ms_big;
+        size_t scan = pass == 0 ? 64 : (size_t)-1;
+        if (pass == 0 && largest > MS_MEDIUM_MAX) continue;
+        while (*pp && scan > 0 && n < MS_RESQ + 1 && usable < need) {
+            MsFree *f = *pp;
+            if (f->size >= largest && (pass == 1 || f->size >= 2 * waste)) {
+                *pp = f->next;
+                got[n].ptr = (char *)f;
+                got[n].end = (char *)f + f->size;
+                usable += n == 0 ? f->size : (f->size > waste ? f->size - waste : 0);
+                n++;
+            } else {
+                pp = &f->next;
+            }
+            scan--;
+        }
+        if (pass == 0 && usable < need) {
+            for (unsigned i = 0; i < n && i <= MS_RESQ; i++) ms_put(vm, got[i].ptr, (size_t)(got[i].end - got[i].ptr));
+            n = 0;
+            usable = 0;
+        }
+    }
+    if (usable >= need) {
+        vm->ms_res = got[0];
+        for (unsigned i = 1; i < n && i <= MS_RESQ; i++) vm->ms_resq[i - 1] = got[i];
+        vm->ms_resq_i = 0;
+        vm->ms_resq_n = (uint8_t)(n - 1);
+        return true;
+    }
+    for (unsigned i = 0; i < n && i <= MS_RESQ; i++) ms_put(vm, got[i].ptr, (size_t)(got[i].end - got[i].ptr));
+    if ((size_t)(vm->tenured_limit - vm->tenured_hp) >= need) {
+        vm->ms_res.ptr = vm->tenured_hp;
+        vm->ms_res.end = vm->tenured_limit;
+        vm->ms_res_tail = true;
+        return true;
+    }
+    return false;
+}
+
+/* Can every object of the eden be promoted? Each takes a hole of its size when there is one;
+ * the rest must fit in the reserve (dead objects are counted too: an upper bound). Sweeps on
+ * while that may still help. */
+static bool ms_room_for_eden(MiniVM *vm) {
+    uint32_t need[MS_BINS];
+    size_t other = 0, other_max = 0;
+    memset(need, 0, sizeof(need));
+    for (char *p = vm->eden_start; p < vm->eden_hp; ) {
+        size_t sz = ALIGN8(((HeapObj *)p)->size);
+        if (sz >= MS_MIN_CHUNK && sz <= MS_SMALL_MAX) {
+            need[MS_BIN(sz)]++;
+        } else {
+            other += sz;
+            if (sz > other_max) other_max = sz;
+        }
+        p += sz;
+    }
+    for (;;) {
+        size_t r = other, largest = other_max;
+        for (unsigned b = 0; b < MS_BINS; b++) {
+            if (need[b] > vm->ms_bin_count[b]) {
+                r += (size_t)(need[b] - vm->ms_bin_count[b]) * MS_BIN_SIZE(b);
+                if (MS_BIN_SIZE(b) > largest) largest = MS_BIN_SIZE(b);
+            }
+        }
+        if (r <= ms_reserve_usable(vm, largest)) return true;
+        if (ms_find_reserve(vm, r, largest)) return true;
+        if (!ms_sweeping(vm)) return false;
+        ms_sweep_step(vm, MS_SWEEP_FORCED);
+    }
+}
+
+/* Room for one promoted object: cannot fail after ms_room_for_eden() */
+static inline char *ms_alloc_young(MiniVM *vm, size_t sz) {
+    vm->ms_used += sz;
+    if (sz >= MS_MIN_CHUNK && sz <= MS_SMALL_MAX) {
+        unsigned b = MS_BIN(sz);
+        MsFree *f = vm->ms_bins[b];
+        if (f) {
+            vm->ms_bins[b] = f->next;
+            vm->ms_bin_count[b]--;
+            return (char *)f;
+        }
+        if ((size_t)(vm->ms_small.end - vm->ms_small.ptr) < sz && vm->ms_medium) {
+            MsFree *m = vm->ms_medium;       /* holes of other sizes are used up from their start */
+            vm->ms_medium = m->next;
+            ms_retire(vm, &vm->ms_small, false);
+            vm->ms_small.ptr = (char *)m;
+            vm->ms_small.end = (char *)m + m->size;
+        }
+        if ((size_t)(vm->ms_small.end - vm->ms_small.ptr) >= sz) {
+            char *p = vm->ms_small.ptr;
+            vm->ms_small.ptr += sz;
+            return p;
+        }
+    }
+    while ((size_t)(vm->ms_res.end - vm->ms_res.ptr) < sz) {
+        if (vm->ms_resq_i >= vm->ms_resq_n) {
+            fprintf(stderr, "minischeme: gc: promotion reserve exhausted\n");
+            abort();
+        }
+        ms_retire(vm, &vm->ms_res, vm->ms_res_tail);   /* the next chunk lined up */
+        vm->ms_res_tail = false;
+        vm->ms_res = vm->ms_resq[vm->ms_resq_i++ & (MS_RESQ - 1)];
+    }
+    char *p = vm->ms_res.ptr;
+    vm->ms_res.ptr += sz;
+    if (vm->ms_res_tail) vm->tenured_hp = vm->ms_res.ptr;
+    return p;
+}
+
+static void marksweep_gc(MiniVM *vm);
+
+/* The old generation is out of room for `need` more bytes */
+static void ms_collect_old(MiniVM *vm, size_t need) {
+    bool can_grow = vm->max_memory_bytes == 0 || vm->tenured_size < vm->max_memory_bytes;
+    size_t eden_used = (size_t)(vm->eden_hp - vm->eden_start);
+    if (can_grow && !vm->heap_at_limit &&
+        vm->ms_used + eden_used + need + vm->eden_size > vm->tenured_size * 0.75) {
+        major_gc(vm, need);                  /* grows the heap (and compacts it on the way) */
+    } else {
+        marksweep_gc(vm);
+    }
+}
+
+/* An object allocated in the old generation directly (too large for the eden). May collect. */
+static char *ms_alloc_old(MiniVM *vm, size_t sz) {
+    for (int pass = 0; pass < 3; pass++) {
+        for (;;) {
+            size_t got = 0;
+            char *p = NULL;
+            if (sz >= MS_MIN_CHUNK && sz <= MS_SMALL_MAX && vm->ms_bins[MS_BIN(sz)]) {
+                MsFree *f = vm->ms_bins[MS_BIN(sz)];
+                vm->ms_bins[MS_BIN(sz)] = f->next;
+                vm->ms_bin_count[MS_BIN(sz)]--;
+                p = (char *)f;
+                got = sz;
+            }
+            if (!p && sz <= MS_MEDIUM_MAX) p = ms_take_fit(&vm->ms_medium, sz, 16, &got);
+            if (!p) p = ms_take_fit(&vm->ms_big, sz, (size_t)-1, &got);
+            if (p) {
+                if (got > sz) ms_put(vm, p + sz, got - sz);
+                vm->ms_used += sz;
+                return p;
+            }
+            if ((size_t)(vm->ms_res.end - vm->ms_res.ptr) >= sz) {
+                p = vm->ms_res.ptr;
+                vm->ms_res.ptr += sz;
+                if (vm->ms_res_tail) vm->tenured_hp = vm->ms_res.ptr;
+                vm->ms_used += sz;
+                return p;
+            }
+            if (!vm->ms_res_tail && (size_t)(vm->tenured_limit - vm->tenured_hp) >= sz) {
+                p = vm->tenured_hp;
+                vm->tenured_hp += sz;
+                vm->ms_used += sz;
+                return p;
+            }
+            if (!ms_sweeping(vm)) break;
+            ms_sweep_step(vm, MS_SWEEP_FORCED);
+        }
+        if (pass == 0) ms_collect_old(vm, sz);
+        else if (pass == 1) major_gc(vm, sz);   /* fragmented: compact */
+    }
+    return NULL;
+}
+#else
+void mini_gc_heap_reset(MiniVM *vm) {
+    (void)vm;
+}
+#endif /* MINI_GC_MARKSWEEP */
+
 /* ========================================================================= */
 /* Minor GC (Eden Nursery Promotion to Tenured)                             */
 /* ========================================================================= */
@@ -192,12 +557,27 @@ static Value promote_val(MiniVM *vm, Value val) {
     }
 
     size_t sz = ALIGN8(old_obj->size);
+#if MINI_GC_MARKSWEEP
+    HeapObj *new_obj = (HeapObj *)ms_alloc_young(vm, sz);
+    memcpy(new_obj, old_obj, sz);
+    new_obj->type &= MINI_GC_TYPE_MASK;
+    /* promoted objects are scattered over the holes: those with fields go on a worklist
+     * (room for all of them was made before the collection started) */
+    switch (new_obj->type) {
+        case OBJ_PAIR: case OBJ_CLOSURE: case OBJ_CODE: case OBJ_VECTOR: case OBJ_CONTINUATION: case OBJ_MACRO:
+            vm->mark_stack[vm->mark_stack_count++] = new_obj;
+            break;
+        default:
+            break;
+    }
+#else
     HeapObj *new_obj = (HeapObj *)vm->tenured_hp;
     memcpy(new_obj, old_obj, sz);
     vm->tenured_hp += sz;
 
     /* Clear any GC flags on promoted object in Tenured */
     new_obj->type &= MINI_GC_TYPE_MASK;
+#endif
 
     Value new_val = ((uintptr_t)new_obj) | tag;
     old_obj->type = OBJ_FORWARDED;
@@ -267,6 +647,22 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
     vm->gcache_gen++; /* objects move */
 
     size_t eden_used = (size_t)(vm->eden_hp - vm->eden_start);
+#if MINI_GC_MARKSWEEP
+    (void)needed_bytes;                      /* an object too large for the eden finds its own room */
+    if (!mark_stack_grow(vm, eden_used / 16 + 16)) {
+        major_gc(vm, eden_used);             /* no worklist: the compacting collector needs none */
+        return;
+    }
+    if (!ms_room_for_eden(vm)) {
+        ms_collect_old(vm, eden_used);
+        if (eden_used > 0 && vm->eden_hp == vm->eden_start) return;   /* a compaction took the eden along */
+        if (!ms_room_for_eden(vm)) {
+            major_gc(vm, eden_used);         /* free space there is, in pieces too small: compact */
+            return;
+        }
+    }
+    vm->mark_stack_count = 0;
+#else
     /* If Tenured space cannot fit Eden promotion, run Major GC which collects both */
     if (vm->tenured_hp + eden_used + needed_bytes > vm->tenured_limit) {
         major_gc(vm, eden_used + needed_bytes);
@@ -274,6 +670,7 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
     }
 
     char *old_tenured_hp = vm->tenured_hp;
+#endif
 
     /* Step 1: Promote roots */
     vm->global_env   = promote_val(vm, vm->global_env);
@@ -343,17 +740,27 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
     vm->remset_count = 0;
 
     /* Step 3: Scavenge newly promoted objects in Tenured */
+#if MINI_GC_MARKSWEEP
+    while (vm->mark_stack_count > 0) {
+        promote_object_fields(vm, vm->mark_stack[--vm->mark_stack_count]);
+    }
+#else
     char *scan_ptr = old_tenured_hp;
     while (scan_ptr < vm->tenured_hp) {
         HeapObj *obj = (HeapObj *)scan_ptr;
         promote_object_fields(vm, obj);
         scan_ptr += ALIGN8(obj->size);
     }
+#endif
 
     /* Step 4: Reset Eden generation to empty */
     vm->eden_hp = vm->eden_start;
     {
+#if MINI_GC_MARKSWEEP
+        size_t used = vm->ms_used;
+#else
         size_t used = (size_t)(vm->tenured_hp - vm->tenured_start);
+#endif
         if (used > vm->stat_live_peak) vm->stat_live_peak = used;
     }
 
@@ -362,11 +769,20 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
     vm->to_space = vm->tenured_start;
     vm->hp_limit = vm->tenured_limit;
 
-    /* Step 5: Check if Tenured space requires compaction */
+    /* Step 5: a heap that can still grow is collected (and grown) early, at 80%. One that
+     * cannot (at its limit, or no larger block to be had) waits until the next promotion
+     * does not fit: with more than 80% live it was collected in full after every minor GC */
+#if MINI_GC_MARKSWEEP
+    if (ms_sweeping(vm)) ms_sweep_step(vm, MS_SWEEP_PER_MINOR);   /* a little of the sweep each time */
+    GC_VERIFY(vm, "minor");
+#else
     size_t tenured_used = (size_t)(vm->tenured_hp - vm->tenured_start);
-    if (tenured_used + needed_bytes + vm->eden_size > vm->tenured_size * 0.8) {
+    if (!vm->heap_at_limit && tenured_used + needed_bytes + vm->eden_size > vm->tenured_size * 0.8) {
         major_gc(vm, needed_bytes);
+    } else {
+        GC_VERIFY(vm, "minor");
     }
+#endif
 }
 
 /* ========================================================================= */
@@ -374,18 +790,35 @@ void minor_gc(MiniVM *vm, size_t needed_bytes) {
 /* ========================================================================= */
 
 static void mark_push(MiniVM *vm, HeapObj *obj) {
-    if (vm->mark_stack_count >= vm->mark_stack_cap) {
-        size_t new_cap = vm->mark_stack_cap < 512 ? 512 : vm->mark_stack_cap * 2;
-        HeapObj **new_stack = (HeapObj **)mini_word_grow(vm->mark_stack, vm->mark_stack_cap * sizeof(HeapObj *),
-                                                         new_cap * sizeof(HeapObj *));
-        if (!new_stack) {
-            vm_error(vm, "out of memory allocating GC mark stack");
-            return;
-        }
-        vm->mark_stack = new_stack;
-        vm->mark_stack_cap = new_cap;
+    if (vm->mark_stack_count >= vm->mark_stack_cap &&
+        (vm->mark_stack_cap >= MINI_MARK_STACK_MAX || !mark_stack_grow(vm, vm->mark_stack_cap + 1))) {
+        vm->mark_overflow = true;            /* marked, its fields not yet: found again by a heap scan */
+        return;
     }
     vm->mark_stack[vm->mark_stack_count++] = obj;
+}
+
+/* Sets the mark of an object of the heap; false when it has one already or lies outside */
+static inline bool mark_set(MiniVM *vm, HeapObj *obj) {
+    bool in_tenured = ((char *)obj >= vm->tenured_start && (char *)obj < vm->tenured_hp);
+    bool in_eden    = ((char *)obj >= vm->eden_start && (char *)obj < vm->eden_hp);
+    if (!in_tenured && !in_eden) return false;
+    if (obj->type & MINI_GC_MARK_BIT) return false;
+#ifdef MINI_GC_VERIFY
+    {
+        uint32_t ty = obj->type & MINI_GC_TYPE_MASK;
+        if (ty < OBJ_PAIR || ty > OBJ_BIGINT || ty == OBJ_FORWARDED || ALIGN8(obj->size) < 8) {
+            fprintf(stderr, "gc verify: reachable object %p has header type %u size %u\n", (void *)obj,
+                    (unsigned)obj->type, (unsigned)obj->size);
+            abort();
+        }
+    }
+#endif
+    obj->type |= MINI_GC_MARK_BIT;
+#if MINI_GC_MARKSWEEP
+    if (in_tenured) vm->ms_marked += ALIGN8(obj->size);
+#endif
+    return true;
 }
 
 static void mark_val(MiniVM *vm, Value val) {
@@ -393,14 +826,266 @@ static void mark_val(MiniVM *vm, Value val) {
     if (tag == MINI_TAG_FIXNUM || tag == MINI_TAG_CONST) return;
     HeapObj *obj = (HeapObj *)UNTAG_PTR(val);
     if (!obj) return;
-    /* Mark objects inside Tenured generation OR Eden generation */
-    bool in_tenured = ((char *)obj >= vm->tenured_start && (char *)obj < vm->tenured_hp);
-    bool in_eden    = ((char *)obj >= vm->eden_start && (char *)obj < vm->eden_hp);
-    if (!in_tenured && !in_eden) return;
-    if (obj->type & MINI_GC_MARK_BIT) return;
-    obj->type |= MINI_GC_MARK_BIT;
-    mark_push(vm, obj);
+    if (mark_set(vm, obj)) mark_push(vm, obj);
 }
+
+static void mark_children(MiniVM *vm, HeapObj *obj) {
+    uint32_t type = obj->type & MINI_GC_TYPE_MASK;
+    switch (type) {
+        case OBJ_PAIR: {
+            PairObj *p = (PairObj *)obj;
+            while (p) {                      /* a list is walked, not pushed cell by cell */
+                mark_val(vm, p->car);
+                Value cdr_val = p->cdr;
+                if (mini_is_pair(cdr_val)) {
+                    HeapObj *cdr_obj = (HeapObj *)UNTAG_PTR(cdr_val);
+                    if (mark_set(vm, cdr_obj)) {
+                        p = (PairObj *)cdr_obj;
+                        continue;
+                    }
+                    break;
+                }
+                mark_val(vm, cdr_val);
+                break;
+            }
+            break;
+        }
+        case OBJ_CLOSURE: {
+            ClosureObj *c = (ClosureObj *)obj;
+            mark_val(vm, c->code);
+            mark_val(vm, c->env);
+            break;
+        }
+        case OBJ_CODE: {
+            CodeObj *co = (CodeObj *)obj;
+            Value *c_arr = CODE_CONSTS(co);
+            for (uint16_t i = 0; i < co->num_consts; i++) {
+                mark_val(vm, c_arr[i]);
+            }
+            break;
+        }
+        case OBJ_VECTOR: {
+            VectorObj *vec = (VectorObj *)obj;
+            for (size_t i = 0; i < vec->length; i++) {
+                mark_val(vm, vec->data[i]);
+            }
+            break;
+        }
+        case OBJ_CONTINUATION: {
+            ContinuationObj *cont = (ContinuationObj *)obj;
+            SavedFrame *sf = CONT_FRAMES(cont);
+            for (uint32_t i = 0; i < cont->frame_count; i++) {
+                if (sf[i].closure_val) mark_val(vm, sf[i].closure_val);
+                if (sf[i].code_val)    mark_val(vm, sf[i].code_val);
+                mark_val(vm, sf[i].env);
+            }
+            Value *stk = CONT_STACK(cont);
+            for (uint32_t i = 0; i < cont->stack_len; i++) {
+                mark_val(vm, stk[i]);
+            }
+            break;
+        }
+        case OBJ_MACRO: {
+            MacroObj *m = (MacroObj *)obj;
+            mark_val(vm, m->proc_or_literals);
+            mark_val(vm, m->rules);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void mark_drain(MiniVM *vm) {
+    while (vm->mark_stack_count > 0) {
+        mark_children(vm, vm->mark_stack[--vm->mark_stack_count]);
+    }
+}
+
+/* Marks everything reachable from the roots, in the tenured generation and in the eden.
+ * Both must be a run of valid headers (free chunks included). */
+static void gc_mark_all(MiniVM *vm) {
+    vm->mark_stack_count = 0;
+    vm->mark_overflow = false;
+
+    mark_val(vm, vm->global_env);
+    mark_val(vm, vm->baseline_env);
+    mark_val(vm, vm->symbols);
+    mark_val(vm, vm->sym_quote);
+    mark_val(vm, vm->sym_if);
+    mark_val(vm, vm->sym_begin);
+    mark_val(vm, vm->sym_lambda);
+    mark_val(vm, vm->sym_define);
+    mark_val(vm, vm->sym_set);
+    mark_val(vm, vm->sym_let);
+    mark_val(vm, vm->sym_letstar);
+    mark_val(vm, vm->sym_letrec);
+
+    mark_val(vm, vm->sym_define_syntax);
+    mark_val(vm, vm->sym_syntax_rules);
+    mark_val(vm, vm->sym_define_macro);
+    mark_val(vm, vm->sym_ellipsis);
+    mark_val(vm, vm->sym_wildcard);
+
+    for (Value *s = vm->stack; s < vm->sp; s++) {
+        mark_val(vm, *s);
+    }
+
+    for (size_t i = 0; i < vm->c_roots_count; i++) {
+        if (vm->c_roots[i]) {
+            mark_val(vm, *vm->c_roots[i]);
+        }
+    }
+
+    for (int f = 0; f < vm->call_frame_count; f++) {
+        CallFrame *frame = &vm->call_frames[f];
+        if (frame->closure) mark_val(vm, ((uintptr_t)frame->closure) | MINI_TAG_CLOSURE);
+        if (frame->code)    mark_val(vm, ((uintptr_t)frame->code) | MINI_TAG_CODE);
+        mark_val(vm, frame->env);
+    }
+
+    if (vm->gslots) {
+        for (uint32_t i = 0; i < vm->gslot_count; i++) {
+            if (vm->gslots[i]) mark_val(vm, vm->gslots[i]);
+        }
+    }
+
+    mark_drain(vm);
+
+    /* The stack could not grow: some marked objects were never traced. Trace every marked
+     * object again until a pass leaves nothing behind. */
+    while (vm->mark_overflow) {
+        vm->mark_overflow = false;
+        for (int part = 0; part < 2; part++) {
+            char *scan = part == 0 ? vm->tenured_start : vm->eden_start;
+            char *end  = part == 0 ? vm->tenured_hp : vm->eden_hp;
+            while (scan < end) {
+                HeapObj *obj = (HeapObj *)scan;
+#if MINI_GC_MARKSWEEP
+                /* a chunk being filled has no header over its unused part (only the debug
+                 * verifier marks while one is open) */
+                if (part == 0 && scan == vm->ms_res.ptr && !vm->ms_res_tail && vm->ms_res.end > scan) {
+                    scan = vm->ms_res.end;
+                    continue;
+                }
+                if (part == 0 && scan == vm->ms_small.ptr && vm->ms_small.end > scan) {
+                    scan = vm->ms_small.end;
+                    continue;
+                }
+#endif
+                if (obj->type & MINI_GC_MARK_BIT) {
+                    mark_children(vm, obj);
+                    mark_drain(vm);
+                }
+                scan += ALIGN8(obj->size);
+            }
+        }
+    }
+}
+
+#ifdef MINI_GC_VERIFY
+/* Debug builds: the heap is a run of valid chunks, the free lists hold free chunks, and (when
+ * no sweep is pending) everything reachable is a valid object */
+static void gc_verify(MiniVM *vm, const char *when) {
+    size_t free_listed = 0, free_seen = 0;
+    for (char *p = vm->tenured_start; p < vm->tenured_hp; ) {
+        HeapObj *o = (HeapObj *)p;
+        uint32_t ty = o->type & MINI_GC_TYPE_MASK;
+        size_t sz = ALIGN8(o->size);
+        bool in_region = false;
+#if MINI_GC_MARKSWEEP
+        if (p == vm->ms_res.ptr && !vm->ms_res_tail && vm->ms_res.end > p) { p = vm->ms_res.end; in_region = true; }
+        else if (p == vm->ms_small.ptr && vm->ms_small.end > p) { p = vm->ms_small.end; in_region = true; }
+#endif
+        if (in_region) continue;
+        if (sz < 8 || ty < OBJ_PAIR || ty > OBJ_FREE || p + sz > vm->tenured_hp) {
+            fprintf(stderr, "gc verify (%s): bad chunk at %p (+%u): type %u size %u\n", when, (void *)p,
+                    (unsigned)(p - vm->tenured_start), (unsigned)o->type, (unsigned)o->size);
+            abort();
+        }
+        if (ty == OBJ_FREE && sz >= 16) free_seen += sz;
+        p += sz;
+    }
+#if MINI_GC_MARKSWEEP
+    for (unsigned b = 0; b < MS_BINS + 2; b++) {
+        MsFree *f = b < MS_BINS ? vm->ms_bins[b] : b == MS_BINS ? vm->ms_medium : vm->ms_big;
+        uint32_t n = 0;
+        for (; f; f = f->next, n++) {
+            if ((char *)f < vm->tenured_start || (char *)f >= vm->tenured_hp || f->type != OBJ_FREE ||
+                (b < MS_BINS && f->size != MS_BIN_SIZE(b))) {
+                fprintf(stderr, "gc verify (%s): bad free chunk %p in list %u\n", when, (void *)f, b);
+                abort();
+            }
+            free_listed += f->size;
+        }
+        if (b < MS_BINS && n != vm->ms_bin_count[b]) {
+            fprintf(stderr, "gc verify (%s): list %u holds %u chunks, counted %u\n", when, b, (unsigned)n,
+                    (unsigned)vm->ms_bin_count[b]);
+            abort();
+        }
+    }
+    if (free_listed > free_seen) {
+        fprintf(stderr, "gc verify (%s): %u bytes listed free, %u seen\n", when, (unsigned)free_listed,
+                (unsigned)free_seen);
+        abort();
+    }
+    if (ms_sweeping(vm)) return;             /* marks pending: the trace below would disturb them */
+    size_t marked = vm->ms_marked;
+#endif
+    size_t saved = vm->mark_stack_count;     /* never non-zero here, but cheap to keep */
+    gc_mark_all(vm);
+    vm->mark_stack_count = saved;
+    for (int part = 0; part < 2; part++) {
+        char *scan = part == 0 ? vm->tenured_start : vm->eden_start;
+        char *end  = part == 0 ? vm->tenured_hp : vm->eden_hp;
+        while (scan < end) {
+            HeapObj *obj = (HeapObj *)scan;
+#if MINI_GC_MARKSWEEP
+            if (part == 0 && scan == vm->ms_res.ptr && !vm->ms_res_tail && vm->ms_res.end > scan) { scan = vm->ms_res.end; continue; }
+            if (part == 0 && scan == vm->ms_small.ptr && vm->ms_small.end > scan) { scan = vm->ms_small.end; continue; }
+#endif
+            obj->type &= ~MINI_GC_MARK_BIT;
+            scan += ALIGN8(obj->size);
+        }
+    }
+#if MINI_GC_MARKSWEEP
+    vm->ms_marked = marked;
+#endif
+    (void)free_listed; (void)free_seen;
+}
+#endif
+
+#if MINI_GC_MARKSWEEP
+/* Major GC without moving anything: mark, then the sweep is left to later allocations. The
+ * eden is traced through but stays as it is. */
+static void marksweep_gc(MiniVM *vm) {
+    vm->stat_major_gcs++;
+    ms_sweep_step(vm, (size_t)-1);           /* marks left over from the last cycle */
+    ms_retire_all(vm);                       /* every byte below tenured_hp under a header */
+    ms_lists_reset(vm);                      /* the sweep builds the lists anew */
+
+    vm->ms_marked = 0;
+    gc_mark_all(vm);
+
+    /* dead old objects leave the remembered set: their memory is about to be reused */
+    size_t kept = 0;
+    for (size_t i = 0; i < vm->remset_count; i++) {
+        HeapObj *robj = (HeapObj *)UNTAG_PTR(vm->remset[i]);
+        if (robj && (robj->type & MINI_GC_MARK_BIT)) vm->remset[kept++] = vm->remset[i];
+    }
+    vm->remset_count = kept;
+
+    for (char *p = vm->eden_start; p < vm->eden_hp; p += ALIGN8(((HeapObj *)p)->size)) {
+        ((HeapObj *)p)->type &= ~MINI_GC_MARK_BIT;
+    }
+
+    vm->ms_used = vm->ms_marked;
+    vm->stat_live_bytes = vm->ms_marked;
+    if (vm->stat_live_bytes > vm->stat_live_peak) vm->stat_live_peak = vm->stat_live_bytes;
+    vm->ms_sweep = vm->tenured_start;
+    vm->ms_sweep_end = vm->tenured_hp;
+}
+#endif
 
 static inline Value fix_forwarded_val(const MiniVM *vm, const char *target_start, Value val) {
     uintptr_t tag = val & MINI_TAG_MASK;
@@ -474,7 +1159,13 @@ static void fix_object_fields(MiniVM *vm, const char *target_start, HeapObj *obj
 void major_gc(MiniVM *vm, size_t needed_bytes) {
     if (!vm) return;
     vm->stat_major_gcs++;
+    vm->stat_compact_gcs++;
     vm->gcache_gen++; /* objects move */
+#if MINI_GC_MARKSWEEP
+    ms_sweep_step(vm, (size_t)-1);           /* no marks left from a mark-sweep cycle */
+    ms_retire_all(vm);                       /* every byte below tenured_hp under a header */
+    ms_lists_reset(vm);
+#endif
 
     /* bench patch: clear the remembered set while its pointers are still valid */
     for (size_t i = 0; i < vm->remset_count; i++) {
@@ -483,10 +1174,15 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
     }
     vm->remset_count = 0;
 
+#if MINI_GC_MARKSWEEP
+    size_t tenured_used = vm->ms_used;       /* tenured_hp says nothing: there are holes below it */
+#else
     size_t tenured_used = (size_t)(vm->tenured_hp - vm->tenured_start);
+#endif
     size_t eden_used = (size_t)(vm->eden_hp - vm->eden_start);
     size_t total_used = tenured_used + eden_used;
     size_t target_size = vm->tenured_size;
+    size_t old_size = vm->tenured_size;
 
     /* Check if Tenured space needs geometric expansion */
     if (total_used + needed_bytes + vm->eden_size > target_size * 0.75) {
@@ -504,6 +1200,7 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
 
     char *target_raw = NULL;
     char *target_start = NULL;
+    bool wanted_more = total_used + needed_bytes + vm->eden_size > vm->tenured_size * 0.75;
 
     if (target_size != vm->tenured_size) {
         target_start = alloc_aligned8(target_size, &target_raw);
@@ -519,119 +1216,7 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
     }
 
     /* Phase 1: Mark reachable objects across roots into Tenured and Eden */
-    vm->mark_stack_count = 0;
-
-    mark_val(vm, vm->global_env);
-    mark_val(vm, vm->baseline_env);
-    mark_val(vm, vm->symbols);
-    mark_val(vm, vm->sym_quote);
-    mark_val(vm, vm->sym_if);
-    mark_val(vm, vm->sym_begin);
-    mark_val(vm, vm->sym_lambda);
-    mark_val(vm, vm->sym_define);
-    mark_val(vm, vm->sym_set);
-    mark_val(vm, vm->sym_let);
-    mark_val(vm, vm->sym_letstar);
-    mark_val(vm, vm->sym_letrec);
-
-    mark_val(vm, vm->sym_define_syntax);
-    mark_val(vm, vm->sym_syntax_rules);
-    mark_val(vm, vm->sym_define_macro);
-    mark_val(vm, vm->sym_ellipsis);
-    mark_val(vm, vm->sym_wildcard);
-
-    for (Value *s = vm->stack; s < vm->sp; s++) {
-        mark_val(vm, *s);
-    }
-
-    for (size_t i = 0; i < vm->c_roots_count; i++) {
-        if (vm->c_roots[i]) {
-            mark_val(vm, *vm->c_roots[i]);
-        }
-    }
-
-    for (int f = 0; f < vm->call_frame_count; f++) {
-        CallFrame *frame = &vm->call_frames[f];
-        if (frame->closure) mark_val(vm, ((uintptr_t)frame->closure) | MINI_TAG_CLOSURE);
-        if (frame->code)    mark_val(vm, ((uintptr_t)frame->code) | MINI_TAG_CODE);
-        mark_val(vm, frame->env);
-    }
-
-    if (vm->gslots) {
-        for (uint32_t i = 0; i < vm->gslot_count; i++) {
-            if (vm->gslots[i]) mark_val(vm, vm->gslots[i]);
-        }
-    }
-
-    while (vm->mark_stack_count > 0) {
-        HeapObj *obj = vm->mark_stack[--vm->mark_stack_count];
-        uint32_t type = obj->type & MINI_GC_TYPE_MASK;
-        switch (type) {
-            case OBJ_PAIR: {
-                PairObj *p = (PairObj *)obj;
-                while (p) {
-                    mark_val(vm, p->car);
-                    Value cdr_val = p->cdr;
-                    if (mini_is_pair(cdr_val)) {
-                        HeapObj *cdr_obj = (HeapObj *)UNTAG_PTR(cdr_val);
-                        bool in_tenured = ((char *)cdr_obj >= vm->tenured_start && (char *)cdr_obj < vm->tenured_hp);
-                        bool in_eden    = ((char *)cdr_obj >= vm->eden_start && (char *)cdr_obj < vm->eden_hp);
-                        if ((in_tenured || in_eden) && !(cdr_obj->type & MINI_GC_MARK_BIT)) {
-                            cdr_obj->type |= MINI_GC_MARK_BIT;
-                            p = (PairObj *)cdr_obj;
-                            continue;
-                        }
-                    }
-                    mark_val(vm, cdr_val);
-                    break;
-                }
-                break;
-            }
-            case OBJ_CLOSURE: {
-                ClosureObj *c = (ClosureObj *)obj;
-                mark_val(vm, c->code);
-                mark_val(vm, c->env);
-                break;
-            }
-            case OBJ_CODE: {
-                CodeObj *co = (CodeObj *)obj;
-                Value *c_arr = CODE_CONSTS(co);
-                for (uint16_t i = 0; i < co->num_consts; i++) {
-                    mark_val(vm, c_arr[i]);
-                }
-                break;
-            }
-            case OBJ_VECTOR: {
-                VectorObj *vec = (VectorObj *)obj;
-                for (size_t i = 0; i < vec->length; i++) {
-                    mark_val(vm, vec->data[i]);
-                }
-                break;
-            }
-            case OBJ_CONTINUATION: {
-                ContinuationObj *cont = (ContinuationObj *)obj;
-                SavedFrame *sf = CONT_FRAMES(cont);
-                for (uint32_t i = 0; i < cont->frame_count; i++) {
-                    if (sf[i].closure_val) mark_val(vm, sf[i].closure_val);
-                    if (sf[i].code_val)    mark_val(vm, sf[i].code_val);
-                    mark_val(vm, sf[i].env);
-                }
-                Value *stk = CONT_STACK(cont);
-                for (uint32_t i = 0; i < cont->stack_len; i++) {
-                    mark_val(vm, stk[i]);
-                }
-                break;
-            }
-            case OBJ_MACRO: {
-                MacroObj *m = (MacroObj *)obj;
-                mark_val(vm, m->proc_or_literals);
-                mark_val(vm, m->rules);
-                break;
-            }
-            default:
-                break;
-        }
-    }
+    gc_mark_all(vm);
 
     /* Phase 2: Compute Forwarding Offsets for surviving Tenured and Eden objects */
     char *free_ptr = target_start;
@@ -811,6 +1396,8 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
     vm->tenured_hp = free_ptr;
     vm->tenured_limit = vm->tenured_start + vm->tenured_size;
     vm->heap_size = vm->tenured_size;
+    /* growth was due and did not happen: collecting early (minor_gc, step 5) gains nothing */
+    vm->heap_at_limit = wanted_more && target_size == old_size;
 
     /* Reset Eden generation to empty */
     vm->eden_hp = vm->eden_start;
@@ -826,6 +1413,8 @@ void major_gc(MiniVM *vm, size_t needed_bytes) {
 
     vm->stat_live_bytes = (size_t)(vm->tenured_hp - vm->tenured_start);
     if (vm->stat_live_bytes > vm->stat_live_peak) vm->stat_live_peak = vm->stat_live_bytes;
+    mini_gc_heap_reset(vm);                  /* mark-sweep: no holes, everything free is the tail */
+    GC_VERIFY(vm, "major");
 }
 
 void mini_get_stats(const MiniVM *vm, MiniStats *out) {
@@ -835,6 +1424,9 @@ void mini_get_stats(const MiniVM *vm, MiniStats *out) {
     out->alloc_bytes = vm->stat_alloc_bytes;
     out->minor_gcs   = vm->stat_minor_gcs;
     out->major_gcs   = vm->stat_major_gcs;
+    out->compact_gcs = vm->stat_compact_gcs;
+    out->gc_max_us   = vm->stat_gc_max_us;
+    out->gc_total_us = vm->stat_gc_total_us;
     out->live_bytes  = vm->stat_live_bytes;
     out->live_peak   = vm->stat_live_peak;
     out->frame_peak  = vm->stat_frame_peak;
@@ -848,9 +1440,11 @@ void mini_get_stats(const MiniVM *vm, MiniStats *out) {
 
 void cheney_gc(MiniVM *vm, size_t needed_bytes) {
     minor_gc(vm, needed_bytes);
+#if !MINI_GC_MARKSWEEP
     if (vm->tenured_hp + needed_bytes > vm->tenured_limit) {
         major_gc(vm, needed_bytes);
     }
+#endif
 }
 
 void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
@@ -863,12 +1457,23 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
 
     /* Fast path: bump allocation in Eden */
     if (vm->eden_hp + sz > vm->eden_limit) {
+        uint64_t t0 = MINI_GC_NOW_US();
         minor_gc(vm, sz);
         /* If Eden is still too small (sz > eden_size), allocate directly in Tenured */
         if (vm->eden_hp + sz > vm->eden_limit) {
+#if MINI_GC_MARKSWEEP
+            HeapObj *old = (HeapObj *)ms_alloc_old(vm, sz);
+            gc_pause_done(vm, t0);
+            if (old) {
+                old->type = (uint32_t)type;
+                old->size = (uint32_t)sz;
+                return (void *)old;
+            }
+#else
             if (vm->tenured_hp + sz > vm->tenured_limit) {
                 major_gc(vm, sz);
             }
+            gc_pause_done(vm, t0);
             if (vm->tenured_hp + sz <= vm->tenured_limit) {
                 HeapObj *obj = (HeapObj *)vm->tenured_hp;
                 vm->tenured_hp += sz;
@@ -876,9 +1481,11 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
                 obj->size = (uint32_t)sz;
                 return (void *)obj;
             }
+#endif
             vm_error(vm, "out of memory: heap exhausted (%zu bytes requested)", sz);
             return NULL;
         }
+        gc_pause_done(vm, t0);
     }
 
     HeapObj *obj = (HeapObj *)vm->eden_hp;
@@ -889,8 +1496,14 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
 }
 
 void mini_gc(MiniVM *vm) {
+    uint64_t t0 = MINI_GC_NOW_US();
     minor_gc(vm, 0);
+#if MINI_GC_MARKSWEEP
+    marksweep_gc(vm);
+#else
     major_gc(vm, 0);
+#endif
+    gc_pause_done(vm, t0);
 }
 
 size_t mini_get_heap_size(const MiniVM *vm) {
@@ -900,7 +1513,11 @@ size_t mini_get_heap_size(const MiniVM *vm) {
 size_t mini_get_allocated_bytes(const MiniVM *vm) {
     if (!vm) return 0;
     size_t eden_used = (size_t)(vm->eden_hp - vm->eden_start);
+#if MINI_GC_MARKSWEEP
+    size_t tenured_used = vm->ms_used;
+#else
     size_t tenured_used = (size_t)(vm->tenured_hp - vm->tenured_start);
+#endif
     return eden_used + tenured_used;
 }
 
