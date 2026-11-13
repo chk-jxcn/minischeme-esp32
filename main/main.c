@@ -6118,6 +6118,14 @@ static void tz_poll(int64_t ms) {
     if (xTaskCreate(tz_task, "timezone", TZ_TASK_STACK, NULL, 3, NULL) != pdPASS) s_tzq.state = -1;
 }
 
+/* The heap kept free for the system at run time: [memory] reserved_heap, sized for WiFi, its
+ * buffers and the web page. A Bluetooth-only boot has none of them: BT_ONLY_RESERVE. */
+#define BT_ONLY_RESERVE (48 * 1024)
+#define ROM_BUILD_ROOM  (24 * 1024)   /* one free block of this size for the streaming ROM build */
+static size_t boot_reserve(void) {
+    return s_bt_only && s_sys_cfg.reserved_heap > BT_ONLY_RESERVE ? BT_ONLY_RESERVE : s_sys_cfg.reserved_heap;
+}
+
 void app_main(void) {
     mini_api_set_extensions(mini_api_extension_bit("esp32"));   /* this board's extension APIs */
     market_host_init();
@@ -6291,10 +6299,19 @@ void app_main(void) {
         }
         free(vm_heap_hold);
         vm_heap_hold = NULL;
-        if (ble_start(name)) ESP_LOGI(TAG, "Bluetooth LE: started as %s, %u B of heap", name, (unsigned)ble_heap_used());
+        if (ble_start(name)) {
+            /* the apps' ble extension API is there this boot ((api-has? 'ble-scan-start), meta.ini extensions = ble) */
+            mini_api_set_extensions(mini_api_get_extensions() | mini_api_extension_bit("ble"));
+            ESP_LOGI(TAG, "Bluetooth LE: started as %s, %u B of heap", name, (unsigned)ble_heap_used());
+        }
         else ESP_LOGW(TAG, "Bluetooth LE: could not start");
+        /* held again, but no more than the VM will get: the rest of the start (the HTTP
+         * server, the app's files) must not run out (with the whole block held, WiFi and
+         * Bluetooth together left 84 B and the web page never came up) */
+        size_t free_now = esp_get_free_heap_size(), reserve = boot_reserve();
         hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
         if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
+        if (hold_bytes + reserve > free_now) hold_bytes = free_now > reserve ? free_now - reserve : 0;
         vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT) : NULL;
     }
     ESP_LOGI(TAG, "Heap after Bluetooth (%s): free=%u B, largest=%u B (held for the VM: %u B)",
@@ -6380,6 +6397,13 @@ void app_main(void) {
     /* The streaming build needs a few KB: it runs while the VM's block is
      * still held, so nothing it allocates can split that block */
     if (rom_key && !rom_ok && s_rom_ptr) {
+        /* with Bluetooth up little is left beside the VM's block, and in small pieces (16 KB
+         * at most: a combined app's build ran out): the block gives the build a tail */
+        if (vm_heap_hold && hold_bytes > 2 * ROM_BUILD_ROOM && heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < ROM_BUILD_ROOM) {
+            free(vm_heap_hold);
+            hold_bytes -= ROM_BUILD_ROOM;
+            vm_heap_hold = heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT);
+        }
         rom_ok = stream_app_rom(rom_key, app_path);
         if (!rom_ok) {
             free(vm_heap_hold);
@@ -6403,7 +6427,7 @@ void app_main(void) {
     free(vm_heap_hold);
     size_t free_heap = esp_get_free_heap_size();
     size_t largest_8bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    size_t reserved = s_sys_cfg.reserved_heap; /* [memory] reserved_heap */
+    size_t reserved = boot_reserve();   /* [memory] reserved_heap; less without WiFi */
     size_t avail = (free_heap > reserved) ? (free_heap - reserved) : 16384;
     /* the VM struct (about 1 KB) may be carved from the same block; eden
      * and the stacks come from elsewhere */

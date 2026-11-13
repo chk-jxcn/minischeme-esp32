@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#define MINI_API_ID_COUNT 395
+#define MINI_API_ID_COUNT 423
 /* the name of each number (NULL: a number no procedure has any more) */
 static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "void",  /* 0 */
@@ -404,6 +404,34 @@ static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "file-size",  /* 392 */
     "system",  /* 393 */
     "write-file-string",  /* 394 */
+    "time-set!",  /* 395 */
+    "ble-status",  /* 396 */
+    "ble-event",  /* 397 */
+    "ble-scan-start",  /* 398 */
+    "ble-scan-stop",  /* 399 */
+    "ble-scan-results",  /* 400 */
+    "ble-adv-field",  /* 401 */
+    "ble-connect",  /* 402 */
+    "ble-disconnect",  /* 403 */
+    "ble-connections",  /* 404 */
+    "ble-discover",  /* 405 */
+    "ble-services",  /* 406 */
+    "ble-read",  /* 407 */
+    "ble-write",  /* 408 */
+    "ble-subscribe",  /* 409 */
+    "ble-pair",  /* 410 */
+    "ble-bonds",  /* 411 */
+    "ble-unpair",  /* 412 */
+    "ble-advertise",  /* 413 */
+    "ble-advertise-stop",  /* 414 */
+    "ble-uart-write",  /* 415 */
+    "ble-bytes->hex",  /* 416 */
+    "ble-hex->bytes",  /* 417 */
+    "ble-service-add",  /* 418 */
+    "ble-value-set!",  /* 419 */
+    "ble-hid-connect",  /* 420 */
+    "ble-mtu",  /* 421 */
+    "ble-rssi",  /* 422 */
 };
 
 typedef struct MiniApiIdEntry {
@@ -411,7 +439,7 @@ typedef struct MiniApiIdEntry {
     uint16_t id;
 } MiniApiIdEntry;
 
-#define MINI_API_ID_INDEX_COUNT 422
+#define MINI_API_ID_INDEX_COUNT 450
 /* names (older names too) sorted by strcmp, with their numbers: the compiler's %api-id */
 static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "*", 45 },
@@ -462,6 +490,33 @@ static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "base64-encode", 378 },
     { "bench-display", 202 },
     { "bench-tick", 201 },
+    { "ble-adv-field", 401 },
+    { "ble-advertise", 413 },
+    { "ble-advertise-stop", 414 },
+    { "ble-bonds", 411 },
+    { "ble-bytes->hex", 416 },
+    { "ble-connect", 402 },
+    { "ble-connections", 404 },
+    { "ble-disconnect", 403 },
+    { "ble-discover", 405 },
+    { "ble-event", 397 },
+    { "ble-hex->bytes", 417 },
+    { "ble-hid-connect", 420 },
+    { "ble-mtu", 421 },
+    { "ble-pair", 410 },
+    { "ble-read", 407 },
+    { "ble-rssi", 422 },
+    { "ble-scan-results", 400 },
+    { "ble-scan-start", 398 },
+    { "ble-scan-stop", 399 },
+    { "ble-service-add", 418 },
+    { "ble-services", 406 },
+    { "ble-status", 396 },
+    { "ble-subscribe", 409 },
+    { "ble-uart-write", 415 },
+    { "ble-unpair", 412 },
+    { "ble-value-set!", 419 },
+    { "ble-write", 408 },
     { "boolean?", 13 },
     { "button-pressed?", 233 },
     { "button-read", 232 },
@@ -787,6 +842,7 @@ static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "time-epoch", 178 },
     { "time-local", 179 },
     { "time-ms", 175 },
+    { "time-set!", 395 },
     { "time-set-zone!", 181 },
     { "time-sleep-ms", 173 },
     { "time-sleep-us", 174 },

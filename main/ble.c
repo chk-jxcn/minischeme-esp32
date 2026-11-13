@@ -40,9 +40,15 @@ static const char *TAG = "ble";
 #define BLE_EVENT_MAX     10      /* queued events (the oldest leaves) */
 #define BLE_EVENT_DATA    128     /* bytes of an event's value */
 #define BLE_CONN_MAX      CONFIG_BT_NIMBLE_MAX_CONNECTIONS
-#define BLE_SVC_MAX       8       /* services kept of a peer */
-#define BLE_CHR_MAX       24      /* characteristics kept of a peer */
+#define BLE_SVC_MAX       10      /* services kept of a peer */
+#define BLE_CHR_MAX       40     /* characteristics kept of a peer */
 #define BLE_NAME_MAX      24
+#ifdef CONFIG_BT_NIMBLE_SECURITY_ENABLE
+#define BLE_SECURITY 1          /* pairing, bonds (in NVS), encrypted links */
+#else
+#define BLE_SECURITY 0
+#define CONFIG_BT_NIMBLE_MAX_BONDS 1
+#endif
 
 typedef enum {
     EV_CONNECTED = 1, EV_DISCONNECTED, EV_DISCOVERED, EV_READ, EV_WRITTEN, EV_SUBSCRIBED,
@@ -714,13 +720,18 @@ static Value prim_pair(MiniVM *vm, int argc, Value *argv) {
     BleConn *c = NULL;
     if (!conn_arg(vm, "ble-pair", argc, argv, &c)) return mini_void();
     if (!c) return mini_false();
+#if BLE_SECURITY
     return mini_make_bool(ble_gap_security_initiate(c->handle) == 0);
+#else
+    return mini_false();   /* built without the security manager */
+#endif
 }
 
 /* (ble-bonds): the addresses of the bonded devices */
 static Value prim_bonds(MiniVM *vm, int argc, Value *argv) {
     (void)argc; (void)argv;
     Value out = mini_nil();
+#if BLE_SECURITY
     if (!s_running) return out;
     ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
     int n = 0;
@@ -732,12 +743,19 @@ static Value prim_bonds(MiniVM *vm, int argc, Value *argv) {
         list_push(vm, &out, mini_make_string(vm, addr));
     }
     mini_pop_root(vm);
+#else
+    (void)vm;
+#endif
     return out;
 }
 
 /* (ble-unpair address) / (ble-unpair #t): forget one bond, or all */
 static Value prim_unpair(MiniVM *vm, int argc, Value *argv) {
     if (!running(vm, "ble-unpair")) return mini_void();
+#if !BLE_SECURITY
+    (void)argc; (void)argv;
+    return mini_false();
+#else
     if (argc == 1 && mini_is_string(argv[0])) {
         ble_addr_t a, peers[CONFIG_BT_NIMBLE_MAX_BONDS];
         int n = 0;
@@ -749,6 +767,7 @@ static Value prim_unpair(MiniVM *vm, int argc, Value *argv) {
         return mini_false();
     }
     return mini_make_bool(ble_store_clear() == 0);
+#endif
 }
 
 /* ------------------------------------------------------------------------- */
@@ -923,10 +942,12 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             push_event(EV_PAIRED, event->enc_change.conn_handle, 0, event->enc_change.status, NULL, 0);
             break;
         }
+#if BLE_SECURITY
         case BLE_GAP_EVENT_REPEAT_PAIRING:
             /* the peer lost its bond: ours goes, and the pairing starts over */
             if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) ble_store_util_delete_peer(&desc.peer_id_addr);
             return BLE_GAP_REPEAT_PAIRING_RETRY;
+#endif
         case BLE_GAP_EVENT_NOTIFY_RX: {
             uint8_t data[BLE_EVENT_DATA];
             uint16_t len = 0;
@@ -1158,19 +1179,23 @@ bool ble_start(const char *name) {
     }
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+#if BLE_SECURITY
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;   /* just works: the board has no keypad for a passkey */
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+#endif
     ble_svc_gap_init();
     ble_svc_gatt_init();
     if (ble_gatts_count_cfg(GATT_SERVICES) != 0 || ble_gatts_add_svcs(GATT_SERVICES) != 0) {
         ESP_LOGE(TAG, "the UART service could not be registered");
     }
     ble_svc_gap_device_name_set(s_name);
+#if BLE_SECURITY
     ble_store_config_init();
+#endif
     nimble_port_freertos_init(host_task);
     s_running = true;
     size_t after = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
