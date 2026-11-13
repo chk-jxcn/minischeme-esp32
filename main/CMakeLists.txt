@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "setup_portal.c"
         "market_host.c"
+        "ble.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -19,6 +20,7 @@ idf_component_register(
         esp_system
         lfsvfs
         esp_wifi
+        bt
         esp_http_server
         esp_http_client
         esp_lcd
@@ -47,3 +49,6 @@ add_custom_command(OUTPUT ${SETUP_PAGE_HDR}
 add_custom_target(setup_page_header DEPENDS ${SETUP_PAGE_HDR})
 add_dependencies(${COMPONENT_LIB} setup_page_header)
 target_include_directories(${COMPONENT_LIB} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+# the firmware is built for size (sdkconfig: COMPILER_OPTIMIZATION_SIZE, room for Bluetooth);
+# this component keeps the speed build: the main loop and the LCD output
+target_compile_options(${COMPONENT_LIB} PRIVATE -O2)

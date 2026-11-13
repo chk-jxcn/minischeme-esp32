@@ -6,3 +6,6 @@ idf_component_register(
     REQUIRES vfs esp_partition freertos log
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_NO_DEBUG LFS_NO_WARN)
+# the firmware is built for size (sdkconfig: COMPILER_OPTIMIZATION_SIZE, room for Bluetooth);
+# this component keeps the speed build: the file system
+target_compile_options(${COMPONENT_LIB} PRIVATE -O2)

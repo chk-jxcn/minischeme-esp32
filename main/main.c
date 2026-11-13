@@ -72,6 +72,7 @@
 #include "minischeme_jsonfeed.h"
 #include "minischeme_fontnet.h"
 #include "market_host.h"
+#include "ble.h"
 #include "minischeme.h"
 #include "minischeme_internal.h"
 #include "minischeme_lib.h"
@@ -199,6 +200,8 @@ static bool file_has_magic(const char *path, const char *magic);
 static bool root_app_shadowed(const char *path);
 static bool config_save(const char *section, const char *const *keys, const char *const *values, int n);
 static volatile bool s_tz_dirty;   /* [system] timezone* written: tz_poll applies it */
+static bool s_bt_on;     /* [bluetooth] bt_enabled = 1 and an app runs: the BLE stack is up (ble.c) */
+static bool s_bt_only;   /* and bt_only = 1: WiFi, the web page and the network services stay off */
 static void configured_boot_path(char *out, size_t cap);
 static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 #define EXEC_MAX_BYTES       (24 * 1024)
@@ -3875,6 +3878,8 @@ static bool config_apply(SystemConfig *cfg, const char *section, const char *key
          * (applib, the GUI's text settings, the market); rom_build_heap: retired */
     } else if (strncasecmp(key, "font_", 5) == 0) {
         /* [fonts]: applied by apply_font_config once the font ROM is mapped */
+    } else if (strncasecmp(key, "bt_", 3) == 0) {
+        /* [bluetooth] bt_enabled, bt_only, bt_name: read at boot (app_main) */
     } else if (strncasecmp(key, "timezone", 8) == 0) {
         /* [system] timezone, timezone_name, timezone_auto, timezone_place: tz_apply */
     } else if (strcasecmp(key, "http_stack") == 0) {
@@ -4570,6 +4575,18 @@ static Value prim_fs_list(MiniVM *vm, int argc, Value *argv) {
 
 /* (config-set! "section" "key" "value") => #t once /spiffs/config.ini holds
  * it (the value replaced in place, comments kept); read again at the next boot */
+/* (time-set! seconds): the clock from Unix time, for a board without network time (Bluetooth
+ * only: a phone sends it). Owner and system apps only. */
+static Value prim_time_set(MiniVM *vm, int argc, Value *argv) {
+    if (!mini_access_privileged(vm, "time-set!")) return mini_void();
+    if (argc != 1 || !mini_is_fixnum(argv[0]) || mini_to_fixnum(argv[0]) < 1700000000) {
+        vm_error(vm, "time-set!: expected Unix time in seconds");
+        return mini_void();
+    }
+    struct timeval tv = { .tv_sec = (time_t)mini_to_fixnum(argv[0]), .tv_usec = 0 };
+    return mini_make_bool(settimeofday(&tv, NULL) == 0);
+}
+
 static Value prim_config_set(MiniVM *vm, int argc, Value *argv) {
     if (!mini_access_privileged(vm, "config-set!")) return mini_void();
     if (argc < 3 || !mini_is_string(argv[0]) || !mini_is_string(argv[1]) || !mini_is_string(argv[2])) {
@@ -5445,6 +5462,8 @@ static MiniVM *create_app_vm(size_t heap) {
     mini_register_c_func(vm, "app-has-config?", prim_app_has_config);
     mini_register_c_func(vm, "app-member-folder", prim_app_member_folder);
     mini_register_c_func(vm, "config-set!", prim_config_set);
+    mini_register_c_func(vm, "time-set!", prim_time_set);
+    ble_register(vm);
     mini_register_c_func(vm, "app-config-set!", prim_app_config_set);
     mini_register_c_func(vm, "app-info", prim_app_info);
     mini_register_c_func(vm, "app-list", prim_app_list);
@@ -6232,18 +6251,64 @@ void app_main(void) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
              (unsigned)mini_gui_get_fb_ram());
 
-    /* 3. WiFi, SNTP and the HTTP API (started before the heap probe) */
-    esp32_wifi_early_init();
+    /* 3. The radios, SNTP and the HTTP API (started before the heap probe).
+     * [bluetooth] bt_enabled = 1: the BLE stack (ble.c); with bt_only = 1 WiFi is never
+     * started while an app runs (its RAM goes to the VM): no web page, no network time, no
+     * downloads. The system settings always run on WiFi alone, so the board can be
+     * configured whatever these say. */
+    {
+        char v[8] = "";
+        bool settings_boot = s_settings_boot == SETTINGS_BOOT_MAGIC;
+        s_bt_on = !settings_boot && ini_file_value("/spiffs/config.ini", "bt_enabled", v, sizeof(v)) && v[0] == '1';
+        v[0] = '\0';
+        s_bt_only = s_bt_on && ini_file_value("/spiffs/config.ini", "bt_only", v, sizeof(v)) && v[0] == '1';
+    }
+    ESP_LOGI(TAG, "Heap before the radios: free=%u B, largest=%u B (held for the VM: %u B)",
+             (unsigned)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)hold_bytes);
     tz_apply();   /* before the clock is read: [system] timezone, or the zone found last time */
-    esp32_sntp_init();
-    hal_wifi_connect(s_sys_cfg.wifi_ssid, s_sys_cfg.wifi_pass);
+    if (!s_bt_only) {
+        esp32_wifi_early_init();
+        esp32_sntp_init();
+        hal_wifi_connect(s_sys_cfg.wifi_ssid, s_sys_cfg.wifi_pass);
+    } else {
+        /* the TCP/IP stack without an interface: sockets fail at once instead of hanging */
+        esp_netif_init();
+        esp_event_loop_create_default();
+        ESP_LOGI(TAG, "WiFi off ([bluetooth] bt_only = 1): Bluetooth is this boot's only radio");
+    }
+    ESP_LOGI(TAG, "Heap after WiFi: free=%u B", (unsigned)esp_get_free_heap_size());
+    if (!s_bt_on) {
+        ble_release_memory();
+    } else {
+        /* the controller and the host need room the VM's block holds: it is let go while
+         * they start and held again after, so their RAM comes out of the VM's share */
+        char name[32] = "";
+        if (!ini_file_value("/spiffs/config.ini", "bt_name", name, sizeof(name)) || !name[0]) {
+            uint8_t mac[6] = { 0 };
+            esp_read_mac(mac, ESP_MAC_BT);
+            snprintf(name, sizeof(name), "Desk-%02X%02X", mac[4], mac[5]);
+        }
+        free(vm_heap_hold);
+        vm_heap_hold = NULL;
+        if (ble_start(name)) ESP_LOGI(TAG, "Bluetooth LE: started as %s, %u B of heap", name, (unsigned)ble_heap_used());
+        else ESP_LOGW(TAG, "Bluetooth LE: could not start");
+        hold_bytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (hold_bytes > VM_HEAP_HOLD_MAX) hold_bytes = VM_HEAP_HOLD_MAX;
+        vm_heap_hold = hold_bytes ? heap_caps_malloc(hold_bytes, MALLOC_CAP_8BIT) : NULL;
+    }
+    ESP_LOGI(TAG, "Heap after Bluetooth (%s): free=%u B, largest=%u B (held for the VM: %u B)",
+             s_bt_on ? "on" : "off, memory released", (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)hold_bytes);
     s_job_lock = xSemaphoreCreateMutex();
     s_job_done = xSemaphoreCreateBinary();
 #if MINISCHEME_FW_HTTP
     snprintf(s_http_password, sizeof(s_http_password), "%s", s_sys_cfg.http_password);
     /* [system] web_in_app = 0: no web page while an app runs (its RAM goes
      * to the app's VM); the system settings always have it */
-    if (s_sys_cfg.web_in_app || s_settings_boot == SETTINGS_BOOT_MAGIC) {
+    if (s_bt_only) {
+        ESP_LOGI(TAG, "HTTP server off (no WiFi)");
+    } else if (s_sys_cfg.web_in_app || s_settings_boot == SETTINGS_BOOT_MAGIC) {
         start_http_server();
     } else {
         ESP_LOGI(TAG, "HTTP server off while the app runs ([system] web_in_app = 0)");
@@ -6330,7 +6395,7 @@ void app_main(void) {
      * allocate meanwhile lands elsewhere, not in the middle of it (a split
      * block once left the VM 93 KB instead of 102). An absent network
      * delays the boot by WIFI_PROBE_WAIT_MS at most. */
-    if (s_sys_cfg.wifi_ssid[0]) {
+    if (s_sys_cfg.wifi_ssid[0] && !s_bt_only) {
         int64_t until = esp_timer_get_time() + (int64_t)WIFI_PROBE_WAIT_MS * 1000;
         while (!esp32_wifi_connected() && esp_timer_get_time() < until) vTaskDelay(pdMS_TO_TICKS(50));
         ESP_LOGI(TAG, "Heap probe %s", esp32_wifi_connected() ? "after WiFi joined" : "without WiFi (not joined in time)");
@@ -6548,6 +6613,17 @@ void app_main(void) {
         mini_market_poll();
         mini_fontnet_poll();   /* glyphs from the font server: a due request, a finished one */
         tz_poll(loop_t0 / 1000);   /* the time zone: a changed setting, the app server's answer */
+        {   /* research: the memory every 20 s on the console (no web page without WiFi) */
+            static int64_t s_mem_log_at;
+            if (s_bt_on && esp_timer_get_time() >= s_mem_log_at) {
+                s_mem_log_at = esp_timer_get_time() + 20000000;
+                ESP_LOGI(TAG, "Memory: free=%u B, min=%u B, largest=%u B, VM %u / %u B", (unsigned)esp_get_free_heap_size(),
+                         (unsigned)esp_get_minimum_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                         (unsigned)mini_get_allocated_bytes(s_vm), (unsigned)mini_get_heap_size(s_vm));
+            }
+        }
+        ble_poll(s_vm);            /* Bluetooth events for the app's (app-ble-event ev) */
+        check_app_error("app-ble-event");
         if (!s_settings_restart_at) mini_market_auto((uint32_t)(loop_t0 / 1000));
         if (s_factory_restart_at && esp_timer_get_time() >= s_factory_restart_at) {
             ESP_LOGW(TAG, "Restarting into the built-in settings after a factory reset");
