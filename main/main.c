@@ -240,13 +240,21 @@ static char *app_json_alloc(const char *path, const char *boot, bool with_meta);
 #endif
 #define WIFI_PROBE_WAIT_MS   4000        /* the heap probe waits this long for WiFi to join */
 /* Largest block claimed at boot for the VM heap (128 KB heap + VM struct/eden) */
+#if CONFIG_SPIRAM && !VM_HEAP_INTERNAL
+#define VM_HEAP_HOLD_MAX     0            /* megabytes of PSRAM: nothing splits the heap's block */
+#else
 #define VM_HEAP_HOLD_MAX     (136 * 1024)
+#endif
 #define OS_INIT_RESERVE      (56 * 1024)  /* free heap WiFi + HTTP need while starting */
 /* Defaults of the [display] / [memory] options in config.ini */
 #define CONFIG_VERSION        3
 #define DEF_BAND_LINES        13                    /* 320 px: 8.3 KB band + 16.6 KB DMA */
 #define DEF_LCD_CLOCK_HZ      (20 * 1000 * 1000)    /* verified at boot, lowered if needed */
+#if CONFIG_SPIRAM && !VM_HEAP_INTERNAL
+#define DEF_MAX_HEAP          (1024 * 1024)         /* in PSRAM; [memory] max_heap takes up to 4 MB */
+#else
 #define DEF_MAX_HEAP          (128 * 1024)
+#endif
 #define DEF_VM_EDEN           (4 * 1024)
 #define DEF_VM_STACK          1024
 #define DEF_VM_FRAMES         256
@@ -3953,12 +3961,32 @@ static void config_append_missing(const char *path, const char *key, const char 
     ESP_LOGI(TAG, "%s: added the section of '%s'", path, key);
 }
 
+/* After the template is written: it is the ESP32 desk display's, another board's panel size
+ * and heap limit (the defaults in cfg) go into the file too */
+static void board_config_overrides(const SystemConfig *cfg) {
+#if CONFIG_IDF_TARGET_ESP32S3
+    char w[12], h[12], heap[16];
+    snprintf(w, sizeof(w), "%d", cfg->width);
+    snprintf(h, sizeof(h), "%d", cfg->height);
+    snprintf(heap, sizeof(heap), "%u", (unsigned)cfg->max_heap);
+    const char *dkeys[2] = { "width", "height" };
+    const char *dvalues[2] = { w, h };
+    const char *mkeys[1] = { "max_heap" };
+    const char *mvalues[1] = { heap };
+    config_save("display", dkeys, dvalues, 2);
+    config_save("memory", mkeys, mvalues, 1);
+#else
+    (void)cfg;
+#endif
+}
+
 static void load_or_create_config(const char *path, SystemConfig *cfg) {
     config_defaults(cfg);
     FILE *fp = fopen(path, "r");
     if (!fp) {
         ESP_LOGI(TAG, "%s not found, writing the default configuration", path);
         if (!write_config_template(path)) ESP_LOGW(TAG, "Cannot write %s, using built-in defaults", path);
+        board_config_overrides(cfg);
         return;
     }
 
@@ -4009,6 +4037,7 @@ static void load_or_create_config(const char *path, SystemConfig *cfg) {
          * bands): replace them with the current template */
         ESP_LOGI(TAG, "Upgrading %s (version %d) to version %d defaults", path, version, CONFIG_VERSION);
         write_config_template(path);
+        board_config_overrides(cfg);
     } else {
         *cfg = parsed;
         if (cfg->reserved_heap == 80 * 1024 || cfg->reserved_heap == 76 * 1024 || cfg->reserved_heap == 64 * 1024) {
