@@ -326,6 +326,18 @@ void mini_get_stats(const MiniVM *vm, MiniStats *out);
 void mini_gc_stats_reset(MiniVM *vm);
 
 /**
+ * @brief Pause the collector: after one minor collection, allocations take room in the old
+ * generation and nothing is collected. ms > 0: for that long; 0: until mini_gc_resume().
+ * The pause also ends when the heap has no room left (the collector then runs as usual).
+ * @return false when the pause could not start (a timed pause on a build without a clock).
+ */
+bool mini_gc_pause(MiniVM *vm, uint32_t ms);
+/** @brief End a pause. @return whether the collector was still paused. */
+bool mini_gc_resume(MiniVM *vm);
+/** @brief Whether the collector is paused now. */
+bool mini_gc_paused(MiniVM *vm);
+
+/**
  * @brief Snapshot current global environment as the baseline.
  * Subsequent definitions will be treated as user-defined.
  */

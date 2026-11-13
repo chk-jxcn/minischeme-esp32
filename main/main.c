@@ -6424,10 +6424,10 @@ void app_main(void) {
         /* config.ini [matrix]: how the LEDs are wired and how bright they start. The status
          * LED of the other boards would light all 64: it stays off. */
         char v[16];
-        bool rgb = ini_file_value("/spiffs/config.ini", "matrix_order", v, sizeof(v)) && strcasecmp(v, "rgb") == 0;
+        bool rgb = !(ini_file_value("/spiffs/config.ini", "matrix_order", v, sizeof(v)) && strcasecmp(v, "grb") == 0);
         bool snake = ini_file_value("/spiffs/config.ini", "matrix_layout", v, sizeof(v)) &&
                      strcasecmp(v, "serpentine") == 0;
-        int turn = ini_file_value("/spiffs/config.ini", "matrix_rotate", v, sizeof(v)) ? atoi(v) / 90 : 0;
+        int turn = ini_file_value("/spiffs/config.ini", "matrix_rotate", v, sizeof(v)) ? atoi(v) / 90 : 2;
         mini_matrix_configure(rgb, snake, turn);
         if (ini_file_value("/spiffs/config.ini", "matrix_brightness", v, sizeof(v))) mini_matrix_set_brightness(atoi(v));
         if (mini_matrix_ready()) {

@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 
-#define MINI_API_ID_COUNT 431
+#define MINI_API_ID_COUNT 434
 /* the name of each number (NULL: a number no procedure has any more) */
 static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "void",  /* 0 */
@@ -440,6 +440,9 @@ static const char *const mini_api_id_names[MINI_API_ID_COUNT] = {
     "matrix-show",  /* 428 */
     "matrix-clear",  /* 429 */
     "matrix-brightness",  /* 430 */
+    "gc-pause",  /* 431 */
+    "gc-resume",  /* 432 */
+    "gc-paused?",  /* 433 */
 };
 
 typedef struct MiniApiIdEntry {
@@ -447,7 +450,7 @@ typedef struct MiniApiIdEntry {
     uint16_t id;
 } MiniApiIdEntry;
 
-#define MINI_API_ID_INDEX_COUNT 458
+#define MINI_API_ID_INDEX_COUNT 461
 /* names (older names too) sorted by strcmp, with their numbers: the compiler's %api-id */
 static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "*", 45 },
@@ -629,6 +632,9 @@ static const MiniApiIdEntry mini_api_id_index[MINI_API_ID_INDEX_COUNT] = {
     { "fs-rename", 364 },
     { "fs-size", 366 },
     { "fs-write", 357 },
+    { "gc-pause", 431 },
+    { "gc-paused?", 433 },
+    { "gc-resume", 432 },
     { "global-names", 31 },
     { "gpio-mode", 203 },
     { "gpio-off-change", 208 },

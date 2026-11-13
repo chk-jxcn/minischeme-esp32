@@ -176,9 +176,9 @@ static rmt_encoder_handle_t s_enc;
 static uint32_t s_pixels[MX_LEDS];          /* 0xRRGGBB, row by row from the top left */
 static uint8_t s_wire[MX_LEDS * 3];         /* as sent */
 static int s_brightness = 25;               /* percent of MINI_MATRIX_MAX_LEVEL */
-static bool s_rgb_order = false;
+static bool s_rgb_order = true;           /* as found on the board: R, G, B on the wire */
 static bool s_serpentine = false;
-static int s_rotate = 0;
+static int s_rotate = 2;                    /* quarter turns: LED 0 is at the bottom right as the board is read */
 static int64_t s_last_show_us = 0;
 
 bool mini_matrix_init(void) {

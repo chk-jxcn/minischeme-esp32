@@ -223,6 +223,31 @@ static Value prim_vm_stats(MiniVM *vm, int argc, Value *argv) {
     return lst;
 }
 
+/* (gc-pause [ms]) => boolean: no collections for ms milliseconds, or until (gc-resume) */
+static Value prim_gc_pause(MiniVM *vm, int argc, Value *argv) {
+    uint32_t ms = 0;
+    if (argc >= 1) {
+        if (!mini_is_fixnum(argv[0]) || mini_to_fixnum(argv[0]) <= 0) {
+            vm_error(vm, "gc-pause: expected a positive number of milliseconds (got %s)", mini_describe_type(argv[0]));
+            return mini_void();
+        }
+        ms = (uint32_t)mini_to_fixnum(argv[0]);
+    }
+    return mini_gc_pause(vm, ms) ? mini_true() : mini_false();
+}
+
+/* (gc-resume) => boolean: whether the collector was still paused */
+static Value prim_gc_resume(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    return mini_gc_resume(vm) ? mini_true() : mini_false();
+}
+
+/* (gc-paused?) => boolean */
+static Value prim_gc_paused(MiniVM *vm, int argc, Value *argv) {
+    (void)argc; (void)argv;
+    return mini_gc_paused(vm) ? mini_true() : mini_false();
+}
+
 /* (vm-stack-trace [on?]) => boolean: query or enable/disable stack trace */
 static Value prim_vm_stack_trace(MiniVM *vm, int argc, Value *argv) {
     if (argc == 0) {
@@ -1481,6 +1506,9 @@ const BuiltinCFuncEntry BUILTIN_CFUNCS[] = {
     { "set-car!", prim_set_car },
     { "vm-rom-bytes", prim_vm_rom_bytes },
     { "vm-stats", prim_vm_stats },
+    { "gc-pause", prim_gc_pause },
+    { "gc-resume", prim_gc_resume },
+    { "gc-paused?", prim_gc_paused },
     { "vm-stack-trace", prim_vm_stack_trace },
     { "set-cdr!", prim_set_cdr },
     { "list", prim_list },

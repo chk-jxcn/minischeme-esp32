@@ -362,6 +362,9 @@ struct MiniVM {
     size_t heap_size;
     size_t max_memory_bytes;
     bool   heap_at_limit;      /* the last major GC wanted a larger heap and did not get one */
+    bool   gc_paused;          /* mini_gc_pause(): the eden is closed, allocations go to the old generation */
+    uint32_t gc_pause_tick;
+    uint64_t gc_pause_until_us; /* 0: until mini_gc_resume() */
 
     /* Remembered Set (Tenured -> Eden pointers) */
     Value *remset;

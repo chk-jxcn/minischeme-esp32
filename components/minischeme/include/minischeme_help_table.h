@@ -108,6 +108,9 @@
     { "vm-frame-depth", "(vm-frame-depth)", "Language / Virtual machine", "Call frames in use." }, \
     { "vm-rom-bytes", "(vm-rom-bytes)", "Language / Virtual machine", "Size of the attached Code ROM image (0 when the app runs from RAM)." }, \
     { "vm-stats", "(vm-stats)", "Language / Virtual machine", "VM counters: GCs, allocation, live and peak heap, stack and frame peaks." }, \
+    { "gc-pause", "(gc-pause [ms])", "Language / Virtual machine", "Pauses the garbage collector: for ms milliseconds, or without ms until (gc-resume). For a stretch that must not be interrupted (an animation, a timed exchange with a device)." }, \
+    { "gc-resume", "(gc-resume)", "Language / Virtual machine", "Ends a collector pause started by (gc-pause). Nothing is collected at once: the collector runs again when it is next needed." }, \
+    { "gc-paused?", "(gc-paused?)", "Language / Virtual machine", "Whether the garbage collector is paused now." }, \
     { "vm-stack-trace", "(vm-stack-trace [on?])", "Language / Virtual machine", "Query or enable/disable stack trace capture upon errors (enabled by default in WASM, disabled on hardware)." }, \
     { "+", "(+ z ...)", "Language / Numbers", "Return the sum of the arguments (0 if no arguments)." }, \
     { "-", "(- z1 [z2 ...])", "Language / Numbers", "Subtract following arguments from z1, or negate z1." }, \

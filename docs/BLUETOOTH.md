@@ -222,6 +222,28 @@ VM 堆大小：S3 上默认 `max_heap` 是 1 MB（`config.ini [memory] max_heap`
 `EXTRA=-DMINI_GC_VERIFY` 每次回收后校验整个堆）。板上：scratchpad `s3run.py` + `gc_cases8.txt`。
 注意测试脚本的全局变量别和应用库重名（`big` 是 applib 画大字的函数，覆盖后应用渲染报错重启）。
 
+### 暂停回收：`gc-pause` / `gc-resume` / `gc-paused?`（API 1.20）
+
+给不能被打断的一小段用（动画、和外设的定时交互）。所有板都有，不分回收器。
+
+| 过程 | 作用 |
+|---|---|
+| `(gc-pause ms)` | 之后 ms 毫秒内不回收，到时间自动恢复 |
+| `(gc-pause)` | 一直不回收，直到 `(gc-resume)` |
+| `(gc-resume)` | 恢复；返回 `#t` 表示之前还在暂停，`#f` 表示暂停早已结束 |
+| `(gc-paused?)` | 现在是否暂停 |
+
+- **怎么做的**：开始暂停时做一次小回收把 eden 清空（不到 1 毫秒），然后把 eden 关上，新对象直接
+  放进老生代，不触发任何回收。恢复时什么也不回收，eden 重新打开。
+- **内存只增不减**：暂停期间垃圾不释放。堆放满时暂停自动结束、照常回收（不会报内存不足），
+  这一次是完整回收，停顿最长。所以暂停要短，暂停里少分配。
+- **暂停里分配更慢**：板上 2 万个 pair 平时 23 毫秒，暂停时 50 毫秒。
+- 再次调用 `(gc-pause ms)` 是重新设时间。应用切换会重启设备，暂停不会留到下一个应用。
+- 板上实测（矩阵板，1 MB 堆）：手动暂停期间分配 3000 个 pair，回收次数 0；`(gc-pause 200)` 在
+  201 毫秒时结束；一直暂停并不停分配，约 600 KB 后堆满，暂停自动结束，之后程序照常运行。
+- C 接口：`mini_gc_pause(vm, ms)`、`mini_gc_resume(vm)`、`mini_gc_paused(vm)`。没有时钟的构建
+  （WASM）只支持手动暂停，`(gc-pause ms)` 返回 `#f`。
+
 ## 8. 示例应用：蓝牙温湿度（thermo）
 
 在 minischeme-apps 的 `feature/bluetooth` 分支：`apps/thermo/`。读米家温湿度计 LYWSD03MMC：

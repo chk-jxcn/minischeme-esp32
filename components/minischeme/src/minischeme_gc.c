@@ -16,6 +16,11 @@
 #include "esp_memory_utils.h"
 #include "esp_timer.h"
 #define MINI_GC_NOW_US() ((uint64_t)esp_timer_get_time())
+#define MINI_GC_CLOCK_US() MINI_GC_NOW_US()
+#elif !defined(MINI_GC_CLOCK_US) && !defined(__wasm__)
+#include <time.h>
+/* Hosted builds: only the timed collector pause reads it */
+#define MINI_GC_CLOCK_US() ((uint64_t)clock() * 1000000u / (uint64_t)CLOCKS_PER_SEC)
 #endif
 
 /* ========================================================================= */
@@ -487,7 +492,7 @@ static void ms_collect_old(MiniVM *vm, size_t need) {
 }
 
 /* An object allocated in the old generation directly (too large for the eden). May collect. */
-static char *ms_alloc_old(MiniVM *vm, size_t sz) {
+static char *ms_alloc_old(MiniVM *vm, size_t sz, bool collect) {
     for (int pass = 0; pass < 3; pass++) {
         for (;;) {
             size_t got = 0;
@@ -522,6 +527,7 @@ static char *ms_alloc_old(MiniVM *vm, size_t sz) {
             if (!ms_sweeping(vm)) break;
             ms_sweep_step(vm, MS_SWEEP_FORCED);
         }
+        if (!collect) break;                 /* the collector is paused: the caller ends the pause */
         if (pass == 0) ms_collect_old(vm, sz);
         else if (pass == 1) major_gc(vm, sz);   /* fragmented: compact */
     }
@@ -1447,6 +1453,83 @@ void cheney_gc(MiniVM *vm, size_t needed_bytes) {
 #endif
 }
 
+/* ========================================================================= */
+/* Collector pause                                                           */
+/* ========================================================================= */
+
+/* While paused the eden is empty and closed (eden_limit == eden_hp), so every allocation comes
+ * here and takes room in the old generation without collecting: no object is young, nothing
+ * moves, no remembered set is needed. The pause ends by mini_gc_resume(), when its time is up,
+ * or when the old generation has no room left (then the collector runs as usual). */
+
+bool mini_gc_pause(MiniVM *vm, uint32_t ms) {
+    if (!vm) return false;
+    uint64_t until = 0;
+    if (ms > 0) {
+#ifdef MINI_GC_CLOCK_US
+        until = MINI_GC_CLOCK_US() + (uint64_t)ms * 1000u;
+        if (until == 0) until = 1;
+#else
+        return false;                        /* no clock: only the manual pause */
+#endif
+    }
+    if (!vm->gc_paused) {
+        uint64_t t0 = MINI_GC_NOW_US();
+        minor_gc(vm, 0);                     /* empty the eden */
+        gc_pause_done(vm, t0);
+        if (vm->eden_hp != vm->eden_start) return false;
+        vm->eden_limit = vm->eden_hp;
+        vm->gc_paused = true;
+        vm->gc_pause_tick = 0;
+    }
+    vm->gc_pause_until_us = until;
+    return true;
+}
+
+bool mini_gc_resume(MiniVM *vm) {
+    if (!vm || !vm->gc_paused) return false;
+    vm->gc_paused = false;
+    vm->gc_pause_until_us = 0;
+    vm->eden_limit = vm->eden_start + vm->eden_size;
+    return true;
+}
+
+bool mini_gc_paused(MiniVM *vm) {
+    if (!vm || !vm->gc_paused) return false;
+#ifdef MINI_GC_CLOCK_US
+    if (vm->gc_pause_until_us && MINI_GC_CLOCK_US() >= vm->gc_pause_until_us) mini_gc_resume(vm);
+#endif
+    return vm->gc_paused;
+}
+
+/* An allocation during a pause; NULL when the pause has just ended */
+static void *gc_alloc_paused(MiniVM *vm, size_t sz, MiniObjType type) {
+#ifdef MINI_GC_CLOCK_US
+    if (vm->gc_pause_until_us && (vm->gc_pause_tick++ & 15u) == 0 &&
+        MINI_GC_CLOCK_US() >= vm->gc_pause_until_us) {
+        mini_gc_resume(vm);
+        return NULL;
+    }
+#endif
+    HeapObj *obj = NULL;
+#if MINI_GC_MARKSWEEP
+    obj = (HeapObj *)ms_alloc_old(vm, sz, false);
+#else
+    if (vm->tenured_hp + sz <= vm->tenured_limit) {
+        obj = (HeapObj *)vm->tenured_hp;
+        vm->tenured_hp += sz;
+        vm->hp = vm->tenured_hp;
+    }
+#endif
+    if (!obj) {
+        mini_gc_resume(vm);                  /* out of room: collect after all */
+        return NULL;
+    }
+    obj->type = (uint32_t)type;
+    obj->size = (uint32_t)sz;
+    return (void *)obj;
+}
+
 void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
     size_t sz = ALIGN8(size);
     if (sz == 0) sz = 8;
@@ -1455,6 +1538,11 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
     mini_prof_alloc(sz, (unsigned)type);
 #endif
 
+    if (vm->gc_paused && vm->eden_hp + sz > vm->eden_limit) {
+        void *p = gc_alloc_paused(vm, sz, type);
+        if (p) return p;
+    }
+
     /* Fast path: bump allocation in Eden */
     if (vm->eden_hp + sz > vm->eden_limit) {
         uint64_t t0 = MINI_GC_NOW_US();
@@ -1462,7 +1550,7 @@ void *gc_alloc(MiniVM *vm, size_t size, MiniObjType type) {
         /* If Eden is still too small (sz > eden_size), allocate directly in Tenured */
         if (vm->eden_hp + sz > vm->eden_limit) {
 #if MINI_GC_MARKSWEEP
-            HeapObj *old = (HeapObj *)ms_alloc_old(vm, sz);
+            HeapObj *old = (HeapObj *)ms_alloc_old(vm, sz, true);
             gc_pause_done(vm, t0);
             if (old) {
                 old->type = (uint32_t)type;

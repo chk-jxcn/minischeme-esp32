@@ -67,19 +67,19 @@ esptool --chip esp32s3 -p COMx write-flash 0x0 bootloader.bin 0x8000 partition-t
 ```ini
 [matrix]
 matrix_brightness = 25        ; 开机亮度 0..100
-matrix_order = grb            ; LED 的颜色顺序：grb（默认）或 rgb
+matrix_order = rgb            ; LED 的颜色顺序：rgb（默认）或 grb
 matrix_layout = progressive   ; 每行同方向（默认）或 serpentine（隔行反向）
-matrix_rotate = 0             ; 0 / 90 / 180 / 270，顺时针
+matrix_rotate = 180           ; 0 / 90 / 180（默认）/ 270，顺时针
 ```
 
-这几个键新建的 config.ini 里没有，要用时自己加。LED 的排列和颜色顺序没有找到权威资料（原理图
-是图片），默认值是按普通 WS2812 矩阵猜的：如果红绿颠倒改 `matrix_order`，画面方向不对改
-`matrix_rotate`，隔行左右颠倒改 `matrix_layout`。
+这几个键新建的 config.ini 里没有，要用时自己加。默认值来自用户对测试图案的观察（2026-11-14）：
+最初按普通 WS2812 矩阵猜的 grb / 不旋转，实际看到的是整幅倒置、红绿互换，所以默认改成
+rgb / 180。板子换个方向摆放时改 `matrix_rotate`，隔行左右颠倒改 `matrix_layout`。
 
 ## 5. 验证过的和没验证的
 
 - 验证过（板子 COM62，192.168.2.153）：启动、WiFi、应用加载、8 个过程的返回值和报错、
   100 帧 239 毫秒。
-- **没验证**：LED 实际亮的位置和颜色（我看不到板子）。测试图案：左上角连续三颗红、右上角一颗
-  绿、左下角一颗蓝、右下角一颗白。
+- LED 的位置和颜色：第一次的测试图案用户看到的是倒置且红绿互换，默认值已改（见第 4 节）；
+  改后的图案（左上角连续三颗红、右上角一颗绿、左下角一颗蓝、右下角一颗白）还要用户再看一眼。
 - 没做：姿态传感器、针对 8×8 的示例应用、蓝牙在这块板上的测试。
