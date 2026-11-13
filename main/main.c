@@ -6345,6 +6345,10 @@ void app_main(void) {
             ESP_LOGI(TAG, "Bluetooth LE: started as %s, %u B of heap", name, (unsigned)ble_heap_used());
         }
         else ESP_LOGW(TAG, "Bluetooth LE: could not start");
+        /* one radio for both: with WiFi never sleeping (esp32_wifi_early_init) Bluetooth misses
+         * its slots (as a peripheral, half the connections broke while being set up, 0x3e);
+         * with modem sleep WiFi gives the radio up between beacons */
+        if (!s_bt_only && ble_running()) esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         /* held again, but no more than the VM will get: the rest of the start (the HTTP
          * server, the app's files) must not run out (with the whole block held, WiFi and
          * Bluetooth together left 84 B and the web page never came up) */

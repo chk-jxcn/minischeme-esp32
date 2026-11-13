@@ -351,7 +351,7 @@ static Value prim_scan_start(MiniVM *vm, int argc, Value *argv) {
             return mini_void();
         }
     }
-    if (s_scanning) ble_gap_disc_cancel();
+    if (ble_gap_disc_active()) ble_gap_disc_cancel();
     lock();
     s_seen_count = 0;
     unlock();
@@ -364,7 +364,7 @@ static Value prim_scan_start(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_scan_stop(MiniVM *vm, int argc, Value *argv) {
     (void)vm; (void)argc; (void)argv;
-    if (s_running && s_scanning) ble_gap_disc_cancel();
+    if (s_running && ble_gap_disc_active()) ble_gap_disc_cancel();
     s_scanning = false;
     return mini_true();
 }
@@ -541,8 +541,11 @@ static Value prim_connect(MiniVM *vm, int argc, Value *argv) {
         if (memcmp(s_seen[i].addr.val, peer.val, 6) == 0) peer.type = s_seen[i].addr.type;
     }
     unlock();
-    if (s_connecting) return mini_false();
-    if (s_scanning) { ble_gap_disc_cancel(); s_scanning = false; }
+    /* the stack says whether an attempt is on its way: s_connecting only remembers that the
+     * next failure belongs to the app's (ble-connect) */
+    if (ble_gap_conn_active()) return mini_false();
+    if (ble_gap_disc_active()) ble_gap_disc_cancel();
+    s_scanning = false;
     int rc = ble_gap_connect(s_own_addr_type, &peer, 10000, NULL, gap_event, NULL);
     s_connecting = rc == 0;
     if (rc != 0) ESP_LOGW(TAG, "connect: rc=%d", rc);
@@ -553,7 +556,9 @@ static Value prim_disconnect(MiniVM *vm, int argc, Value *argv) {
     BleConn *c = NULL;
     if (!conn_arg(vm, "ble-disconnect", argc, argv, &c)) return mini_void();
     if (!c) {
-        if (s_connecting) { ble_gap_conn_cancel(); s_connecting = false; }
+        /* no such link: an attempt on its way is given up (its disconnected event follows) */
+        if (ble_gap_conn_active()) ble_gap_conn_cancel();
+        else s_connecting = false;
         return mini_false();
     }
     return mini_make_bool(ble_gap_terminate(c->handle, BLE_ERR_REM_USER_CONN_TERM) == 0);
@@ -812,7 +817,7 @@ static Value prim_advertise(MiniVM *vm, int argc, Value *argv) {
             return mini_void();
         }
     }
-    if (s_advertising) ble_gap_adv_stop();
+    if (ble_gap_adv_active()) ble_gap_adv_stop();
     struct ble_hs_adv_fields f, r;
     memset(&f, 0, sizeof(f));
     memset(&r, 0, sizeof(r));
@@ -847,7 +852,7 @@ static Value prim_advertise(MiniVM *vm, int argc, Value *argv) {
 
 static Value prim_advertise_stop(MiniVM *vm, int argc, Value *argv) {
     (void)vm; (void)argc; (void)argv;
-    if (s_running && s_advertising) ble_gap_adv_stop();
+    if (s_running && ble_gap_adv_active()) ble_gap_adv_stop();
     s_advertising = false;
     return mini_true();
 }
@@ -895,17 +900,18 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             break;
         case BLE_GAP_EVENT_CONNECT: {
             bool ours = ble_gap_conn_find(event->connect.conn_handle, &desc) == 0 && desc.role == BLE_GAP_ROLE_MASTER;
+            ESP_LOGI(TAG, "connect event: status=%d handle=%u %s", event->connect.status,
+                     (unsigned)event->connect.conn_handle, ours ? "central" : "peripheral or unknown");
             if (event->connect.status != 0) {
-                if (s_connecting) {
+                if (s_connecting && !ble_gap_conn_active()) {
                     s_connecting = false;
                     push_event(EV_DISCONNECTED, 0xffff, 0, event->connect.status, NULL, 0);
-                } else {
-                    s_advertising = false;
                 }
+                s_advertising = ble_gap_adv_active() != 0;
                 break;
             }
             if (ours) s_connecting = false;
-            else s_advertising = false;         /* connectable advertising ends with a connection */
+            s_advertising = ble_gap_adv_active() != 0;   /* connectable advertising ends with a connection */
             lock();
             BleConn *c = conn_new(event->connect.conn_handle);
             if (c) {
@@ -919,15 +925,24 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
             if (ours) ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
             break;
         }
-        case BLE_GAP_EVENT_DISCONNECT:
+        case BLE_GAP_EVENT_DISCONNECT: {
+            /* a link the app was never told about (it broke while being set up, reason 0x3e):
+             * reported as the end of its (ble-connect), conn #f */
+            bool known;
             lock();
             {
                 BleConn *c = conn_find(event->disconnect.conn.conn_handle);
+                known = c != NULL;
                 if (c) conn_free(c);
             }
             unlock();
-            push_event(EV_DISCONNECTED, event->disconnect.conn.conn_handle, 0, event->disconnect.reason, NULL, 0);
+            ESP_LOGI(TAG, "disconnect event: handle=%u reason=%d%s", (unsigned)event->disconnect.conn.conn_handle,
+                     event->disconnect.reason, known ? "" : " (never reported connected)");
+            if (!ble_gap_conn_active()) s_connecting = false;
+            push_event(EV_DISCONNECTED, known ? event->disconnect.conn.conn_handle : 0xffff, 0, event->disconnect.reason,
+                       NULL, 0);
             break;
+        }
         case BLE_GAP_EVENT_ADV_COMPLETE:
             s_advertising = false;
             break;
@@ -1040,9 +1055,10 @@ void ble_poll(MiniVM *vm) {
 static const char *state_name(void) {
     if (!s_running) return "off";
     if (!s_synced) return "starting";
-    if (s_connecting) return "connecting";
-    if (s_scanning) return "scanning";
-    if (s_advertising) return "advertising";
+    /* asked of the stack: a flag kept here goes stale with one lost event */
+    if (ble_gap_conn_active()) return "connecting";
+    if (ble_gap_disc_active()) return "scanning";
+    if (ble_gap_adv_active()) return "advertising";
     return "idle";
 }
 

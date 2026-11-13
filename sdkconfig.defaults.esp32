@@ -14,3 +14,6 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
 CONFIG_BTDM_CTRL_BLE_MAX_CONN=2
 CONFIG_BTDM_SCAN_DUPL_CACHE_SIZE=20
+# a connection that breaks while being set up (0x3e, common next to WiFi) is tried again by
+# the host, up to 3 times (the default on the ESP32-S3)
+CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=y
