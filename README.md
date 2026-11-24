@@ -55,6 +55,9 @@ font_server_face =     ; the face asked for (empty: the system font's, simsun), 
 ```
 RAM: about 1.3 KB while it fills gaps, 4.8 KB with `font_server_first` (measured on a board), plus up to 4 KB during a request. `(font-server)` reports its state.
 
+### Simplified / traditional Chinese
+`[fonts] font_chinese` draws all Chinese on screen in one script: `keep` (default, as written), `simplified` or `traditional`. The device page, the built-in settings (简繁) and the WebREPL set it; it applies at once. The conversion is character by character (`components/minischeme/src/minischeme_hanzi.c`, tables from `tools/make_hanzi_table.py`, which uses the Windows conversion): strings never change, only what text layout decodes, so drawing, widths and wrapping agree. A character with several counterparts takes one of them (后 / 後, 发 / 發 / 髮 may come out wrong). Traditional glyphs are not in the GB2312 font ROM: the font server supplies them the first time.
+
 ## Configuration (`/spiffs/config.ini`)
 The firmware writes a commented default file on first boot; the WebREPL's setup dialog and the device web page edit it. Main keys:
 ```ini

@@ -148,6 +148,8 @@ h2 button.small{margin-top:-4px}
 <select id="fsfirst"><option value="0">板载字体优先：服务器只补板载字库没有的字</option><option value="1">服务器字体优先：系统文字用服务器的字体（字形下载到之前先显示板载字体）</option></select>
 <label for="fsface">向服务器要的字体（留空：板载系统字体，即 simsun；服务器字体优先时可以填服务器上有的字体，如 msyh、simhei）</label>
 <input id="fsface" placeholder="simsun" maxlength="15">
+<label for="chinese">简繁（屏幕上的中文逐字转换成简体或繁体，保存后立即生效；繁体字形第一次显示时从字体服务器下载）</label>
+<select id="chinese"><option value="keep">不转换（按原文显示）</option><option value="simplified">简体</option><option value="traditional">繁体</option></select>
 <div class="desc" id="fsstate"></div>
 <div class="desc" id="chstate"></div>
 <div class="desc">连接方式：明文 HTTP。设备 ID（WiFi MAC）和这台服务器的应用服务密码（base64 编码，不是加密）放在请求头里，网络上的人能看到，请不要用在别处用过的密码。没有设置密码时只带设备 ID。硬件密码只保护本网页和 HTTP 接口，可以随时修改。</div>
@@ -570,6 +572,7 @@ async function refresh() {
   keep('fsurl', state.font_server);
   keep('fsface', state.font_server_face);
   keep('fsfirst', state.font_server_first === '1' ? '1' : '0');
+  keep('chinese', /^(simplified|traditional)$/.test(state.font_chinese || '') ? state.font_chinese : 'keep');
   if (document.activeElement !== $('fson')) $('fson').checked = !/^(0|false|no|off)$/i.test(state.font_server_on || '1');
   $('fsstate').innerHTML = fontServerText(state);
   $('chstate').innerHTML = channelText(state);
@@ -1140,6 +1143,7 @@ async function saveCommon(andRestart) {
                 'market.market_auto_update': $('mauto').checked ? '1' : '0',
                 'fonts.font_server_on': $('fson').checked ? '1' : '0',
                 'fonts.font_server_first': $('fsfirst').value,
+                'fonts.font_chinese': $('chinese').value,
                 'system.web_in_app': $('webapp').checked ? '1' : '0',
                 'system.factory_reset_key': $('frkey').checked ? '1' : '0',
                 'display.panel': $('panel').value,

@@ -35,6 +35,7 @@
 #include "minischeme_fontnet.h"
 #include "minischeme_fontrom.h"
 #include "minischeme_gui.h"
+#include "minischeme_hanzi.h"
 #include "minischeme_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -625,6 +626,8 @@ int mini_font_advance(const MiniFont *font, uint32_t codepoint) {
     return codepoint < 128 ? 8 : font->height;
 }
 
+/* The next character of UTF-8 text as it is drawn: in the script config.ini [fonts]
+ * font_chinese chose (minischeme_hanzi.h). Only text layout decodes with it. */
 uint32_t mini_utf8_next(const unsigned char **pp) {
     const unsigned char *p = *pp;
     unsigned char c = *p++;
@@ -640,7 +643,7 @@ uint32_t mini_utf8_next(const unsigned char **pp) {
         p += 1;
     }
     *pp = p;
-    return cp;
+    return mini_hanzi_map(cp);
 }
 
 int mini_font_text_width(int font_id, const char *utf8_str) {

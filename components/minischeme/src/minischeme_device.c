@@ -3,6 +3,7 @@
  * @brief Shared device runtime: clock formatting, lunar calendar, 1 Hz tick.
  */
 
+#include "minischeme_hanzi.h"
 #include "minischeme_device.h"
 #include "minischeme_internal.h"
 #include "minischeme_gui.h"
@@ -1203,6 +1204,9 @@ const char mini_device_config_template[] =
     ";                        first for system-font text (any face it has; the board's glyphs stand\n"
     ";                        in until the server's arrive)\n"
     "font_server_face =     ; the face asked for, e.g. msyh (empty: the system font's, simsun)\n"
+    "font_chinese = keep    ; Chinese on screen: keep (as written), simplified or traditional: each\n"
+    ";                        character is drawn in that script (traditional glyphs come from\n"
+    ";                        the font server the first time)\n"
     "\n"
     "[app]\n"
     "; keys every app reads with (config-get \"key\"); an app's own config.ini in its folder\n"
@@ -1276,7 +1280,10 @@ const char mini_device_config_fonts_section[] =
     "font_server_first = 0  ; 0: the board's fonts first, the server fills gaps; 1: the server's face\n"
     ";                        first for system-font text (any face it has; the board's glyphs stand\n"
     ";                        in until the server's arrive)\n"
-    "font_server_face =     ; the face asked for, e.g. msyh (empty: the system font's, simsun)\n";
+    "font_server_face =     ; the face asked for, e.g. msyh (empty: the system font's, simsun)\n"
+    "font_chinese = keep    ; Chinese on screen: keep (as written), simplified or traditional: each\n"
+    ";                        character is drawn in that script (traditional glyphs come from\n"
+    ";                        the font server the first time)\n";
 
 /* Appended to a config.ini written before the [text] options existed */
 const char mini_device_config_text_section[] =
@@ -1375,6 +1382,15 @@ void mini_device_apply_fontnet_config(const char *ini) {
     bool has_face = ini && mini_device_config_value(ini, "font_server_face", face, sizeof(face));
     mini_fontnet_configure(has_url ? url : NULL, !has_on || strcmp(on, "0") != 0,
                            has_first && strcmp(first, "1") == 0, has_face ? face : "");
+    /* simplified / traditional Chinese: everything on screen is drawn again in the new script */
+    char script[24];
+    int mode = ini && mini_device_config_value(ini, "font_chinese", script, sizeof(script)) ?
+               mini_hanzi_parse(script) : MINI_HANZI_KEEP;
+    if (mode < 0) mode = MINI_HANZI_KEEP;
+    if (mode != mini_hanzi_mode()) {
+        mini_hanzi_set_mode(mode);
+        mini_gui_invalidate(0, mini_gui_get_height());
+    }
 }
 
 static bool key_equals(const char *p, size_t n, const char *key) {

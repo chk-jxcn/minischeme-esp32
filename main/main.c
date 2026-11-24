@@ -1988,7 +1988,7 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                         "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                         "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
                                         "panel", "font_server", "font_server_on", "font_server_first", "font_server_face",
-                                        "timezone", "timezone_name", "timezone_auto", "timezone_place" };
+                                        "font_chinese", "timezone", "timezone_name", "timezone_auto", "timezone_place" };
     enum { NKEYS = sizeof(keys) / sizeof(keys[0]) };
     char (*vals)[200] = (char (*)[200])malloc(NKEYS * 200);
     if (!cfg || !out || !esc || !vals) {
@@ -2025,7 +2025,7 @@ static esp_err_t http_settings_get(httpd_req_t *req) {
                                          "app_storage_kb", "button_long_ms", "button_mid_ms", "button_hold_ms",
                                          "auto_backlight", "backlight", "backlight_offset", "backlight_min", "backlight_max",
                                          "panel", "font_server", "font_server_on", "font_server_first", "font_server_face",
-                                         "timezone", "timezone_name", "timezone_auto", "timezone_place" };
+                                         "font_chinese", "timezone", "timezone_name", "timezone_auto", "timezone_place" };
     /* the servers this device uses: with a password or not, the last outcome */
     n += (size_t)snprintf(out + n, SETTINGS_JSON_CAP - n, ",\"device_id\":\"%s\",\"channel\":", s_chan_id);
     n += mini_chan_status_json(out + n, 1100);
@@ -2271,7 +2271,7 @@ static esp_err_t http_settings_post(httpd_req_t *req) {
         if (strncmp(key, "button_", 7) == 0) buttons = true;
         if (strcmp(key, "auto_backlight") == 0 || strncmp(key, "backlight", 9) == 0) backlight_upd = true;
         if (panel_ips >= 0) s_panel_request = panel_ips;   /* the main loop owns the LCD bus */
-        if (strncmp(key, "font_server", 11) == 0) s_fontnet_dirty = true;
+        if (strncmp(key, "font_server", 11) == 0 || strcmp(key, "font_chinese") == 0) s_fontnet_dirty = true;
         if (is_server_key(key) || server_pw || strcmp(key, "hardware_password") == 0) channel_upd = true;
         ESP_LOGI(TAG, "Settings page: [%s] %s set", section, key);
     }
@@ -5470,6 +5470,9 @@ static bool config_save(const char *section, const char *const *keys, const char
     const char *path = "/spiffs/config.ini", *tmp = "/spiffs/config.tmp";
     for (int i = 0; i < n; i++) {
         if (strncmp(keys[i], "timezone", 8) == 0) s_tz_dirty = true;   /* the main loop: tz_poll */
+#if MINISCHEME_FW_HTTP
+        if (strcmp(keys[i], "font_chinese") == 0) s_fontnet_dirty = true;   /* (config-set! from the settings app) */
+#endif
     }
     FILE *fp = fopen(path, "rb");
     long size = 0;
@@ -6505,7 +6508,7 @@ void app_main(void) {
             apply_panel(s_panel_request == 1);
             s_panel_request = -1;
         }
-        if (s_fontnet_dirty) {   /* [fonts] font_server* from the settings page */
+        if (s_fontnet_dirty) {   /* [fonts] font_server*, font_chinese from the settings page or app */
             s_fontnet_dirty = false;
             char *cfg = read_small_file("/spiffs/config.ini", 32 * 1024);
             mini_device_apply_fontnet_config(cfg);

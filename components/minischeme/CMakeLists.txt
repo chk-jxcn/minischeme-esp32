@@ -14,6 +14,7 @@ idf_component_register(
         "src/minischeme_fontreg.c"
         "src/minischeme_fontrom.c"
         "src/minischeme_fontnet.c"
+        "src/minischeme_hanzi.c"
         "src/minischeme_mirror.c"
         "src/minischeme_ili9488.c"
         "src/minischeme_help.c"
